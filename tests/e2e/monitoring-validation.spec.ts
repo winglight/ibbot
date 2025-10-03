@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test';
 import {
   baseLogs,
-  influxSeries,
+  metricsSeries,
   queueSnapshot,
   stubMonitoringApis,
   tailLogs,
@@ -146,7 +146,7 @@ test.describe('monitoring validation', () => {
       }));
     });
 
-    const expectedMetric = influxSeries[0].metric;
+    const expectedMetric = metricsSeries[0].metric;
     const dataset = chartDatasets.find((entry: any) => entry.label === expectedMetric);
     expect(dataset, `Expected dataset for ${expectedMetric}`).toBeTruthy();
     const datasetData = dataset!.data.map((point: any) => ({
@@ -154,7 +154,7 @@ test.describe('monitoring validation', () => {
       value: Number(point.y),
     }));
 
-    const expectedByTime = new Map(influxSeries.map((entry) => [entry.time, entry.value]));
+    const expectedByTime = new Map(metricsSeries.map((entry) => [entry.time, entry.value]));
     const chartComparisons = datasetData.map(({ time, value }) => {
       const expectedValue = expectedByTime.get(time);
       expect(expectedValue, `Expected value for ${time}`).not.toBeUndefined();
@@ -169,7 +169,7 @@ test.describe('monitoring validation', () => {
       };
     });
 
-    await testInfo.attach('influx-series-comparison', {
+    await testInfo.attach('metrics-series-comparison', {
       body: JSON.stringify(chartComparisons, null, 2),
       contentType: 'application/json',
     });
@@ -180,13 +180,13 @@ test.describe('monitoring validation', () => {
     expect(averageMatch).not.toBeNull();
     const averageFromUi = Number(averageMatch![1]);
     const expectedAverage =
-      influxSeries.reduce((acc, entry) => acc + entry.value, 0) / influxSeries.length;
+      metricsSeries.reduce((acc, entry) => acc + entry.value, 0) / metricsSeries.length;
     expect(Math.abs(averageFromUi - expectedAverage)).toBeLessThan(1e-6);
 
     const pointsMatch = summaryText!.match(/\((\d+)\s*点\)/);
     expect(pointsMatch).not.toBeNull();
     const pointsFromUi = Number(pointsMatch![1]);
-    expect(pointsFromUi).toBe(influxSeries.length);
+    expect(pointsFromUi).toBe(metricsSeries.length);
 
     await expect(page.locator('#logsContent')).toContainText(baseLogs[0].trim());
     await page.evaluate(() => {

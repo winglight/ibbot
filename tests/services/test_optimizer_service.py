@@ -59,10 +59,10 @@ def test_submit_task_records_progress_and_result() -> None:
     redis = create_fake_redis()
 
     async def scenario() -> None:
-        async def influx_query(_: str) -> list[dict[str, Any]]:
+        async def db_query(_: str) -> list[dict[str, Any]]:
             return [{"value": 0.5}, {"value": 0.75}]
 
-        service = OptimizerService(redis_factory=lambda: redis, influx_query=influx_query)
+        service = OptimizerService(redis_factory=lambda: redis, db_query=db_query)
 
         await redis.hset(
             "hash:optimizer:strategy:demo:config",
@@ -83,7 +83,7 @@ def test_submit_task_records_progress_and_result() -> None:
         submission = TaskSubmission(
             task_id="task-1",
             strategy_id="demo",
-            training_query="from(bucket:\"signals\")",
+            training_query="SELECT value FROM market_events",
         )
 
         result = await service.submit_task(submission)
@@ -120,7 +120,7 @@ def test_get_result_returns_parsed_payload() -> None:
             },
         )
 
-        service = OptimizerService(redis_factory=lambda: redis, influx_query=lambda _: [])
+        service = OptimizerService(redis_factory=lambda: redis, db_query=lambda _: [])
 
         result = await service.get_result("task-2")
         assert result.task_id == "task-2"
@@ -150,10 +150,10 @@ def test_fastapi_endpoints_submit_and_read_results() -> None:
 
     asyncio.run(setup())
 
-    async def influx_query(_: str) -> list[dict[str, Any]]:
+    async def db_query(_: str) -> list[dict[str, Any]]:
         return [{"value": 0.4}, {"value": 0.6}, {"value": 0.8}]
 
-    service = OptimizerService(redis_factory=lambda: redis, influx_query=influx_query)
+    service = OptimizerService(redis_factory=lambda: redis, db_query=db_query)
     app = create_app(service=service)
 
     client = TestClient(app)
@@ -162,7 +162,7 @@ def test_fastapi_endpoints_submit_and_read_results() -> None:
         json={
             "task_id": "task-api",
             "strategy_id": "api",
-            "training_query": "from(bucket:\"signals\")",
+            "training_query": "SELECT value FROM market_events",
         },
     )
     assert response.status_code == 200

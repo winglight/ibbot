@@ -44,7 +44,7 @@
 | --- | --- |
 | 阶段 1 | `python scripts/diagnose_foundation.py` 返回全绿；`data/logs/` 写入权限正常。 |
 | 阶段 2 | Redis 中存在服务配置键（`hash:config:<service>`）；`services/<name>/main.py` 日志无异常；Influx `service_metrics` 出现对应服务写入。 |
-| 阶段 3 | 访问主站 `/rapidoc`、`/api/monitoring/influx/write-rate` 成功；前端监控卡片可展示队列和 Influx 指标。 |
+| 阶段 3 | 访问主站 `/rapidoc`、`/api/monitoring/metrics/write-rate` 成功；前端监控卡片可展示队列和写入速率指标。 |
 | 阶段 4 | `pytest tests`、`pytest tests/e2e`、`pytest tests/perf`、`pytest tests/failover` 全部通过；`./scripts/deploy.sh up --env production` 能在目标环境跑通。 |
 
 ## 2. 监控指标与诊断入口
@@ -61,9 +61,9 @@
 
 ### 2.2 常用监控命令
 
-- **Influx 写入速率**（`service_metrics` measurement）：
+- **写入速率（MariaDB `service_metrics`）**：
   ```bash
-  curl "http://localhost:8000/api/monitoring/influx/write-rate?service=market-data-service&aggregate=sum"
+  curl "http://localhost:8000/api/monitoring/metrics/write-rate?service=market-data-service&aggregate=sum"
   ```
 - **队列堆积情况**：
   ```bash
@@ -144,7 +144,7 @@
 ## 4. 交付前检查清单
 
 1. `./scripts/deploy.sh up --env local --build` 成功并通过诊断。
-2. 监控接口 `/api/monitoring/influx/write-rate` 与 Queue Monitor 快照均有数据。
+2. 监控接口 `/api/monitoring/metrics/write-rate` 与 Queue Monitor 快照均有数据。
 3. 测试命令按《测试清单》执行并通过。
 4. 更新 `docs/deployment.md`、`docs/service_delivery_overview.md`、`docs/tests.md` 后，与实现差异再次校对。
 

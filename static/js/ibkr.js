@@ -246,8 +246,8 @@ class IBKRConnectionManager {
         });
     }
 
-    requestInfluxWriteRate(options = {}) {
-        const payload = { type: 'request_influx_write_rate' };
+    requestMetricsWriteRate(options = {}) {
+        const payload = { type: 'request_metrics_write_rate' };
         if (options.window) payload.window = options.window;
         if (options.service) payload.service = options.service;
         if (options.metric) payload.metric = options.metric;
@@ -255,7 +255,7 @@ class IBKRConnectionManager {
         if (options.requestId) payload.request_id = options.requestId;
         if (options.force) payload.force = true;
         const minInterval = Number.isFinite(options.minInterval) ? Math.max(0, Number(options.minInterval)) : 10000;
-        return this._sendThrottled('influx_write_rate', payload, {
+        return this._sendThrottled('metrics_write_rate', payload, {
             force: Boolean(options.force),
             minInterval,
         });
