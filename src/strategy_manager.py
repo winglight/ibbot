@@ -15,7 +15,7 @@ import sys
 import asyncio
 from collections.abc import Mapping
 from copy import deepcopy
-from threading import RLock, Thread
+from threading import RLock
 from pathlib import Path
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -31,7 +31,13 @@ from typing import (
     Union,
     Coroutine,
     Sequence,
+    Callable,
+    Awaitable,
+    TypeVar,
 )
+from concurrent.futures import Future as ThreadFuture
+
+T = TypeVar("T")
 from dataclasses import dataclass, asdict
 from loguru import logger
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -162,7 +168,7 @@ class StrategyManager:
         ] = []
         self._connection_restore_task: Optional[asyncio.Task] = None
         self._event_loop: Optional[asyncio.AbstractEventLoop] = None
-        self._background_tasks: Set[asyncio.Task] = set()
+        self._background_tasks: Set[Union[asyncio.Task[Any], ThreadFuture[Any]]] = set()
         self._strategies_cache: Dict[str, Any] = {
             "data": None,
             "expires_at": 0.0,
@@ -191,6 +197,123 @@ class StrategyManager:
 
         # 加载数据
         self._load_from_database()
+
+    def _add_background_future(
+        self,
+        future: Union[asyncio.Task[Any], ThreadFuture[Any]],
+        *,
+        description: str = "background task",
+    ) -> None:
+        """Track background work and surface unexpected failures."""
+
+        self._background_tasks.add(future)
+
+        def _cleanup(done: Union[asyncio.Task[Any], ThreadFuture[Any]]) -> None:
+            self._background_tasks.discard(done)
+            if done.cancelled():
+                return
+            try:
+                done.result()
+            except Exception as exc:  # pragma: no cover - defensive guard
+                strategy_logger.warning(
+                    "Background task failed", task=description, error=str(exc)
+                )
+
+        future.add_done_callback(_cleanup)
+
+    def _call_from_executor(
+        self,
+        func: Callable[..., T],
+        *args: Any,
+        description: str = "background task",
+        block: bool = False,
+        **kwargs: Any,
+    ) -> Optional[T]:
+        """Run ``func`` on the shared CPU executor and optionally block."""
+
+        future = self._async_executor.run_in_cpu(func, *args, **kwargs)
+
+        if block:
+            try:
+                return future.result()
+            except Exception as exc:  # pragma: no cover - defensive guard
+                strategy_logger.warning(
+                    "Executor task failed", task=description, error=str(exc)
+                )
+                return None
+            finally:
+                self._background_tasks.discard(future)
+
+        self._add_background_future(future, description=description)
+        return None
+
+    @staticmethod
+    def _run_coroutine_in_new_loop(coro: Awaitable[T]) -> T:
+        """Execute ``coro`` inside a dedicated temporary event loop."""
+
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            return loop.run_until_complete(coro)
+        finally:
+            try:  # pragma: no cover - shutdown helpers not easily triggered in tests
+                loop.run_until_complete(loop.shutdown_asyncgens())
+            except Exception:
+                pass
+            asyncio.set_event_loop(None)
+            loop.close()
+
+    def _ensure_background_loop_task(
+        self,
+        coro: Coroutine[Any, Any, T],
+        *,
+        block: bool = False,
+        description: str = "background task",
+    ) -> Optional[T]:
+        """Schedule ``coro`` safely regardless of the current thread state."""
+
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+
+        if running_loop and running_loop.is_running():
+            task = running_loop.create_task(coro)
+            self._add_background_future(task, description=description)
+            if block:
+                strategy_logger.warning(
+                    "Blocking execution requested while running inside an event loop; proceeding asynchronously.",
+                    task=description,
+                )
+            return None
+
+        target_loop = (
+            self._event_loop if self._event_loop and self._event_loop.is_running() else None
+        )
+        if target_loop:
+            future = asyncio.run_coroutine_threadsafe(coro, target_loop)
+            if block:
+                try:
+                    return future.result()
+                except Exception as exc:  # pragma: no cover - defensive guard
+                    strategy_logger.warning(
+                        "Background coroutine failed on manager loop",
+                        task=description,
+                        error=str(exc),
+                    )
+                    return None
+                finally:
+                    self._background_tasks.discard(future)
+
+            self._add_background_future(future, description=description)
+            return None
+
+        return self._call_from_executor(
+            self._run_coroutine_in_new_loop,
+            coro,
+            description=description,
+            block=block,
+        )
 
     def set_dependencies(
         self,
@@ -230,65 +353,11 @@ class StrategyManager:
         self, coro: Coroutine[Any, Any, Any], *, block: bool = False
     ) -> None:
         """Execute or schedule a coroutine used for cache maintenance."""
-
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-
-        if loop and loop.is_running():
-            task = loop.create_task(coro)
-            self._background_tasks.add(task)
-
-            def _cleanup(task: asyncio.Task) -> None:
-                self._background_tasks.discard(task)
-                if task.cancelled():
-                    return
-                try:
-                    task.result()
-                except Exception as exc:  # pragma: no cover - defensive guard
-                    strategy_logger.warning(
-                        "Strategy cache task failed",
-                        error=str(exc),
-                    )
-
-            task.add_done_callback(_cleanup)
-            if block:
-                strategy_logger.warning(
-                    "Cache coroutine requested with block=True while event loop running; scheduled asynchronously.",
-                )
-            return
-
-        target_loop = self._event_loop
-        if target_loop and target_loop.is_running():
-            future = asyncio.run_coroutine_threadsafe(coro, target_loop)
-            if block:
-                try:
-                    future.result()
-                except Exception as exc:  # pragma: no cover - defensive guard
-                    strategy_logger.warning(
-                        "Strategy cache coroutine failed", error=str(exc)
-                    )
-            return
-
-        def _run_in_thread() -> None:
-            try:
-                asyncio.run(coro)
-            except Exception as exc:  # pragma: no cover - defensive guard
-                strategy_logger.warning(
-                    "Strategy cache coroutine failed during synchronous execution",
-                    error=str(exc),
-                )
-
-        worker = Thread(
-            target=_run_in_thread,
-            name="strategy-cache-maintenance",
-            daemon=True,
+        self._ensure_background_loop_task(
+            coro,
+            block=block,
+            description="strategy-cache-maintenance",
         )
-        worker.start()
-
-        if block:
-            worker.join()
 
     def _request_strategy_cache_rebuild(
         self,
@@ -370,20 +439,30 @@ class StrategyManager:
                     payload[name] = stats
             return payload
 
-        try:
-            return asyncio.run(_collect())
-        except RuntimeError:
-            target_loop = self._event_loop
-            if target_loop and target_loop.is_running():
-                future = asyncio.run_coroutine_threadsafe(_collect(), target_loop)
-                try:
-                    return future.result()
-                except Exception as exc:  # pragma: no cover - defensive guard
-                    strategy_logger.debug(
-                        "Failed to gather cached stats via event loop",
-                        error=str(exc),
-                    )
-            return {}
+        target_loop = (
+            self._event_loop if self._event_loop and self._event_loop.is_running() else None
+        )
+        if target_loop:
+            future = asyncio.run_coroutine_threadsafe(
+                _collect(),
+                target_loop,
+            )
+            try:
+                return future.result()
+            except Exception as exc:  # pragma: no cover - defensive guard
+                strategy_logger.debug(
+                    "Failed to gather cached stats via event loop",
+                    error=str(exc),
+                )
+                return {}
+
+        result = self._call_from_executor(
+            self._run_coroutine_in_new_loop,
+            _collect(),
+            description="strategy-cache-stats",
+            block=True,
+        )
+        return result or {}
 
     def _compute_cached_performance(
         self,
@@ -396,21 +475,28 @@ class StrategyManager:
                 strategy, start_date=start_date, end_date=end_date
             )
 
-        try:
-            return asyncio.run(_compute())
-        except RuntimeError:
-            target_loop = self._event_loop
-            if target_loop and target_loop.is_running():
-                future = asyncio.run_coroutine_threadsafe(_compute(), target_loop)
-                try:
-                    return future.result()
-                except Exception as exc:  # pragma: no cover - defensive guard
-                    strategy_logger.debug(
-                        "Failed to compute cached performance via event loop",
-                        strategy=strategy,
-                        error=str(exc),
-                    )
-            return None
+        target_loop = (
+            self._event_loop if self._event_loop and self._event_loop.is_running() else None
+        )
+        if target_loop:
+            future = asyncio.run_coroutine_threadsafe(_compute(), target_loop)
+            try:
+                return future.result()
+            except Exception as exc:  # pragma: no cover - defensive guard
+                strategy_logger.debug(
+                    "Failed to compute cached performance via event loop",
+                    strategy=strategy,
+                    error=str(exc),
+                )
+                return None
+
+        result = self._call_from_executor(
+            self._run_coroutine_in_new_loop,
+            _compute(),
+            description="strategy-cache-performance",
+            block=True,
+        )
+        return result
 
     def _clear_strategy_cache(self, strategy: str, *, block: bool = False) -> None:
         self._schedule_cache_coroutine(clear_strategy_cache(strategy), block=block)
@@ -538,9 +624,17 @@ class StrategyManager:
             loop = self._event_loop
 
         if loop and loop.is_running():
-            loop.create_task(coro)
-        else:  # pragma: no cover - fallback for sync contexts
-            asyncio.run(coro)
+            task = loop.create_task(coro)
+            self._add_background_future(
+                task,
+                description="notification-dispatch",
+            )
+            return
+
+        self._ensure_background_loop_task(
+            coro,
+            description="notification-dispatch",
+        )
 
     def _record_data_push_event(
         self,
@@ -1566,7 +1660,11 @@ class StrategyManager:
                 symbol=log_symbol,
                 force_restart=force_restart,
             )
-            immediate_loop.create_task(_activate())
+            task = immediate_loop.create_task(_activate())
+            self._add_background_future(
+                task,
+                description=f"data-push-activation({strategy_name})",
+            )
             return
 
         target_loop = self._event_loop if self._event_loop and self._event_loop.is_running() else None
@@ -1578,18 +1676,22 @@ class StrategyManager:
                 symbol=log_symbol,
                 force_restart=force_restart,
             )
-            asyncio.run_coroutine_threadsafe(_activate(), target_loop)
+            self._ensure_background_loop_task(
+                _activate(),
+                description=f"data-push-activation({strategy_name})",
+            )
             return
 
         strategy_logger.info(
-            "Deferring data push activation until loop available",
+            "Scheduling data push activation via executor",
             strategy=strategy_name,
             subscription=log_subscription,
             symbol=log_symbol,
             force_restart=force_restart,
         )
-        self._pending_data_push_requests.append(
-            (strategy_name, subscription, symbol, force_restart)
+        self._ensure_background_loop_task(
+            _activate(),
+            description=f"data-push-activation({strategy_name})",
         )
 
     def get_data_push_state(self, strategy_name: str) -> Dict[str, Any]:
@@ -1623,15 +1725,17 @@ class StrategyManager:
             loop = None
 
         if loop and loop.is_running():
-            loop.create_task(_disable())
+            task = loop.create_task(_disable())
+            self._add_background_future(
+                task,
+                description=f"data-push-disable({strategy_name})",
+            )
             return
 
-        target_loop = self._event_loop if self._event_loop and self._event_loop.is_running() else None
-        if target_loop:
-            asyncio.run_coroutine_threadsafe(_disable(), target_loop)
-            return
-
-        asyncio.run(_disable())
+        self._ensure_background_loop_task(
+            _disable(),
+            description=f"data-push-disable({strategy_name})",
+        )
 
     async def set_data_push(
         self,
