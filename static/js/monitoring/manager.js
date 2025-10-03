@@ -2184,11 +2184,28 @@
                 // 预填充风险规则与开关状态
                 try {
                     let rule = (this.riskRules && this.riskRules[symbol]) ? this.riskRules[symbol] : null;
-                    if (!rule) {
-                        const riskResp = await this.apiCall('/risk_rules');
-                        this.riskRules = riskResp.rules || {};
-                        rule = this.riskRules[symbol];
+
+                    try {
+                        const riskResp = await this.apiCall('/risk_rules?force_refresh=true');
+                        if (riskResp && typeof riskResp === 'object') {
+                            this.riskRules = riskResp.rules || {};
+                            if (symbol && this.riskRules) {
+                                rule = this.riskRules[symbol] || rule;
+                            }
+                        }
+                    } catch (refreshErr) {
+                        console.warn('Failed to refresh risk rules for monitor modal:', refreshErr);
+                        if (!rule) {
+                            try {
+                                const fallbackResp = await this.apiCall('/risk_rules');
+                                this.riskRules = fallbackResp.rules || {};
+                                rule = this.riskRules[symbol];
+                            } catch (fallbackErr) {
+                                console.warn('Fallback risk rules fetch failed:', fallbackErr);
+                            }
+                        }
                     }
+
                     const toggle = document.getElementById('monitorRiskToggle');
                     if (toggle) toggle.checked = !!(rule && rule.enabled);
 
