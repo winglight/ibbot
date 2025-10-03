@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from loguru import logger
 
@@ -14,6 +14,9 @@ from src.ibbot.influx import InfluxConfig, configure_influx
 from src.utils import now_local
 from src.websocket_manager import WebSocketManager, websocket_manager
 
+if TYPE_CHECKING:  # pragma: no cover - import for type checking only
+    from src.order_manager import OrderManager
+
 
 @dataclass(slots=True)
 class CoreContainer:
@@ -23,6 +26,7 @@ class CoreContainer:
     influx_config: InfluxConfig | None
     config_provider: ConfigProvider | None
     websocket_manager: WebSocketManager
+    order_manager: "OrderManager | None"
 
 
 _container: CoreContainer | None = None
@@ -96,6 +100,7 @@ async def initialise(*, force: bool = False) -> CoreContainer:
         influx_config=influx_config,
         config_provider=config_provider,
         websocket_manager=websocket_manager,
+        order_manager=None,
     )
 
     set_container(container)

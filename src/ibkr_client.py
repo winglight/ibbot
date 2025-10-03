@@ -190,6 +190,7 @@ class IBKRClient:
 
         # Track commission/PnL updates when the orders service is unavailable.
         self._order_fill_cache: Dict[str, Dict[str, Any]] = {}
+        self._orders_service_client: Optional[OrdersServiceClient] = None
 
         # Counter for simulated order identifiers when trading is disabled
         self._simulated_order_id = itertools.count(start=-1, step=-1)
@@ -2655,7 +2656,13 @@ class IBKRClient:
         cache_entry["pending_service_sync"] = False
         self._order_fill_cache[oid] = cache_entry
 
-        client = _get_orders_service_client()
+        client = getattr(self, "_orders_service_client", None)
+        if client is None:
+            client = _get_orders_service_client()
+            try:
+                self._orders_service_client = client
+            except AttributeError:  # pragma: no cover - instance bypassed __init__
+                pass
         try:
             await client.update_order_fill_metrics(oid, payload)
         except ServiceUnavailableError as exc:

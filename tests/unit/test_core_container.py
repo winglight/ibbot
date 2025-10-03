@@ -21,7 +21,7 @@ class DummyConfigProvider:
         self.closed = True
 
 
-def test_initialise_without_order_manager(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_initialise_sets_order_manager_slot(monkeypatch: pytest.MonkeyPatch) -> None:
     dummy_redis = object()
     influx_config = {"mock": True}
 
@@ -43,11 +43,11 @@ def test_initialise_without_order_manager(monkeypatch: pytest.MonkeyPatch) -> No
         assert container.influx_config == influx_config
         assert isinstance(container.config_provider, DummyConfigProvider)
         assert container.config_provider.started is True
-        assert not hasattr(container, "order_manager")
+        assert hasattr(container, "order_manager")
+        assert container.order_manager is None
         assert core_container.require_container() is container
 
-        with pytest.raises(AttributeError):
-            getattr(core, "order_manager")
+        assert getattr(core, "order_manager") is None
 
         await core_container.shutdown()
         return container.config_provider
