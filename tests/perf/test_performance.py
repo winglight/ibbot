@@ -17,9 +17,11 @@ def test_performance_benchmark_meets_thresholds() -> None:
         f"p95_latency={result.p95_latency:.6f}"
     )
     assert result.total_events == 4000
-    assert result.write_batches > 0
+    assert result.persistence_calls > 0
+    assert result.persistence_time >= 0
 
     metrics = {sample.metric: sample for sample in result.service_metric_samples}
-    assert set(metrics) == {"throughput", "latency"}
+    assert set(metrics) == {"throughput", "latency", "persistence"}
     assert metrics["latency"].details["p95"] == result.p95_latency
     assert metrics["throughput"].value >= thresholds.min_throughput
+    assert metrics["persistence"].details["total_time"] == result.persistence_time

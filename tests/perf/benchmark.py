@@ -37,7 +37,8 @@ class BenchmarkResult:
     p95_latency: float
     duration: float
     total_events: int
-    write_batches: int
+    persistence_calls: int
+    persistence_time: float
     service_metric_samples: list[MetricSample] = field(default_factory=list)
     thresholds: BenchmarkThresholds = field(default_factory=BenchmarkThresholds)
 
@@ -62,14 +63,17 @@ class _EventSink:
 
     def __init__(self) -> None:
         self.events: list[dict[str, Any]] = []
-        self.write_calls = 0
+        self.persistence_calls = 0
+        self.persistence_time = 0.0
 
-    def write_batch(self, batch: Iterable[dict[str, Any]]) -> None:
+    def persist_batch(self, batch: Iterable[dict[str, Any]]) -> None:
         materialised = [dict(entry) for entry in batch]
         if not materialised:
             return
-        self.write_calls += 1
+        start = time.perf_counter()
         self.events.extend(materialised)
+        self.persistence_calls += 1
+        self.persistence_time += time.perf_counter() - start
 
 
 def _percentile(latencies: Sequence[float], percentile: float) -> float:
@@ -121,10 +125,10 @@ async def _consume_events(
         processed += 1
         queue.task_done()
         if len(batch) >= batch_size:
-            sink.write_batch(batch)
+            sink.persist_batch(batch)
             batch.clear()
     if batch:
-        sink.write_batch(batch)
+        sink.persist_batch(batch)
 
 
 async def _run_async(
@@ -184,6 +188,13 @@ async def _run_async(
             status=status,
             details={"p95": p95_latency},
         ),
+        MetricSample(
+            service="perf-benchmark",
+            metric="persistence",
+            value=float(sink.persistence_calls),
+            status=status,
+            details={"total_time": sink.persistence_time},
+        ),
     ]
 
     return BenchmarkResult(
@@ -192,7 +203,8 @@ async def _run_async(
         p95_latency=p95_latency,
         duration=duration,
         total_events=len(sink.events),
-        write_batches=sink.write_calls,
+        persistence_calls=sink.persistence_calls,
+        persistence_time=sink.persistence_time,
         service_metric_samples=metric_samples,
         thresholds=thresholds,
     )
