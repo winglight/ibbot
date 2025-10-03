@@ -7,7 +7,7 @@ import os
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timezone, tzinfo as datetime_tzinfo
 from typing import Any, Awaitable, Callable, Deque, Dict, Iterable, Mapping
 
 from zoneinfo import ZoneInfo
@@ -34,6 +34,23 @@ def _serialise_datetime(value: datetime | None) -> str:
     if value is None:
         return ""
     return value.isoformat()
+
+
+def _extract_timezone_name(
+    tzinfo: datetime_tzinfo | None, reference: datetime | None = None
+) -> str | None:
+    if tzinfo is None:
+        return None
+    if hasattr(tzinfo, "key"):
+        key = getattr(tzinfo, "key")
+        if isinstance(key, str):
+            return key
+    if reference is None:
+        reference = _utc_now()
+    name = tzinfo.tzname(reference)
+    if isinstance(name, str) and name:
+        return name
+    return None
 
 
 def _maybe_json_loads(value: Any) -> Any:
@@ -125,6 +142,69 @@ def _first_nonempty(*candidates: Any) -> Any:
             return text
         return candidate
     return None
+
+
+def _resolve_start_date(
+    start_date: datetime | str | None,
+    tz: str | None,
+    *,
+    default_timezone: str,
+) -> tuple[datetime, str | None]:
+    start_dt: datetime | None
+    if isinstance(start_date, datetime):
+        start_dt = start_date
+    elif isinstance(start_date, str):
+        start_dt = _parse_datetime(start_date)
+    else:
+        start_dt = None
+
+    tzinfo: datetime_tzinfo | None = None
+    effective_timezone: str | None = tz if tz else None
+
+    if start_dt is None:
+        timezone_candidates = [tz, default_timezone, "UTC"]
+        for candidate in timezone_candidates:
+            if not candidate:
+                continue
+            try:
+                tzinfo = ZoneInfo(candidate)
+            except Exception:
+                continue
+            effective_timezone = candidate
+            break
+        if tzinfo is None:
+            tzinfo = timezone.utc
+            effective_timezone = "UTC"
+        now = _utc_now().astimezone(tzinfo)
+        start_dt = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    else:
+        if tz:
+            try:
+                tzinfo = ZoneInfo(tz)
+            except Exception:
+                tzinfo = None
+            else:
+                effective_timezone = tz
+        if start_dt.tzinfo is None:
+            if tzinfo is None:
+                try:
+                    tzinfo = ZoneInfo(default_timezone)
+                    effective_timezone = default_timezone
+                except Exception:
+                    tzinfo = timezone.utc
+                    effective_timezone = "UTC"
+            start_dt = start_dt.replace(tzinfo=tzinfo)
+        elif tzinfo is not None:
+            start_dt = start_dt.astimezone(tzinfo)
+        else:
+            tzinfo = start_dt.tzinfo
+            if effective_timezone is None:
+                effective_timezone = _extract_timezone_name(tzinfo, start_dt)
+
+    if effective_timezone is None:
+        effective_timezone = _extract_timezone_name(start_dt.tzinfo, start_dt)
+
+    return start_dt, effective_timezone
 
 
 _REQUEST_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
@@ -692,108 +772,75 @@ class OrdersRuntime:
         if offset < 0:
             offset = 0
 
-        start_dt: datetime | None
-        if isinstance(start_date, datetime):
-            start_dt = start_date
-        elif isinstance(start_date, str):
-            start_dt = _parse_datetime(start_date)
-        else:
-            start_dt = None
+        start_dt, effective_timezone = _resolve_start_date(
+            start_date,
+            tz,
+            default_timezone=self.default_timezone,
+        )
 
-        effective_timezone = tz if tz else None
-        tzinfo: ZoneInfo | None = None
-        if start_dt is None:
-            timezone_candidates = [tz, self.default_timezone, "UTC"]
-            for candidate in timezone_candidates:
-                if not candidate:
-                    continue
-                try:
-                    tzinfo = ZoneInfo(candidate)
-                except Exception:
-                    continue
-                else:
-                    effective_timezone = candidate
-                    break
-            if tzinfo is not None:
-                now = _utc_now().astimezone(tzinfo)
-            else:
-                now = _utc_now()
-            start_dt = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        else:
-            if tz:
-                try:
-                    tzinfo = ZoneInfo(tz)
-                except Exception:
-                    tzinfo = None
-                else:
-                    effective_timezone = tz
-            if tzinfo is not None:
-                if start_dt.tzinfo is None:
-                    start_dt = start_dt.replace(tzinfo=tzinfo)
-                elif tz:
-                    start_dt = start_dt.astimezone(tzinfo)
-            elif start_dt.tzinfo is None:
-                start_dt = start_dt.replace(tzinfo=timezone.utc)
+        threshold_tzinfo = start_dt.tzinfo
 
         async with self._lock:
             combined: list[dict[str, Any]] = []
             combined.extend(self._active_orders.values())
             combined.extend(self._history)
-            ordered = sorted(
-                (_normalise_order_record(order) for order in combined),
-                key=lambda item: item.get("updated_at") or item.get("requested_at") or "",
+
+            normalised = [
+                _normalise_order_record(order)
+                for order in combined
+            ]
+
+            normalised.sort(
+                key=lambda item: item.get("updated_at")
+                or item.get("requested_at")
+                or "",
                 reverse=True,
             )
 
-            if start_dt is not None:
-                threshold = start_dt
-                filtered_orders: list[dict[str, Any]] = []
-
-                def _record_timestamp(record: Mapping[str, Any]) -> datetime | None:
-                    timestamp: datetime | None = None
-                    for key in (
-                        "updated_at",
-                        "submitted_at",
-                        "requested_at",
-                        "completed_at",
-                        "created_at",
-                        "timestamp",
-                    ):
-                        candidate = record.get(key)
-                        parsed = _parse_datetime(candidate)
-                        if parsed is None and isinstance(candidate, str):
-                            try:
-                                parsed = datetime.fromisoformat(candidate)
-                            except Exception:
-                                continue
-                        if parsed is None:
+            def _record_timestamp(record: Mapping[str, Any]) -> datetime | None:
+                for key in (
+                    "updated_at",
+                    "submitted_at",
+                    "requested_at",
+                    "completed_at",
+                    "created_at",
+                    "timestamp",
+                ):
+                    candidate = record.get(key)
+                    parsed = _parse_datetime(candidate)
+                    if parsed is None and isinstance(candidate, str):
+                        try:
+                            parsed = datetime.fromisoformat(candidate)
+                        except Exception:
                             continue
-                        if parsed.tzinfo is None:
-                            if threshold.tzinfo is not None:
-                                parsed = parsed.replace(tzinfo=threshold.tzinfo)
-                            else:
-                                parsed = parsed.replace(tzinfo=timezone.utc)
-                        elif threshold.tzinfo is not None:
-                            parsed = parsed.astimezone(threshold.tzinfo)
-                        timestamp = parsed
-                        break
-                    return timestamp
+                    if parsed is None:
+                        continue
+                    if parsed.tzinfo is None:
+                        if threshold_tzinfo is not None:
+                            parsed = parsed.replace(tzinfo=threshold_tzinfo)
+                        else:
+                            parsed = parsed.replace(tzinfo=timezone.utc)
+                    elif threshold_tzinfo is not None:
+                        parsed = parsed.astimezone(threshold_tzinfo)
+                    return parsed
+                return None
 
-                for order in ordered:
-                    order_timestamp = _record_timestamp(order)
-                    if order_timestamp is None or order_timestamp >= threshold:
-                        filtered_orders.append(order)
-                ordered = filtered_orders
+            filtered_orders: list[dict[str, Any]] = []
+            for order in normalised:
+                order_timestamp = _record_timestamp(order)
+                if order_timestamp is None or order_timestamp >= start_dt:
+                    filtered_orders.append(order)
 
-            total = len(ordered)
+            total = len(filtered_orders)
             if limit:
-                sliced = ordered[offset : offset + limit]
+                sliced = filtered_orders[offset : offset + limit]
             else:
-                sliced = ordered[offset:]
+                sliced = filtered_orders[offset:]
             updated_at = self._last_updated_at
             last_event_id = self._last_message_id or ""
             page = offset // limit if limit else 0
-        start_iso = _serialise_datetime(start_dt) if start_dt is not None else None
+
+        start_iso = _serialise_datetime(start_dt)
         return {
             "orders": sliced,
             "total": total,

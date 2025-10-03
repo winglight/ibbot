@@ -84,8 +84,10 @@ def test_orders_payload_includes_start_date_metadata() -> None:
         [{"order_id": "1"}],
         limit=5,
         start_date="2024-05-01T00:00:00+08:00",
+        start_date_timezone="Asia/Shanghai",
         page=1,
         total=1,
     )
 
     assert payload["meta"]["start_date"] == "2024-05-01T00:00:00+08:00"
+    assert payload["meta"]["start_date_timezone"] == "Asia/Shanghai"

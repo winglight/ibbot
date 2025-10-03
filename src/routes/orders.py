@@ -367,6 +367,11 @@ async def list_orders(
         response.setdefault("start_date", trimmed_start)
         meta.setdefault("start_date", trimmed_start)
 
+    start_date_timezone = response.get("start_date_timezone")
+    if start_date_timezone:
+        response["start_date_timezone"] = start_date_timezone
+        meta.setdefault("start_date_timezone", start_date_timezone)
+
     response.setdefault("success", True)
     response.setdefault("limit", limit)
     response.setdefault("page", page)
