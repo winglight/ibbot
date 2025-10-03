@@ -3,7 +3,7 @@
 ## 背景
 策略面板、策略详情页以及账户概览最初直接从 SQLite 或 IBKR API 拉取数据并实时聚合。迁移到微服务架构后，读取路径已经改成通过订单/风控/策略服务的 HTTP 客户端，但缓存策略仍沿用“实时聚合”的旧假设：
 
-- `StrategyManager.get_strategy_performance`、`get_strategy_order_stats` 每次调用都会遍历大量订单并在内存中重新计算总盈亏、胜率、最大回撤和 Sharpe。
+- 旧的 `StrategyManager`（已退场）在 `get_strategy_performance`、`get_strategy_order_stats` 等接口中每次都会遍历大量订单并在内存中重新计算总盈亏、胜率、最大回撤和 Sharpe。
 - `/api/strategies/{name}/pnl/daily`、WebSocket `strategy_performance` 依赖同一条计算链路，命中频率高时容易阻塞。
 - `/api/account_info`、`/api/positions` 在每次轮询时都回源至 IBKR 客户端，只做了极短暂的进程级缓存，导致响应慢且消耗连接数。
 - `/api/account/daily-summary` 会遍历全部订单按日聚合，随着订单数量增长成本迅速增大。
@@ -51,7 +51,7 @@
 
 ### 回填与清理
 
-- 新增 `StrategyManager.rebuild_strategy_cache()`：通过 `OrdersServiceClient.list_orders` 按时间顺序重放订单至缓存。应用启动时执行一次；在 `StrategyManager.reset_strategy_data`、策略删除/重命名时同时清理相关 Redis key。
+- 策略服务运行时提供的回放任务通过 `OrdersServiceClient.list_orders` 按时间顺序重放订单至缓存。应用启动时执行一次；在策略删除/重命名时同时清理相关 Redis key。
 - 若检测到缓存缺失（例如 Redis 重启），接口调用时可触发延迟回填（后台任务），保障用户看到的数据始终可用。
 
 ### 读取路径改造
@@ -95,7 +95,7 @@
 ## 后续工作清单
 
 1. 实现 `src/cache.py`（或 `src/utils/cache.py`）提供统一的 Redis 客户端与 pipeline 辅助方法。
-2. 在应用初始化阶段（如 `core/__init__.py`）加载 Redis 配置并注入到 StrategyManager、IBKRClient 等组件；订单事件由 `services/orders` 负责写入。
+2. 在应用初始化阶段（如 `core/__init__.py`）加载 Redis 配置并注入到策略服务运行时、IBKRClient 等组件；订单事件由 `services/orders` 负责写入。
 3. 按上述触发点更新订单处理流程，并确保单元测试覆盖 Filled 事件的缓存写入。
 4. 为回填与清理逻辑编写 CLI/脚本或管理接口，方便在 Redis 数据损坏时重建。
 5. 更新部署文档与 Docker Compose，确保 Redis 服务在默认环境中可用，并在 `.env.example` 中说明相关变量。

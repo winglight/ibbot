@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from src.routes import account as account_module
-from src.routes.service_clients import ServiceUnavailableError
+from src.routes.service_clients import AccountServiceResult, ServiceUnavailableError
 
 
 @pytest.fixture()
@@ -43,11 +43,18 @@ def test_account_info_returns_service_payload(account_app: FastAPI, monkeypatch:
         def __init__(self) -> None:
             self.info_calls: list[bool] = []
 
-        async def fetch_info(self, *, force_refresh: bool = False) -> dict[str, Any]:
+        async def fetch_info(
+            self, *, force_refresh: bool = False
+        ) -> AccountServiceResult:
             self.info_calls.append(force_refresh)
-            return {"equity": 123.45, "connected": True}
+            return AccountServiceResult(
+                data={"equity": 123.45, "connected": True},
+                metadata={"source": "service", "from_cache": False},
+            )
 
-        async def fetch_positions(self, *, fast: bool = False, force_refresh: bool = False) -> Any:
+        async def fetch_positions(
+            self, *, fast: bool = False, force_refresh: bool = False
+        ) -> AccountServiceResult:
             raise AssertionError("positions fetch should not be called")
 
     stub_client = StubClient()
@@ -89,11 +96,11 @@ def test_positions_returns_cached_snapshot_when_service_unavailable(account_app:
     with TestClient(account_app) as client:
         response = client.get("/api/positions", params={"force_refresh": "true"})
 
-    assert response.status_code == 503
+    assert response.status_code == 200
     payload = response.json()
-    assert payload["detail"] == "Account service unavailable"
-    assert payload["snapshot"]["positions"] == snapshot["data"]
-    assert payload["snapshot"]["from_cache"] is True
+    assert payload["from_cache"] is True
+    assert payload["positions"] == snapshot["data"]
+    assert payload.get("warning") == "Account service unavailable"
 
 
 def test_backfill_commissions_returns_503_when_queue_unavailable(account_app: FastAPI, monkeypatch: pytest.MonkeyPatch) -> None:

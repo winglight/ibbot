@@ -1,6 +1,5 @@
-import asyncio
 import json
-from typing import Any
+from typing import Any, Mapping
 
 import httpx
 import pytest
@@ -12,28 +11,24 @@ from src.routes import strategy as strategy_module
 from src.routes import market_data as market_data_module
 
 
-class StubOrdersClient:
+class QueueRecorder:
     def __init__(self) -> None:
-        self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.commands: list[tuple[str, dict[str, Any]]] = []
         self.should_fail = False
 
-    async def list_orders(self, **_: Any) -> dict[str, Any]:
-        return {"orders": []}
-
-    async def place_order(self, payload: dict[str, Any]) -> dict[str, Any]:
-        self.calls.append(("place_order", dict(payload)))
+    async def enqueue(self, payload: dict[str, Any], *, queue_key: str) -> None:
         if self.should_fail:
-            raise orders_module.ServiceUnavailableError("orders", "offline")
-        return {"command_id": "cmd-001", "status": "accepted"}
+            raise RuntimeError("redis offline")
+        self.commands.append((queue_key, dict(payload)))
 
 
 @pytest.fixture()
-def orders_app(monkeypatch: pytest.MonkeyPatch) -> tuple[FastAPI, StubOrdersClient]:
+def orders_app(monkeypatch: pytest.MonkeyPatch) -> tuple[FastAPI, QueueRecorder]:
     app = FastAPI()
     app.include_router(orders_module.router)
     orders_module.set_websocket_broadcast_override(None)
 
-    client = StubOrdersClient()
+    recorder = QueueRecorder()
 
     async def allow_user(request: Request) -> str:
         request.state.is_read_only = False
@@ -42,7 +37,6 @@ def orders_app(monkeypatch: pytest.MonkeyPatch) -> tuple[FastAPI, StubOrdersClie
         return "tester"
 
     app.dependency_overrides[orders_module.get_current_user] = allow_user
-    app.dependency_overrides[orders_module.get_orders_service_client] = lambda: client
 
     async def noop_audit(*_: Any, **__: Any) -> None:
         return None
@@ -50,11 +44,24 @@ def orders_app(monkeypatch: pytest.MonkeyPatch) -> tuple[FastAPI, StubOrdersClie
     monkeypatch.setattr(orders_module, "audit_log_success", noop_audit)
     monkeypatch.setattr(orders_module, "audit_log_failure", noop_audit)
 
-    return app, client
+    async def fake_enqueue(payload: dict[str, Any], *, queue_key: str) -> None:
+        await recorder.enqueue(payload, queue_key=queue_key)
+
+    async def fake_queue_key() -> str:
+        return "queue:test"
+
+    class FakeUUID:
+        hex = "cmd-001"
+
+    monkeypatch.setattr(orders_module, "enqueue_ib_command", fake_enqueue)
+    monkeypatch.setattr(orders_module, "_resolve_command_queue_key", fake_queue_key)
+    monkeypatch.setattr(orders_module.uuid, "uuid4", lambda: FakeUUID())
+
+    return app, recorder
 
 
-def test_place_order_calls_orders_service(orders_app: tuple[FastAPI, StubOrdersClient]) -> None:
-    app, client_stub = orders_app
+def test_place_order_enqueues_command(orders_app: tuple[FastAPI, QueueRecorder]) -> None:
+    app, recorder = orders_app
 
     with TestClient(app) as client:
         response = client.post(
@@ -72,14 +79,16 @@ def test_place_order_calls_orders_service(orders_app: tuple[FastAPI, StubOrdersC
     assert response.status_code == 200
     payload = response.json()
     assert payload["command_id"] == "cmd-001"
-    assert client_stub.calls and client_stub.calls[0][0] == "place_order"
+    assert recorder.commands and recorder.commands[0][0] == "queue:test"
+    queued_payload = recorder.commands[0][1]
+    assert queued_payload["method"] == "place_order"
 
 
-def test_place_order_returns_503_when_service_offline(
-    orders_app: tuple[FastAPI, StubOrdersClient]
+def test_place_order_returns_503_when_queue_unavailable(
+    orders_app: tuple[FastAPI, QueueRecorder]
 ) -> None:
-    app, client_stub = orders_app
-    client_stub.should_fail = True
+    app, recorder = orders_app
+    recorder.should_fail = True
 
     with TestClient(app) as client:
         response = client.post(
@@ -95,13 +104,16 @@ def test_place_order_returns_503_when_service_offline(
         )
 
     assert response.status_code == 503
-    assert response.json()["detail"] == "Orders service unavailable"
+    assert response.json()["detail"] == "Failed to enqueue order command"
 
 
 @pytest.fixture()
 def strategy_app(monkeypatch: pytest.MonkeyPatch) -> FastAPI:
     class StubClient:
         async def request(self, method: str, path: str, **kwargs: Any) -> Any:
+            raise strategy_module.ServiceUnavailableError("strategy", "offline")
+
+        async def submit_external_order(self, payload: Mapping[str, Any]) -> Any:
             raise strategy_module.ServiceUnavailableError("strategy", "offline")
 
     stub = StubClient()

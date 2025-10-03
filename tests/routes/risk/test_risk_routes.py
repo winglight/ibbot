@@ -46,6 +46,11 @@ class StubRiskServiceClient:
         "position_sizing": {"success": True, "contracts": 1, "N": 1},
         "fetch_sizing_history": {"success": True, "data": []},
         "fetch_config_rules": {"success": True, "rules": {}},
+        "create_rule": {"success": True},
+        "update_rule": {"success": True},
+        "delete_rule": {"success": True},
+        "update_config": {"success": True},
+        "update_config_rules": {"success": True},
     }
 
     def __init__(self) -> None:
@@ -65,6 +70,29 @@ class StubRiskServiceClient:
     async def position_sizing(self, payload: Mapping[str, Any]) -> Any:
         return await self._call("position_sizing", dict(payload))
 
+    async def create_rule(self, payload: Mapping[str, Any]) -> Any:
+        return await self._call("create_rule", dict(payload))
+
+    async def update_rule(
+        self,
+        symbol: str,
+        payload: Mapping[str, Any] | None = None,
+        *,
+        enabled: bool | None = None,
+    ) -> Any:
+        data = {
+            "symbol": symbol,
+            "payload": dict(payload or {}),
+            "enabled": enabled,
+        }
+        return await self._call("update_rule", data)
+
+    async def delete_rule(self, symbol: str) -> Any:
+        return await self._call("delete_rule", symbol)
+
+    async def update_config(self, payload: Mapping[str, Any]) -> Any:
+        return await self._call("update_config", dict(payload))
+
     async def fetch_sizing_history(
         self,
         *,
@@ -77,6 +105,9 @@ class StubRiskServiceClient:
 
     async def fetch_config_rules(self) -> Any:
         return await self._call("fetch_config_rules")
+
+    async def update_config_rules(self, payload: Mapping[str, Any]) -> Any:
+        return await self._call("update_config_rules", dict(payload))
 
     async def _call(self, name: str, payload: Any = None) -> Any:
         self.calls.append((name, payload))
@@ -173,29 +204,22 @@ def test_get_risk_config_returns_503_when_service_unavailable_and_cache_empty(ri
     assert response.json()["detail"] == "Risk service unavailable"
 
 
-def test_add_risk_rule_updates_config_hash(risk_app) -> None:
-    app, _, redis = risk_app
+def test_add_risk_rule_invokes_service(risk_app) -> None:
+    app, stub_client, _ = risk_app
     payload = {"symbol": "ES", "rule_type": "fixed", "stop_loss_price": 4300.5}
 
     with TestClient(app) as client:
         response = client.post("/api/risk_rules", json=payload)
 
     assert response.status_code == status.HTTP_200_OK
-    config = redis.hashes.get(risk_module.RISK_CONFIG_HASH_KEY, {})
-    assert risk_module.RISK_RULES_FIELD in config
-    rules = json.loads(config[risk_module.RISK_RULES_FIELD])
-    assert rules and rules[0]["symbol"] == "ES"
-    assert redis.published[-1] == (
-        risk_module.RISK_CONFIG_UPDATE_CHANNEL,
-        risk_module.RISK_CONFIG_MODULE,
-    )
+    assert stub_client.calls and stub_client.calls[-1][0] == "create_rule"
+    recorded_payload = stub_client.calls[-1][1]
+    for key, value in payload.items():
+        assert recorded_payload.get(key) == value
 
 
-def test_update_risk_rule_merges_into_existing_rule(risk_app) -> None:
-    app, _, redis = risk_app
-    redis.hashes[risk_module.RISK_CONFIG_HASH_KEY] = {
-        risk_module.RISK_RULES_FIELD: json.dumps([{"symbol": "ES", "rule_type": "fixed"}])
-    }
+def test_update_risk_rule_calls_service(risk_app) -> None:
+    app, stub_client, _ = risk_app
 
     with TestClient(app) as client:
         response = client.put(
@@ -204,61 +228,52 @@ def test_update_risk_rule_merges_into_existing_rule(risk_app) -> None:
         )
 
     assert response.status_code == status.HTTP_200_OK
-    rules = json.loads(redis.hashes[risk_module.RISK_CONFIG_HASH_KEY][risk_module.RISK_RULES_FIELD])
-    assert rules[0]["take_profit_price"] == 4500.0
+    assert stub_client.calls and stub_client.calls[-1][0] == "update_rule"
+    recorded_payload = stub_client.calls[-1][1]
+    assert recorded_payload["symbol"] == "ES"
+    assert recorded_payload["payload"]["symbol"] == "ES"
+    assert recorded_payload["payload"]["take_profit_price"] == 4500.0
 
 
-def test_delete_risk_rule_removes_entry(risk_app) -> None:
-    app, _, redis = risk_app
-    redis.hashes[risk_module.RISK_CONFIG_HASH_KEY] = {
-        risk_module.RISK_RULES_FIELD: json.dumps(
-            [{"symbol": "ES", "rule_type": "fixed"}, {"symbol": "NQ", "rule_type": "fixed"}]
-        )
-    }
+def test_delete_risk_rule_calls_service(risk_app) -> None:
+    app, stub_client, _ = risk_app
 
     with TestClient(app) as client:
         response = client.delete("/api/risk_rules/ES")
 
     assert response.status_code == status.HTTP_200_OK
-    rules = json.loads(redis.hashes[risk_module.RISK_CONFIG_HASH_KEY][risk_module.RISK_RULES_FIELD])
-    assert {entry["symbol"] for entry in rules} == {"NQ"}
+    assert ("delete_rule", "ES") in stub_client.calls
 
 
-def test_update_risk_config_persists_fields(risk_app) -> None:
-    app, _, redis = risk_app
+def test_update_risk_config_calls_service(risk_app) -> None:
+    app, stub_client, _ = risk_app
+    payload = {"risk_per_trade_r": 0.5, "rv_ref_method": "static"}
 
     with TestClient(app) as client:
-        response = client.put(
-            "/api/risk-config",
-            json={"risk_per_trade_r": 0.5, "rv_ref_method": "static"},
-        )
+        response = client.put("/api/risk-config", json=payload)
 
     assert response.status_code == status.HTTP_200_OK
-    mapping = redis.hashes[risk_module.RISK_CONFIG_HASH_KEY]
-    assert mapping["risk_per_trade_r"] == "0.5"
-    assert mapping["rv_ref_method"] == "static"
+    assert ("update_config", payload) in stub_client.calls
 
 
-def test_update_config_rules_bulk_merges(risk_app) -> None:
-    app, _, redis = risk_app
-    redis.hashes[risk_module.RISK_CONFIG_HASH_KEY] = {
-        risk_module.RISK_RULES_FIELD: json.dumps([{"symbol": "ES", "rule_type": "fixed"}])
+def test_update_config_rules_calls_service(risk_app) -> None:
+    app, stub_client, _ = risk_app
+    payload = {
+        "ES": {"rule_type": "fixed", "stop_loss_price": 4200.0},
+        "NQ": {"rule_type": "trailing", "trail_ticks": 20},
     }
 
     with TestClient(app) as client:
-        response = client.put(
-            "/api/config/rules",
-            json={
-                "ES": {"rule_type": "fixed", "stop_loss_price": 4200.0},
-                "NQ": {"rule_type": "trailing", "trail_ticks": 20},
-            },
-        )
+        response = client.put("/api/config/rules", json=payload)
 
     assert response.status_code == status.HTTP_200_OK
-    rules = json.loads(redis.hashes[risk_module.RISK_CONFIG_HASH_KEY][risk_module.RISK_RULES_FIELD])
-    by_symbol = {entry["symbol"]: entry for entry in rules}
-    assert by_symbol["ES"]["stop_loss_price"] == 4200.0
-    assert by_symbol["NQ"]["rule_type"] == "trailing"
+    assert stub_client.calls and stub_client.calls[-1][0] == "update_config_rules"
+    recorded_payload = stub_client.calls[-1][1]
+    for symbol, rule in payload.items():
+        recorded_rule = recorded_payload.get(symbol)
+        assert recorded_rule is not None
+        for key, value in rule.items():
+            assert recorded_rule.get(key) == value
 
 
 def test_position_sizing_proxies_payload(risk_app) -> None:

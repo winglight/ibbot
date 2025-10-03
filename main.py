@@ -52,7 +52,6 @@ from src.ib_command_health import (
     build_ib_connection_health_payload,
 )
 from src.ibbot.redis import get_redis_client
-from src.order_manager import OrderManager
 from src.service_status import SERVICE_HEALTH_PROBES
 from src.models import (
     HistoricalDataRequest,
@@ -528,16 +527,7 @@ async def lifespan(app: FastAPI):
     registry = _build_module_registry(main_logger)
 
     services = await core.initialise()
-
-    async def _order_manager_redis_factory() -> Any:
-        if services.redis_client is not None:
-            return services.redis_client
-        return await get_redis_client()
-
-    order_manager = OrderManager(redis_factory=_order_manager_redis_factory)
-    services.order_manager = order_manager
     app.state.core = services
-    app.state.order_manager = order_manager
 
     enabled_raw = os.getenv("ENABLED_MODULES", "ALL")
     enabled_modules = registry.resolve_enabled(enabled_raw)
@@ -580,7 +570,6 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         await registry.shutdown_modules()
-        app.state.order_manager = None
         app.state.core = None
         await core.shutdown()
         main_logger.info("Application shutdown complete.")

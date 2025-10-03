@@ -6,7 +6,7 @@
 2. **共享依赖装配**：`src/dom_dependencies.py` 在加载时创建了单例的 `DOMProcessor` 与 `DepthSubscriber`，供核心模块与 DOM 服务复用，避免循环依赖。【F:src/dom_dependencies.py†L1-L58】
 3. **数据处理与事件派发**：`DOMService` 将 `DepthSubscriber` 推送的 DOM 更新写入缓存、调用 `DOMProcessor` 生成指标，并通过内部监听表 `_listeners` 广播最新指标与事件，供上层策略与界面消费。【F:src/dom_service.py†L55-L192】【F:src/dom_service.py†L262-L295】
 4. **策略订阅与执行**：`DOMStrategy` 在启动时确保目标合约的深度流已开启，并把自身注册为 DOM 服务监听者；收到指标后更新内部状态并触发下单逻辑，同时对长时间无数据的情况做断路器保护。【F:src/strategies/dom_strategy.py†L149-L205】【F:src/strategies/dom_strategy.py†L243-L340】【F:src/strategies/dom_strategy.py†L959-L979】
-5. **策略管理与数据推送状态**：`StrategyManager.set_data_push` 为内部策略协调订阅生命周期——校验策略配置、调用 `DOMService` 启动或停止深度流、在失败时回滚状态，并在状态轮询时检测长时间无数据以触发重启。【F:src/strategy_manager.py†L1063-L1370】【F:src/strategy_manager.py†L1873-L2013】
+5. **策略管理与数据推送状态**：策略服务运行时通过 `request_data_push_state` 协调订阅生命周期——校验策略配置、调用 `DOMService` 启动或停止深度流、在失败时回滚状态，并在状态轮询时检测长时间无数据以触发重启。【F:services/strategy/http.py†L362-L410】【F:services/strategy/http.py†L998-L1045】
 
 以上链路实现了“IBKR → 深度订阅 → DOM 服务 → 策略”的闭环，一旦连接或订阅失败，对应状态会从 `DOMService` 与 `StrategyManager` 回传到界面与监控逻辑。
 
@@ -24,9 +24,9 @@
 
 ## 问题 2：为何有的模块能收到 DOM，有的停止？
 
-- **订阅配置缺失或失败回滚**：当策略未配置 `data_subscription`/`primary_symbol`，或 `DOMService.start_stream` 因连接未就绪而失败时，`StrategyManager.set_data_push` 会将状态重置为未启用并记录错误，导致该策略表现为“停止接收”。【F:src/strategy_manager.py†L1116-L1201】【F:src/dom_service.py†L520-L578】
+- **订阅配置缺失或失败回滚**：当策略未配置 `data_subscription`/`primary_symbol`，或 `DOMService.start_stream` 因连接未就绪而失败时，策略服务运行时会将状态重置为未启用并记录错误，导致该策略表现为“停止接收”。【F:services/strategy/http.py†L362-L410】【F:src/dom_service.py†L520-L578】
 - **仅支持单活跃合约**：`DOMService` 使用 `_active_symbol` 标记当前活跃流，并在 `is_stream_active` 中直接与该字段比较；虽然底层 `DepthSubscriber` 能维护多流，但服务层的单一活跃符号逻辑会让后续请求覆盖前者，其他模块因此观察到数据中断。【F:src/dom_service.py†L756-L795】
-- **运行时健康检测触发停用/重启**：`DOMStrategy` 的运行状态依赖 `_last_data_timestamp`，超过 5 秒无更新即视为未接收；`StrategyManager.get_internal_strategy_status` 也会在 15 秒以上无数据时写入“stalled”并调度强制重启。这些机制能自动恢复，但在重启窗口内模块会显示为“停止”。【F:src/strategies/dom_strategy.py†L959-L979】【F:src/strategy_manager.py†L1957-L2001】
+- **运行时健康检测触发停用/重启**：`DOMStrategy` 的运行状态依赖 `_last_data_timestamp`，超过 5 秒无更新即视为未接收；策略服务运行时的状态生成逻辑也会在长时间无数据时写入“stalled”并调度强制重启。这些机制能自动恢复，但在重启窗口内模块会显示为“停止”。【F:src/strategies/dom_strategy.py†L959-L979】【F:services/strategy/http.py†L980-L1045】
 
 因此，“能/不能接收 DOM”往往由配置、连接状态和上述健康检查决定。排查流程应优先确认策略的订阅配置、IBKR 连接、`DOMService` 是否已持有目标符号的活跃流，以及是否正在执行自动重启。
 

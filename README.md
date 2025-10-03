@@ -43,6 +43,15 @@ IBBot 是一个围绕 Interactive Brokers API 构建的全栈交易与风险管�
 - **src/optimizer_service/** 提供 DOM 优化任务编排与异步执行。
 - **src/config/** 统一加载 `.env` 与 `.env.local`，供 CLI 与服务端脚本复用。
 
+### 🗄️ 持久化模型
+
+订单、风控、策略等领域数据现由独立的微服务负责持久化与回放。网关进程只通过 HTTP 客户端和 Redis/事件流访问这些服务，不再依赖本地
+SQLite 文件（历史的 `data/trading_bot.db` 已移除）。这意味着：
+
+- 任何状态写入都通过对应的服务 API 或 Redis 键完成，网关自身保持无状态。
+- 本地开发与 CI 无需准备 SQLite 数据库文件；所有测试默认断言不会创建 `data/trading_bot.db`。
+- 迁移脚本应直接与 orders/risk/strategy 服务对接，而不是向网关注入数据库连接。
+
 ## 📁 基础目录结构
 
 ```text
