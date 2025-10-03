@@ -12,16 +12,17 @@ from collections import defaultdict
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable, Mapping, Sequence, TYPE_CHECKING
+from typing import Any, Awaitable, Callable, Mapping, Sequence
 
 from src.ibbot import update_service_health
 from src.ibbot.config import ConfigProvider
 from src.ibbot.logging import get_logger
 from src.ibbot.redis import DEFAULT_REDIS_URL, close_global_client, get_redis_client
 from src.ibbot.storage.parquet_writer import MarketDataParquetWriter, get_market_data_writer
-
-if TYPE_CHECKING:  # pragma: no cover - import for typing only
-    from src.db import MarketPriceRepository
+from src.services.factories import (
+    MarketPriceRepositoryProtocol,
+    create_market_price_repository,
+)
 
 SERVICE_NAME = "ib-feed"
 PRICE_CHANNEL_TEMPLATE = "pubsub:ib:price:{symbol}"
@@ -48,11 +49,13 @@ class MarketDataFeedService:
     ib_client: Any
     redis: Any
     subscriptions: Sequence[str]
-    price_repository: "MarketPriceRepository | None" = None
+    price_repository: MarketPriceRepositoryProtocol | None = None
     price_repository_factory: (
         Callable[
             [],
-            Awaitable["MarketPriceRepository"] | "MarketPriceRepository",
+            Awaitable[MarketPriceRepositoryProtocol | None]
+            | MarketPriceRepositoryProtocol
+            | None,
         ]
         | None
     ) = None
@@ -369,6 +372,11 @@ class MarketDataFeedService:
         repository = factory()
         if inspect.isawaitable(repository):
             repository = await repository
+        if repository is None:
+            self.price_repository = None
+            self._price_repository_created = False
+            self._price_repository_cleanup = None
+            return
         self.price_repository = repository
         self._price_repository_created = True
         self._price_repository_cleanup = self._resolve_repository_cleanup(repository)
@@ -495,8 +503,6 @@ async def run_service() -> None:
     redis_url = _resolve_redis_url("IB_FEED_REDIS_URL")
     redis = await get_redis_client(redis_url)
 
-    from src.db import market_price_writer
-
     provider = ConfigProvider(redis_url=redis_url)
     await provider.start()
     config = await provider.get_module(SERVICE_NAME)
@@ -507,15 +513,12 @@ async def run_service() -> None:
     reconnect_delay = float(config.get("reconnect_delay", 1.0))
 
     ib_client = await _create_ib_client()
-    def _price_repository_factory() -> Any:
-        return market_price_writer()
-
     service = MarketDataFeedService(
         ib_client,
         redis,
         subscriptions=subscriptions,
         reconnect_delay=reconnect_delay,
-        price_repository_factory=_price_repository_factory,
+        price_repository_factory=create_market_price_repository,
     )
 
     stop_event = asyncio.Event()
