@@ -12,13 +12,16 @@ from collections import defaultdict
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable, Mapping, Sequence
+from typing import Any, Awaitable, Callable, Mapping, Sequence, TYPE_CHECKING
 
 from src.ibbot import update_service_health
 from src.ibbot.config import ConfigProvider
 from src.ibbot.logging import get_logger
 from src.ibbot.redis import DEFAULT_REDIS_URL, close_global_client, get_redis_client
 from src.ibbot.storage.parquet_writer import MarketDataParquetWriter, get_market_data_writer
+
+if TYPE_CHECKING:  # pragma: no cover - import for typing only
+    from src.ibbot.db.repositories.market import MariaDbMarketPriceRepository
 
 SERVICE_NAME = "ib-feed"
 PRICE_CHANNEL_TEMPLATE = "pubsub:ib:price:{symbol}"
@@ -45,8 +48,14 @@ class MarketDataFeedService:
     ib_client: Any
     redis: Any
     subscriptions: Sequence[str]
-    price_repository: Any | None = None
-    price_repository_factory: Callable[[], Awaitable[Any] | Any] | None = None
+    price_repository: "MariaDbMarketPriceRepository | None" = None
+    price_repository_factory: (
+        Callable[
+            [],
+            Awaitable["MariaDbMarketPriceRepository"] | "MariaDbMarketPriceRepository",
+        ]
+        | None
+    ) = None
     dom_writer: MarketDataParquetWriter | None = None
     logger_name: str = "ibbot.services.ib_feed"
     reconnect_delay: float = 1.0
@@ -90,19 +99,32 @@ class MarketDataFeedService:
         self._stop_health.clear()
         self._last_price_updates = self.price_updates
         self._last_dom_updates = self.dom_updates
-        await self._initialise_price_repository()
-        await self._publish_health(status="starting", healthy=False)
-        self._health_task = asyncio.create_task(self._health_loop(), name="ib-feed-health")
-        await self._publish_health(status="running", healthy=True)
-        if not self.subscriptions:
-            self._logger.info(
-                "No market data subscriptions configured; IB feed service running idle",
+        try:
+            await self._initialise_price_repository()
+            await self._publish_health(status="starting", healthy=False)
+            self._health_task = asyncio.create_task(
+                self._health_loop(), name="ib-feed-health"
             )
-            return
+            await self._publish_health(status="running", healthy=True)
+            if not self.subscriptions:
+                self._logger.info(
+                    "No market data subscriptions configured; IB feed service running idle",
+                )
+                return
 
-        self._bind_client_events()
-        await self._connect_and_subscribe()
-        self._active = True
+            self._bind_client_events()
+            await self._connect_and_subscribe()
+            self._active = True
+        except Exception:
+            self._active = False
+            if self._health_task is not None:
+                self._health_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._health_task
+                self._health_task = None
+            await self._publish_health(status="offline", healthy=False)
+            await self._shutdown_price_repository()
+            raise
 
     async def stop(self) -> None:
         """Stop the service and cancel background tasks."""

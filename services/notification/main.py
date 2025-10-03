@@ -134,6 +134,20 @@ async def _default_service_factory() -> tuple[NotificationService, CleanupCallba
         else DEFAULT_HISTORY_LIMIT
     )
 
+    history_repository_factory: Callable[[], Awaitable[Any]] | None = None
+    try:
+        from src.ibbot.db import audit_log_repository, get_session_factory
+    except ModuleNotFoundError:
+        pass
+    else:
+        session_factory = get_session_factory()
+
+        async def _history_repo_factory() -> Any:
+            session = session_factory()
+            return audit_log_repository(session)
+
+        history_repository_factory = _history_repo_factory
+
     service = NotificationService(
         stream_reader=reader,
         channels=channels,
@@ -147,9 +161,11 @@ async def _default_service_factory() -> tuple[NotificationService, CleanupCallba
         command_batch_size=command_batch_size,
         history_key=history_key,
         history_max_entries=history_max_entries,
+        history_repository_factory=history_repository_factory,
     )
 
     async def _cleanup() -> None:
+        await service.aclose()
         await provider.close()
         await close_global_client()
 
@@ -189,6 +205,12 @@ def create_app(service_factory: ServiceFactory | None = None) -> FastAPI:
                 await worker
             except asyncio.CancelledError:  # pragma: no cover - cancellation path depends on runtime
                 pass
+        if service is not None:
+            close_callable = getattr(service, "aclose", None)
+            if callable(close_callable):
+                result = close_callable()
+                if asyncio.iscoroutine(result):
+                    await result
         if cleanup is not None:
             result = cleanup()
             if asyncio.iscoroutine(result):

@@ -353,7 +353,18 @@ class MarketDataRuntime:
 
             self._metrics_repository_close = _close_repo
         else:
-            self._metrics_repository_close = None
+            session = getattr(repository, "_session", None)
+            close_session = getattr(session, "close", None) if session is not None else None
+            if callable(close_session):
+
+                async def _close_session() -> None:
+                    result = close_session()
+                    if inspect.isawaitable(result):
+                        await result
+
+                self._metrics_repository_close = _close_session
+            else:
+                self._metrics_repository_close = None
 
     async def _close_metrics_repository(self) -> None:
         closer = self._metrics_repository_close

@@ -10,11 +10,21 @@ import uuid
 from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable, Iterable, Mapping, MutableMapping, Sequence
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterable, Mapping, MutableMapping, Protocol, Sequence
 from src.ibbot import update_service_health
 from src.ibbot.redis import StreamMessage
 
 logger = logging.getLogger("ibbot.services.notification")
+
+
+if TYPE_CHECKING:  # pragma: no cover - typing helpers
+    from src.ibbot.db import AuditLogRepository
+
+
+async def _maybe_await(result: Awaitable[Any] | Any) -> Any:
+    if inspect.isawaitable(result):
+        return await result  # type: ignore[return-value]
+    return result
 
 
 @dataclass(slots=True)
@@ -47,6 +57,11 @@ class RetryItem:
     message: str
     attempts: int = 0
     last_error: str | None = None
+
+
+class NotificationHistoryRepositoryProtocol(Protocol):
+    async def record_event(self, payload: Mapping[str, Any]) -> None:
+        ...
 
 
 class RedisStreamReader:
@@ -93,6 +108,14 @@ class NotificationService:
         command_batch_size: int = 10,
         history_key: str = "list:notification:history",
         history_max_entries: int = 500,
+        history_repository_factory: (
+            Callable[
+                [],
+                Awaitable[NotificationHistoryRepositoryProtocol]
+                | NotificationHistoryRepositoryProtocol,
+            ]
+            | None
+        ) = None,
     ) -> None:
         self._stream_reader = stream_reader
         self._channels = OrderedDict((channel.name, channel) for channel in channels)
@@ -110,6 +133,10 @@ class NotificationService:
         self._command_batch_size = max(1, int(command_batch_size))
         self._history_key = history_key
         self._history_max_entries = max(0, int(history_max_entries))
+        self._history_repository_factory = history_repository_factory
+        self._history_repository: NotificationHistoryRepositoryProtocol | None = None
+        self._history_repository_close: Callable[[], Awaitable[None]] | None = None
+        self._history_repository_created = False
 
     # ------------------------------------------------------------------
     # public API
@@ -118,6 +145,11 @@ class NotificationService:
         """Signal the background consumer loop to stop."""
 
         self._stop_requested = True
+
+    async def aclose(self) -> None:
+        """Release any database resources owned by the service."""
+
+        await self._shutdown_history_repository()
 
     async def run_forever(self) -> None:
         """Continuously poll Redis streams and process events."""
@@ -132,6 +164,7 @@ class NotificationService:
                 if processed == 0 and self._poll_interval > 0:
                     await asyncio.sleep(self._poll_interval)
         finally:
+            await self._shutdown_history_repository()
             self._logger.info("Notification service stopped")
 
     async def poll_once(self, *, include_commands: bool = True) -> int:
@@ -498,6 +531,71 @@ class NotificationService:
             extra["notification_error"] = error
         self._logger.log(level, "Notification %s", status, extra=extra)
 
+    def _resolve_repository_close(
+        self, repository: NotificationHistoryRepositoryProtocol
+    ) -> Callable[[], Awaitable[None]] | None:
+        for attr in ("aclose", "close"):
+            closer = getattr(repository, attr, None)
+            if callable(closer):
+
+                async def _close(
+                    closer: Callable[[], Awaitable[Any] | Any] = closer,
+                ) -> None:
+                    await _maybe_await(closer())
+
+                return _close
+
+        session = getattr(repository, "_session", None)
+        close_method = getattr(session, "close", None) if session is not None else None
+        if callable(close_method):
+
+            async def _close_session(
+                close_method: Callable[[], Awaitable[Any] | Any] = close_method,
+            ) -> None:
+                await _maybe_await(close_method())
+
+            return _close_session
+        return None
+
+    async def _ensure_history_repository(
+        self,
+    ) -> NotificationHistoryRepositoryProtocol | None:
+        repository = self._history_repository
+        if repository is not None:
+            return repository
+        factory = self._history_repository_factory
+        if factory is None:
+            return None
+        try:
+            repository = await _maybe_await(factory())
+        except Exception:
+            self._logger.debug(
+                "Failed to initialise notification history repository", exc_info=True
+            )
+            self._history_repository_created = False
+            self._history_repository_close = None
+            self._history_repository = None
+            return None
+
+        self._history_repository = repository
+        self._history_repository_created = True
+        self._history_repository_close = self._resolve_repository_close(repository)
+        return repository
+
+    async def _shutdown_history_repository(self) -> None:
+        closer = self._history_repository_close
+        self._history_repository_close = None
+        if closer is not None:
+            try:
+                await _maybe_await(closer())
+            except Exception:
+                self._logger.debug(
+                    "Failed to close notification history repository", exc_info=True
+                )
+        if self._history_repository_created:
+            self._history_repository = None
+            self._history_repository_created = False
+
     async def _record_history(
         self,
         *,
@@ -540,6 +638,15 @@ class NotificationService:
                 await self._redis.ltrim(self._history_key, 0, self._history_max_entries - 1)
         except Exception:  # pragma: no cover - storage errors shouldn't crash processing
             self._logger.debug("Failed to record notification history", exc_info=True)
+
+        repository = await self._ensure_history_repository()
+        if repository is not None:
+            try:
+                await repository.record_event(dict(entry))
+            except Exception:
+                self._logger.debug(
+                    "Failed to persist notification history repository entry", exc_info=True
+                )
 
     async def _publish_health_metrics(self) -> None:
         if self._redis is None:
