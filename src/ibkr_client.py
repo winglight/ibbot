@@ -15,6 +15,7 @@ from loguru import logger
 from zoneinfo import ZoneInfo
 
 from src.utils import is_trading_disabled, now_local, to_local_time
+from src.utils.ibkr_serialization import trade_to_dict
 from src.data_layer import (
     DataSubscriptionRequest,
     DataSubscriptionToken,
@@ -925,74 +926,27 @@ class IBKRClient:
     ) -> Dict[str, Any]:
         """Convert the raw ``trade`` object returned by IBKR into a JSON-friendly mapping."""
 
-        def _get_attr(obj: Any, attr: str, default: Any = None) -> Any:
-            try:
-                return getattr(obj, attr)
-            except Exception:
-                return default
-
-        order = _get_attr(trade, "order")
-        order_status = _get_attr(trade, "orderStatus")
-        contract = _get_attr(trade, "contract")
-
-        raw_order_id = _get_attr(order, "orderId")
-        if raw_order_id in (None, ""):
-            raw_order_id = _get_attr(order, "permId")
-        if raw_order_id in (None, ""):
-            raw_order_id = _get_attr(order, "id")
-
-        raw_status = _get_attr(order_status, "status")
-        if not raw_status:
-            raw_status = "Submitted"
-
-        contract_symbol = _get_attr(contract, "localSymbol") or _get_attr(contract, "symbol")
-        contract_exchange = _get_attr(contract, "exchange")
-        contract_sec_type = _get_attr(contract, "secType")
-
-        order_type_value = _get_attr(order, "orderType") or order_type
-        if order_type_value:
-            order_type_value = str(order_type_value).upper()
-
-        limit_price_value = _get_attr(order, "lmtPrice")
-        if limit_price_value is None:
-            limit_price_value = limit_price
-        limit_price_value = self._sanitize_float(limit_price_value)
-
-        avg_fill_price = self._sanitize_float(_get_attr(order_status, "avgFillPrice"))
-        filled_quantity = self._sanitize_float(_get_attr(order_status, "filled"))
-        remaining_quantity = self._sanitize_float(_get_attr(order_status, "remaining"))
-        requested_quantity = self._sanitize_float(_get_attr(order, "totalQuantity"))
-        if requested_quantity is None:
-            requested_quantity = self._sanitize_float(quantity)
-
-        submitted_at: Optional[str] = None
-        log_entries = _get_attr(trade, "log")
-        if log_entries:
-            first_entry = log_entries[0]
-            timestamp = _get_attr(first_entry, "time")
-            if timestamp is not None:
-                try:
-                    submitted_at = to_local_time(timestamp)
-                except Exception:
-                    submitted_at = str(timestamp)
-
-        result: Dict[str, Any] = {
-            "order_id": str(raw_order_id) if raw_order_id not in (None, "") else None,
-            "status": str(raw_status),
-            "symbol": contract_symbol or symbol,
-            "exchange": contract_exchange or exchange,
-            "sec_type": (contract_sec_type or sec_type or "").upper() or None,
-            "action": _get_attr(order, "action") or action,
-            "order_type": order_type_value,
-            "limit_price": limit_price_value,
-            "avg_fill_price": avg_fill_price,
-            "quantity": requested_quantity,
-            "filled": filled_quantity,
-            "remaining": remaining_quantity,
+        defaults: Dict[str, Any] = {
+            "symbol": symbol,
+            "action": action,
+            "quantity": self._sanitize_float(quantity),
+            "order_type": order_type,
         }
+        if exchange:
+            defaults["exchange"] = exchange
+        if sec_type:
+            defaults["sec_type"] = str(sec_type).upper()
+        if limit_price is not None:
+            defaults["limit_price"] = self._sanitize_float(limit_price)
 
-        if submitted_at is not None:
-            result["submitted_at"] = submitted_at
+        result = trade_to_dict(trade, defaults=defaults)
+
+        submitted_at = result.get("submitted_at")
+        if submitted_at and isinstance(submitted_at, str):
+            try:
+                result["submitted_at"] = to_local_time(submitted_at)
+            except Exception:
+                pass
 
         return result
 
@@ -1749,8 +1703,14 @@ class IBKRClient:
             if loop.is_running():
                 loop.create_task(_cleanup())
 
-    async def place_market_order(self, symbol: str, quantity: int,
-                           action: str = 'BUY', exchange: str = 'SMART', sec_type: str = 'STK') -> Optional[Order]:
+    async def place_market_order(
+        self,
+        symbol: str,
+        quantity: int,
+        action: str = 'BUY',
+        exchange: str = 'SMART',
+        sec_type: str = 'STK',
+    ) -> Optional[Dict[str, Any]]:
         """下市价单"""
         # 下单前备份订单信息
         # self._backup_order(symbol, quantity, action, 'MARKET', sec_type=sec_type, exchange=exchange)
@@ -1763,21 +1723,39 @@ class IBKRClient:
             
             if trade:
                 # 记录reqId到订单ID的映射，用于错误处理
-                req_id = trade.order.orderId
-                order_id = str(req_id)
-                self.req_id_to_order_id[req_id] = order_id
-                ibkr_logger.debug(f"Mapped reqId {req_id} to order_id {order_id}")
-                
+                req_id = getattr(trade.order, "orderId", None)
+                if req_id is not None:
+                    order_id = str(req_id)
+                    self.req_id_to_order_id[req_id] = order_id
+                    ibkr_logger.debug(f"Mapped reqId {req_id} to order_id {order_id}")
+
                 # 更新订单状态
                 self._update_order_status(symbol, action, quantity, 'Submitted')
-            
-            return trade
+
+            return trade_to_dict(
+                trade,
+                defaults={
+                    "symbol": symbol,
+                    "action": action,
+                    "quantity": float(quantity),
+                    "order_type": 'MARKET',
+                    "exchange": exchange,
+                    "sec_type": sec_type.upper() if isinstance(sec_type, str) else sec_type,
+                },
+            ) if trade else None
         except Exception as e:
             ibkr_logger.error(f"Failed to place market order: {e}")
             return None
 
-    def place_limit_order(self, symbol: str, quantity: int, price: float,
-                              action: str = 'BUY', exchange: str = 'SMART', sec_type: str = 'STK') -> Optional[Order]:
+    def place_limit_order(
+        self,
+        symbol: str,
+        quantity: int,
+        price: float,
+        action: str = 'BUY',
+        exchange: str = 'SMART',
+        sec_type: str = 'STK',
+    ) -> Optional[Dict[str, Any]]:
         """下限价单"""
         # 下单前备份订单信息
         # self._backup_order(symbol, quantity, action, 'LIMIT', price, sec_type=sec_type, exchange=exchange)
@@ -1790,15 +1768,27 @@ class IBKRClient:
             
             if trade:
                 # 记录reqId到订单ID的映射，用于错误处理
-                req_id = trade.order.orderId
-                order_id = str(req_id)
-                self.req_id_to_order_id[req_id] = order_id
-                ibkr_logger.debug(f"Mapped reqId {req_id} to order_id {order_id}")
-                
+                req_id = getattr(trade.order, "orderId", None)
+                if req_id is not None:
+                    order_id = str(req_id)
+                    self.req_id_to_order_id[req_id] = order_id
+                    ibkr_logger.debug(f"Mapped reqId {req_id} to order_id {order_id}")
+
                 # 更新订单状态
                 self._update_order_status(symbol, action, quantity, 'Submitted')
-            
-            return trade
+
+            return trade_to_dict(
+                trade,
+                defaults={
+                    "symbol": symbol,
+                    "action": action,
+                    "quantity": float(quantity),
+                    "order_type": 'LIMIT',
+                    "limit_price": float(price),
+                    "exchange": exchange,
+                    "sec_type": sec_type.upper() if isinstance(sec_type, str) else sec_type,
+                },
+            ) if trade else None
         except Exception as e:
             ibkr_logger.error(f"Failed to place limit order: {e}")
             return None

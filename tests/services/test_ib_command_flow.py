@@ -2,12 +2,15 @@ import asyncio
 import json
 import time
 from collections import deque
+from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from services.ib_command import (
     CommandConsumer,
+    ExecutionResult,
     IBCommandExecutionError,
     IBCommandExecutor,
     ResultPublisher,
@@ -275,3 +278,101 @@ async def _run_place_order_flow(redis_client: Any) -> None:
 
 def test_place_order_command_returns_mapping(redis_client):
     asyncio.run(_run_place_order_flow(redis_client))
+
+
+async def _run_trade_serialisation_test(redis_client: Any) -> None:
+    stream_key = "stream:test:results:trade"
+    hash_prefix = "hash:test:result:trade"
+    publisher = ResultPublisher(
+        redis_client,
+        stream_key=stream_key,
+        hash_prefix=hash_prefix,
+        logger_name="tests.ib_command.results.trade",
+    )
+
+    trade = _build_fake_trade()
+    payload = ExecutionResult(
+        command_id="cmd-trade",
+        status="success",
+        result=trade,
+        attempts=1,
+    )
+    await publisher.publish(payload)
+
+    entries = await redis_client.xrange(stream_key)
+    assert entries
+    _, message = entries[0]
+    result_payload = json.loads(message.get("result", "{}"))
+    assert result_payload["order_id"] == "123"
+    assert result_payload["status"] == "Filled"
+    assert result_payload["symbol"] == "ESH4"
+    assert result_payload["commission_currency"] == "USD"
+    assert pytest.approx(result_payload["commission"], rel=1e-6) == 1.25
+    assert pytest.approx(result_payload["realized_pnl"], rel=1e-6) == 25.0
+    assert result_payload["fills"]
+    fill_payload = result_payload["fills"][0]
+    assert fill_payload["exec_id"] == "abc-1"
+    assert pytest.approx(fill_payload["price"], rel=1e-6) == 101.25
+    assert pytest.approx(fill_payload["quantity"], rel=1e-6) == 2.0
+
+    hash_payload = await redis_client.hgetall(f"{hash_prefix}:cmd-trade")
+    assert hash_payload["status"] == "success"
+    assert json.loads(hash_payload["result"]) == result_payload
+
+
+def _build_fake_trade() -> SimpleNamespace:
+    timestamp = datetime(2024, 1, 1, 14, 30, tzinfo=timezone.utc)
+    order = SimpleNamespace(
+        orderId=123,
+        permId=456,
+        action="BUY",
+        totalQuantity=2,
+        orderType="LIMIT",
+        lmtPrice=100.5,
+    )
+    order_status = SimpleNamespace(
+        status="Filled",
+        avgFillPrice=101.25,
+        filled=2,
+        remaining=0,
+        commission=1.25,
+        commissionCurrency="USD",
+        realizedPNL=25.0,
+        submittedTime=timestamp,
+        completedTime=timestamp,
+    )
+    contract = SimpleNamespace(
+        symbol="ES",
+        localSymbol="ESH4",
+        exchange="CME",
+        secType="FUT",
+    )
+    execution = SimpleNamespace(
+        execId="abc-1",
+        time=timestamp,
+        side="BOT",
+        price=101.25,
+        avgPrice=101.25,
+        shares=2,
+        exchange="CME",
+        acctNumber="DU123",
+        orderId=123,
+    )
+    commission_report = SimpleNamespace(
+        commission=1.25,
+        currency="USD",
+        realizedPNL=25.0,
+    )
+    fill = SimpleNamespace(execution=execution, commissionReport=commission_report)
+    log_entry = SimpleNamespace(time=timestamp)
+    return SimpleNamespace(
+        order=order,
+        orderStatus=order_status,
+        contract=contract,
+        fills=[fill],
+        log=[log_entry],
+    )
+
+
+def test_result_publisher_serialises_trades(redis_client):
+    asyncio.run(_run_trade_serialisation_test(redis_client))

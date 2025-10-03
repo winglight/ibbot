@@ -14,6 +14,7 @@ from src.ibbot.redis import (
     DEFAULT_COMMAND_QUEUE,
     get_queue_length,
 )
+from src.utils.ibkr_serialization import coerce_ibkr_value
 
 try:  # redis is optional in some test environments
     from redis.asyncio import Redis
@@ -226,6 +227,7 @@ class ResultPublisher:
         return message
 
     def _serialize(self, value: Any) -> str:
+        value = coerce_ibkr_value(value)
         try:
             return json.dumps(value, ensure_ascii=False)
         except TypeError:

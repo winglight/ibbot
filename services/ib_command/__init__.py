@@ -2,6 +2,7 @@
 
 from .components import (
     CommandConsumer,
+    ExecutionResult,
     IBCommandError,
     IBCommandExecutionError,
     IBCommandExecutor,
@@ -11,6 +12,7 @@ from .components import (
 
 __all__ = [
     "CommandConsumer",
+    "ExecutionResult",
     "IBCommandError",
     "IBCommandExecutionError",
     "IBCommandExecutor",

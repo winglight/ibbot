@@ -542,6 +542,15 @@ def test_order_update_writes_influx_point(monkeypatch: pytest.MonkeyPatch) -> No
                         "realizedPnl": 120.0,
                         "trigger_price": 81.0,
                         "trigger": "stop_loss",
+                        "fills": [
+                            {
+                                "exec_id": "abc",
+                                "price": 80.5,
+                                "quantity": 1,
+                                "commission": 2.5,
+                                "commission_currency": "USD",
+                            }
+                        ],
                     }
                 ),
             }
@@ -558,6 +567,52 @@ def test_order_update_writes_influx_point(monkeypatch: pytest.MonkeyPatch) -> No
             assert fields["trigger"] == "stop_loss"
             tags = point.get("tags", {})
             assert tags.get("order_id") == "IB123"
+        finally:
+            await runtime.stop()
+
+    asyncio.run(_scenario())
+
+
+def test_apply_order_event_updates_order_from_serialised_trade(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("services.orders.main.init_influx_client", lambda **_: None)
+
+    async def _scenario() -> None:
+        writer = RecordingWriter()
+        runtime, _ = await _create_runtime(write_fn=writer)
+        try:
+            submission = OrderSubmission(symbol="ES", quantity=2, action="SELL")
+            command_id = await runtime.submit_order(submission)
+            trade_payload = {
+                "order_id": "IB999",
+                "status": "Filled",
+                "avg_fill_price": 4321.5,
+                "filled": 2,
+                "remaining": 0,
+                "commission": 3.25,
+                "fills": [
+                    {
+                        "exec_id": "def-1",
+                        "price": 4321.5,
+                        "quantity": 2,
+                        "commission": 3.25,
+                        "commission_currency": "USD",
+                    }
+                ],
+            }
+            payload = {
+                "command_id": command_id,
+                "status": "success",
+                "result": json.dumps(trade_payload),
+            }
+            updated = await runtime._apply_order_event(payload)
+            assert updated is True
+
+            detail = await runtime.get_order("IB999")
+            order_payload = detail["order"]
+            assert order_payload["order_id"] == "IB999"
+            assert pytest.approx(order_payload["avg_fill_price"], rel=1e-6) == 4321.5
+            assert pytest.approx(order_payload["filled_quantity"], rel=1e-6) == 2.0
+            assert pytest.approx(order_payload["commission"], rel=1e-6) == 3.25
         finally:
             await runtime.stop()
 
