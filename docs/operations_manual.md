@@ -125,6 +125,8 @@
   `hash:service:health:notification`。若状态显示“未上报”，可通过 `/api/services/restart`
   触发对 `notification` 服务的重启（默认监听 `8060` 端口）。该操作会自动串联
   `connection_control`，确保连接断开后订阅与会话均重新建立。
+  `/api/services/status` 响应同样会列出该卡片，`POST /api/services/restart {"service": "notification"}`
+  会依次重启连接控制与通知分发，便于在排查 Redis 连接或通道堆积问题时“一键修复”。
 - **恢复**：检查 `.env.local` 中的 `TELEGRAM_TOKEN/CHAT_ID`、浏览器通知配置；修复后重启通知服务。
   - 若在裸机或自定义网络中运行，请确保 `NOTIFICATION_SERVICE_URL` 指向实际可访问的地址（Docker 默认 `http://notification:8055`，独立部署可改为 `http://127.0.0.1:8055`），必要时同步更新 `NOTIFICATION_SERVICE_TIMEOUT`。
 

@@ -66,6 +66,11 @@ def service_status_app(monkeypatch: pytest.MonkeyPatch) -> FastAPI:
                 "price_updates_total": "12",
                 "price_updates_delta": "2",
             },
+            "hash:service:health:notification": {
+                "status": "running",
+                "last_seen": now,
+                "healthy": "true",
+            },
         }
         return await original_build(redis=StubRedis(redis_data))
 
@@ -126,9 +131,12 @@ def test_service_status_endpoint_returns_registry_order(service_status_app: Fast
         None,
     )
     assert notification_entry is not None
+    captured_state = getattr(service_status_app.state, "service_status_captured", {})
     assert notification_entry.get("port") == "8060"
     assert notification_entry.get("default_health_key") == "hash:service:health:notification"
     assert notification_entry.get("health_key") == "hash:service:health:notification"
+    assert notification_entry.get("status") == "running"
+    assert notification_entry.get("last_reported") == captured_state.get("now")
 
     account_entry = next(
         (item for item in services if item.get("service") == "account"),
@@ -136,6 +144,5 @@ def test_service_status_endpoint_returns_registry_order(service_status_app: Fast
     )
     assert account_entry is not None
     account_metrics = (account_entry.get("payload") or {}).get("metrics") or {}
-    captured_state = getattr(service_status_app.state, "service_status_captured", {})
     assert account_metrics.get("snapshot_updated_at") == captured_state.get("now")
     assert account_metrics.get("stale") is False

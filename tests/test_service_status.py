@@ -108,6 +108,10 @@ def test_gather_service_statuses_normalises_payloads(monkeypatch: pytest.MonkeyP
         assert status_map["ib_command"].status == "running"
         assert status_map["market_data_feed"].status == "running"
         assert status_map["market_data"].status == "running"
+        notification_status = status_map["notification"]
+        assert notification_status.status == "running"
+        assert notification_status.detail is None
+        assert notification_status.last_reported == recent
         assert "未上报" in (status_map["connection_control"].detail or "")
 
         market_payload = status_map["market_data"].payload or {}
@@ -129,6 +133,9 @@ def test_gather_service_statuses_normalises_payloads(monkeypatch: pytest.MonkeyP
         queue_payload = status_map["queue_monitor"].payload or {}
         assert queue_payload.get("total_queue_length") == "2"
         assert "metrics_snapshot" in queue_payload
+
+        notification_payload = notification_status.payload or {}
+        assert notification_payload.get("healthy") == "true"
 
     asyncio.run(_run())
 
