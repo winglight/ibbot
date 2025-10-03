@@ -53,7 +53,7 @@ async def _refresh_risk_config(timeout: float) -> Optional[Dict[str, Any]]:
         _last_risk_config_attempt_at = time.monotonic()
         try:
             config = await asyncio.wait_for(
-                asyncio.to_thread(risk_manager.get_config),
+                risk_manager.get_config_async(),
                 timeout=timeout,
             )
         except asyncio.TimeoutError:
@@ -80,8 +80,7 @@ async def add_risk_rule(rule: RiskRuleRequest, user: Optional[str] = Depends(get
         )
 
         async_task = asyncio.create_task(
-            asyncio.to_thread(
-                risk_manager.add_risk_rule,
+            risk_manager.add_risk_rule_async(
                 rule.symbol,
                 rule.stop_loss_price,
                 rule.take_profit_price,
@@ -131,10 +130,9 @@ async def get_risk_rules(user: Optional[str] = Depends(get_current_user)):
         raise HTTPException(status_code=400, detail="Risk manager not initialized")
     
     try:
-        loop = asyncio.get_event_loop()
         try:
             rules = await asyncio.wait_for(
-                loop.run_in_executor(None, risk_manager.get_risk_rules),
+                risk_manager.get_risk_rules_async(),
                 timeout=5.0,
             )
         except asyncio.TimeoutError:
@@ -170,7 +168,7 @@ async def update_risk_rule(symbol: str, enabled: bool, user: Optional[str] = Dep
     
     try:
         logger.info(f"API update_risk_rule: symbol={symbol}, enabled={enabled}")
-        success = risk_manager.update_risk_rule(symbol, enabled=enabled)
+        success = await risk_manager.update_risk_rule_async(symbol, enabled=enabled)
         if not success:
             # 让404错误向外传播
             raise HTTPException(status_code=404, detail=f"Risk rule for {symbol} not found")
@@ -192,7 +190,7 @@ async def remove_risk_rule(symbol: str, user: Optional[str] = Depends(get_curren
     
     try:
         logger.info(f"API remove_risk_rule: symbol={symbol}")
-        risk_manager.remove_risk_rule(symbol)
+        await risk_manager.remove_risk_rule_async(symbol)
         return {"success": True, "message": "Risk rule removed successfully"}
         
     except Exception as e:

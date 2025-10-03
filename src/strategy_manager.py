@@ -83,7 +83,8 @@ def _coerce_bool(value: Any, default: bool = True) -> bool:
         return default
 
 from .connection_manager import connection_manager
-from .database import DatabaseManager, get_db_manager, Strategy as DatabaseStrategy
+from .database import DatabaseManager, get_db_manager, Strategy as DatabaseStrategy, Order
+from .async_executor import get_async_executor
 
 
 @dataclass
@@ -120,18 +121,27 @@ class StrategyManager:
         "delta_threshold": float,
     }
 
-    def __init__(self, data_dir: str = "data", strategy_dir: str = DEFAULT_STRATEGY_PATH):
+    def __init__(
+        self,
+        data_dir: str = "data",
+        strategy_dir: str = DEFAULT_STRATEGY_PATH,
+        *,
+        db_manager: Optional[DatabaseManager] = None,
+        async_executor=None,
+    ):
         self.data_dir = Path(data_dir)
         normalized_strategy_dir = self._normalize_strategy_path_value(strategy_dir)
         self.strategy_dir = Path(normalized_strategy_dir)
         self.data_dir.mkdir(exist_ok=True)
         self.strategy_dir.mkdir(parents=True, exist_ok=True)
-        
+
         # External and internal API clients
         self.external_clients = {}
-        
+
         # Database manager
-        self.db_manager = get_db_manager()
+        self._async_executor = async_executor or get_async_executor()
+        self.db_manager = db_manager or get_db_manager(async_executor=self._async_executor)
+        self.db_manager.set_async_executor(self._async_executor)
 
         # Dependencies - will be injected
         self.risk_manager = None
@@ -330,8 +340,7 @@ class StrategyManager:
         async def _rebuild() -> None:
             for name in names:
                 try:
-                    orders = await asyncio.to_thread(
-                        self.db_manager.load_strategy_orders,
+                    orders = await self.db_manager.load_strategy_orders_async(
                         name,
                         'strategy',
                         None,
@@ -1015,17 +1024,18 @@ class StrategyManager:
         except Exception as e:
             strategy_logger.error(f"Failed to save settings to database: {e}")
 
-    def _persist_strategy_settings(self, updates: Optional[Dict[str, Any]] = None, removals: Optional[Iterable[str]] = None) -> None:
-        """Persist incremental strategy setting changes while keeping existing entries intact."""
-
+    def _merge_strategy_settings(
+        self,
+        updates: Optional[Dict[str, Any]] = None,
+        removals: Optional[Iterable[str]] = None,
+    ) -> Optional[Dict[str, Any]]:
         if not updates and not removals:
-            return
+            return None
 
         current = dict(self.settings) if isinstance(self.settings, dict) else {}
         changed = False
 
         if updates:
-            updated_primary_symbol: Optional[str] = None
             for key, value in updates.items():
                 if current.get(key) != value:
                     current[key] = value
@@ -1037,14 +1047,39 @@ class StrategyManager:
                     current.pop(key)
                     changed = True
 
-        if not changed:
+        return current if changed else None
+
+    def _persist_strategy_settings(
+        self,
+        updates: Optional[Dict[str, Any]] = None,
+        removals: Optional[Iterable[str]] = None,
+    ) -> None:
+        """Persist incremental strategy setting changes while keeping existing entries intact."""
+
+        merged = self._merge_strategy_settings(updates, removals)
+        if merged is None:
             return
 
         try:
-            self.db_manager.save_strategy_config(current)
-            self.settings = current
+            self.db_manager.save_strategy_config(merged)
+            self.settings = merged
         except Exception as exc:
             strategy_logger.error(f"Failed to persist strategy settings: {exc}")
+
+    async def _persist_strategy_settings_async(
+        self,
+        updates: Optional[Dict[str, Any]] = None,
+        removals: Optional[Iterable[str]] = None,
+    ) -> None:
+        merged = self._merge_strategy_settings(updates, removals)
+        if merged is None:
+            return
+
+        try:
+            await self.db_manager.save_strategy_config_async(merged)
+            self.settings = merged
+        except Exception as exc:
+            strategy_logger.error(f"Failed to persist strategy settings asynchronously: {exc}")
 
     def _get_strategy_setting(self, strategy_name: str, suffix: str, default: Any = None) -> Any:
         key = f"{strategy_name}_{suffix}"
@@ -2238,6 +2273,24 @@ class StrategyManager:
             self._invalidate_strategies_cache()
         except Exception as e:
             strategy_logger.error(f"Failed to save strategies to database: {e}")
+
+    async def _save_strategies_async(self):
+        try:
+            for strategy in self.strategies.values():
+                db_strategy = DatabaseStrategy(
+                    name=strategy.name,
+                    strategy_type=strategy.strategy_type,
+                    enabled=strategy.enabled,
+                    api_endpoint=strategy.api_endpoint,
+                    file_path=strategy.file_path,
+                    description=strategy.description,
+                    created_at=to_local_iso(strategy.created_at) if strategy.created_at else now_local().isoformat()
+                )
+                await self.db_manager.save_strategy_async(db_strategy)
+            strategy_logger.info("Strategies saved to database")
+            self._invalidate_strategies_cache()
+        except Exception as e:
+            strategy_logger.error(f"Failed to save strategies to database asynchronously: {e}")
             
     def get_settings(self) -> Dict[str, Any]:
         """Get current settings"""
@@ -2412,76 +2465,105 @@ class StrategyManager:
             strategy_logger.error(f"Failed to add strategy: {e}")
             return False
 
-    def get_strategy(self, name: str) -> Optional[Dict[str, Any]]:
-        """Get a strategy by name"""
-        if name in self.strategies:
-            strategy = self.strategies[name]
-            strategy_dict = asdict(strategy)
-            cache_stats = self._get_cached_stats((strategy.name,)).get(strategy.name)
-            if cache_stats:
-                strategy_dict['trigger_count'] = int(cache_stats.get('filled_count', 0) or 0)
-                last_created_at = cache_stats.get('last_trigger_ts')
-                if last_created_at:
-                    parsed_time = parse_local_datetime(last_created_at)
-                    strategy_dict['last_triggered'] = parsed_time or last_created_at
-                else:
-                    strategy_dict['last_triggered'] = None
-                if cache_stats.get("stale"):
-                    strategy_dict['cache_stale'] = True
-                    self._request_strategy_cache_rebuild(
-                        (strategy.name,), reason="stale_cache"
-                    )
+    def _compose_strategy_payload(
+        self,
+        name: str,
+        strategy: Strategy,
+        settings: Optional[Mapping[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Build the API payload for a strategy record."""
+
+        strategy_dict = asdict(strategy)
+        cache_stats = self._get_cached_stats((strategy.name,)).get(strategy.name)
+        if cache_stats:
+            strategy_dict['trigger_count'] = int(cache_stats.get('filled_count', 0) or 0)
+            last_created_at = cache_stats.get('last_trigger_ts')
+            if last_created_at:
+                parsed_time = parse_local_datetime(last_created_at)
+                strategy_dict['last_triggered'] = parsed_time or last_created_at
             else:
-                strategy_dict['trigger_count'] = 0
                 strategy_dict['last_triggered'] = None
+            if cache_stats.get("stale"):
                 strategy_dict['cache_stale'] = True
                 self._request_strategy_cache_rebuild(
-                    (strategy.name,), reason="missing_cache"
+                    (strategy.name,), reason="stale_cache"
                 )
-            # Convert datetime objects to strings for JSON serialization
-            if strategy_dict['created_at'] and isinstance(strategy_dict['created_at'], datetime):
-                strategy_dict['created_at'] = to_local_iso(strategy_dict['created_at'])
-            if strategy_dict['last_triggered'] and isinstance(strategy_dict['last_triggered'], datetime):
-                strategy_dict['last_triggered'] = to_local_iso(strategy_dict['last_triggered'])
-            # 合并SL/TP设置
-            try:
-                settings = self.db_manager.load_strategy_config()
-            except Exception:
-                settings = getattr(self, 'settings', {}) or {}
-            sl_enabled = settings.get(f"{name}_sl_enabled", False)
-            tp_enabled = settings.get(f"{name}_tp_enabled", False)
-            strategy_dict['sl_enabled'] = sl_enabled
-            strategy_dict['tp_enabled'] = tp_enabled
-            stored_primary = settings.get(f"{name}_primary_symbol")
-            if stored_primary:
-                strategy_dict['primary_symbol'] = stored_primary
-            elif getattr(strategy, 'primary_symbol', None):
-                strategy_dict['primary_symbol'] = strategy.primary_symbol
-            strategy_dict['sl_price'] = settings.get(f"{name}_sl_price") if sl_enabled else None
-            strategy_dict['tp_price'] = settings.get(f"{name}_tp_price") if tp_enabled else None
-            strategy_dict['sl_type'] = settings.get(f"{name}_sl_type", 'amount')
-            strategy_dict['tp_type'] = settings.get(f"{name}_tp_type", 'amount')
-            strategy_dict['schedule'] = settings.get(f"{name}_schedule")
-            strategy_dict['data_subscription'] = settings.get(f"{name}_data_subscription")
-            cooldown_val = settings.get(f"{name}_position_add_cooldown_minutes")
-            try:
-                strategy_dict['position_add_cooldown_minutes'] = int(cooldown_val) if cooldown_val is not None else None
-            except (TypeError, ValueError):
-                strategy_dict['position_add_cooldown_minutes'] = None
-            close_val = settings.get(f"{name}_close_before_close_minutes")
-            try:
-                strategy_dict['close_before_close_minutes'] = int(close_val) if close_val is not None else None
-            except (TypeError, ValueError):
-                strategy_dict['close_before_close_minutes'] = None
+        else:
+            strategy_dict['trigger_count'] = 0
+            strategy_dict['last_triggered'] = None
+            strategy_dict['cache_stale'] = True
+            self._request_strategy_cache_rebuild(
+                (strategy.name,), reason="missing_cache"
+            )
 
-            runtime = self.internal_strategies_runtime.get(name)
-            if runtime:
-                self._attach_parameter_schema(name, strategy_dict, runtime)
-            else:
-                strategy_dict.setdefault("parameters", [])
-                strategy_dict.setdefault("configurable_parameters", [])
-            return strategy_dict
-        return None
+        if strategy_dict['created_at'] and isinstance(strategy_dict['created_at'], datetime):
+            strategy_dict['created_at'] = to_local_iso(strategy_dict['created_at'])
+        if strategy_dict['last_triggered'] and isinstance(strategy_dict['last_triggered'], datetime):
+            strategy_dict['last_triggered'] = to_local_iso(strategy_dict['last_triggered'])
+
+        settings_map: Mapping[str, Any] = settings or {}
+        sl_enabled = settings_map.get(f"{name}_sl_enabled", False)
+        tp_enabled = settings_map.get(f"{name}_tp_enabled", False)
+        strategy_dict['sl_enabled'] = sl_enabled
+        strategy_dict['tp_enabled'] = tp_enabled
+        stored_primary = settings_map.get(f"{name}_primary_symbol")
+        if stored_primary:
+            strategy_dict['primary_symbol'] = stored_primary
+        elif getattr(strategy, 'primary_symbol', None):
+            strategy_dict['primary_symbol'] = strategy.primary_symbol
+        strategy_dict['sl_price'] = settings_map.get(f"{name}_sl_price") if sl_enabled else None
+        strategy_dict['tp_price'] = settings_map.get(f"{name}_tp_price") if tp_enabled else None
+        strategy_dict['sl_type'] = settings_map.get(f"{name}_sl_type", 'amount')
+        strategy_dict['tp_type'] = settings_map.get(f"{name}_tp_type", 'amount')
+        strategy_dict['schedule'] = settings_map.get(f"{name}_schedule")
+        strategy_dict['data_subscription'] = settings_map.get(f"{name}_data_subscription")
+        cooldown_val = settings_map.get(f"{name}_position_add_cooldown_minutes")
+        try:
+            strategy_dict['position_add_cooldown_minutes'] = (
+                int(cooldown_val) if cooldown_val is not None else None
+            )
+        except (TypeError, ValueError):
+            strategy_dict['position_add_cooldown_minutes'] = None
+        close_val = settings_map.get(f"{name}_close_before_close_minutes")
+        try:
+            strategy_dict['close_before_close_minutes'] = (
+                int(close_val) if close_val is not None else None
+            )
+        except (TypeError, ValueError):
+            strategy_dict['close_before_close_minutes'] = None
+
+        runtime = self.internal_strategies_runtime.get(name)
+        if runtime:
+            self._attach_parameter_schema(name, strategy_dict, runtime)
+        else:
+            strategy_dict.setdefault("parameters", [])
+            strategy_dict.setdefault("configurable_parameters", [])
+        return strategy_dict
+
+    def get_strategy(self, name: str) -> Optional[Dict[str, Any]]:
+        """Get a strategy by name"""
+        if name not in self.strategies:
+            return None
+
+        strategy = self.strategies[name]
+        try:
+            settings = self.db_manager.load_strategy_config()
+        except Exception:
+            settings = getattr(self, 'settings', {}) or {}
+        return self._compose_strategy_payload(name, strategy, settings)
+
+    async def get_strategy_async(self, name: str) -> Optional[Dict[str, Any]]:
+        """Asynchronously resolve a strategy, awaiting configuration fetches."""
+
+        if name not in self.strategies:
+            return None
+
+        strategy = self.strategies[name]
+        try:
+            settings = await self.db_manager.load_strategy_config_async()
+        except Exception:
+            settings = getattr(self, 'settings', {}) or {}
+        return self._compose_strategy_payload(name, strategy, settings)
 
     def get_strategy_snapshot(self, name: str) -> Optional[Dict[str, Any]]:
         """Return a lightweight strategy snapshot without hitting the database."""
@@ -2657,6 +2739,126 @@ class StrategyManager:
                     runtime_info = {}
                 if isinstance(runtime_info, dict):
                     runtime_file_path = runtime_info.get("file_path") or runtime_file_path
+                    extracted_rules = runtime_info.pop("risk_rules", {})
+                    if isinstance(extracted_rules, dict):
+                        runtime_risk_rules.update(extracted_rules)
+                        symbols.update(extracted_rules.keys())
+                    for key, value in runtime_info.items():
+                        if key in {"name", "strategy_type", "file_path"}:
+                            continue
+                        if value is None:
+                            continue
+                        strategy[key] = value
+
+        display_file_path: Optional[str] = None
+
+        if persisted_file_path:
+            module_path = self._resolve_strategy_file_path(persisted_file_path)
+            display_file_path = self._normalize_strategy_file_display(
+                persisted_file_path, module_path
+            )
+
+        if not display_file_path and runtime_file_path:
+            runtime_module_path = self._resolve_strategy_file_path(runtime_file_path)
+            display_file_path = self._normalize_strategy_file_display(
+                runtime_file_path, runtime_module_path
+            )
+
+        if display_file_path:
+            strategy["file_path"] = display_file_path
+            if runtime and getattr(runtime, "file_path", None) != display_file_path:
+                try:
+                    setattr(runtime, "file_path", display_file_path)
+                except Exception:
+                    pass
+
+        self._attach_parameter_schema(name, strategy, runtime)
+
+        combined_rules: Dict[str, Any] = {}
+        if runtime_risk_rules:
+            combined_rules.update(runtime_risk_rules)
+
+        if self.risk_manager and hasattr(self.risk_manager, "risk_rules"):
+            for sym in symbols:
+                rule = self.risk_manager.risk_rules.get(sym)
+                if rule:
+                    combined_rules[sym] = asdict(rule)
+
+        strategy["risk_rules"] = combined_rules
+
+        position_settings: Dict[str, Any] = {}
+        cooldown_value = strategy.get("position_add_cooldown_minutes")
+        if cooldown_value:
+            position_settings["position_add_cooldown_minutes"] = cooldown_value
+        close_minutes = strategy.get("close_before_close_minutes")
+        if close_minutes:
+            position_settings["close_before_close_minutes"] = close_minutes
+        if position_settings:
+            strategy["position_settings"] = position_settings
+
+        if self.strategy_risk_manager:
+            try:
+                strategy["strategy_risk_settings"] = self.strategy_risk_manager.get_settings(name)
+            except Exception as exc:  # pragma: no cover - defensive guard
+                strategy_logger.warning(
+                    "Failed to load strategy risk settings",
+                    strategy=name,
+                    error=str(exc),
+                )
+
+        self._store_internal_strategy_info_cache(name, strategy)
+        return strategy
+
+    async def get_internal_strategy_info_async(
+        self, name: str
+    ) -> Optional[Dict[str, Any]]:
+        """Async helper matching :meth:`get_internal_strategy_info`."""
+
+        cached = self._get_cached_internal_strategy_info(name)
+        if cached:
+            return cached
+
+        record = self.strategies.get(name)
+        if record and record.strategy_type == "internal":
+            self._load_internal_strategy_runtime(record)
+
+        strategy = await self.get_strategy_async(name)
+        if not strategy or strategy.get("strategy_type") != "internal":
+            return None
+
+        saved_symbol = self._get_strategy_setting(name, "primary_symbol")
+        if saved_symbol and not strategy.get("primary_symbol"):
+            strategy["primary_symbol"] = saved_symbol
+
+        symbols: Set[str] = set()
+        schedule_items = strategy.get("schedule") or []
+        if isinstance(schedule_items, list):
+            for item in schedule_items:
+                if isinstance(item, dict):
+                    sym = item.get("symbol")
+                    if sym:
+                        symbols.add(sym)
+
+        runtime = self.internal_strategies_runtime.get(name)
+        if runtime is None:
+            runtime = self._load_internal_strategy_runtime(self.strategies.get(name))
+        runtime_risk_rules: Dict[str, Any] = {}
+        persisted_file_path = strategy.get("file_path")
+        runtime_file_path: Optional[str] = None
+
+        if runtime:
+            runtime_symbol = getattr(runtime, "symbol", None)
+            if runtime_symbol:
+                symbols.add(runtime_symbol)
+            info_provider = getattr(runtime, "get_internal_info", None)
+            if callable(info_provider):
+                try:
+                    runtime_info = info_provider() or {}
+                except Exception as exc:  # pragma: no cover - defensive guard
+                    strategy_logger.warning(f"Runtime info for {name} failed: {exc}")
+                    runtime_info = {}
+                if isinstance(runtime_info, dict):
+                    runtime_file_path = runtime_info.pop("file_path", None) or runtime_file_path
                     extracted_rules = runtime_info.pop("risk_rules", {})
                     if isinstance(extracted_rules, dict):
                         runtime_risk_rules.update(extracted_rules)
@@ -3077,6 +3279,13 @@ class StrategyManager:
 
         return status
 
+    async def get_internal_strategy_status_async(
+        self, name: str
+    ) -> Optional[Dict[str, Any]]:
+        """Async helper matching :meth:`get_internal_strategy_status`."""
+
+        return self.get_internal_strategy_status(name)
+
     async def update_strategy(self, name: str, updates: Dict[str, Any]) -> bool:
         """Update a strategy"""
         try:
@@ -3162,7 +3371,7 @@ class StrategyManager:
                     settings_to_save[f"{name}_sl_atr_params"] = atr_params_update
 
             # 先保存策略实体（常规字段）
-            self._save_strategies()
+            await self._save_strategies_async()
 
             if parameter_updates and runtime:
                 try:
@@ -3178,7 +3387,7 @@ class StrategyManager:
                         settings_to_save[storage_key] = param_value
 
             # 持久化SL/TP设置
-            self._persist_strategy_settings(settings_to_save, settings_to_remove)
+            await self._persist_strategy_settings_async(settings_to_save, settings_to_remove)
 
             if 'primary_symbol' in updates:
                 runtime_instance = self.internal_strategies_runtime.get(name)
@@ -3812,7 +4021,12 @@ if __name__ == "__main__":
                 "names": strategy_names,
             }
         return result
-        
+
+    async def get_strategies_async(self) -> List[Dict[str, Any]]:
+        """Coroutine-friendly wrapper around :meth:`get_strategies`."""
+
+        return self.get_strategies()
+
 
             
     def delete_strategy(self, name: str) -> bool:
@@ -3906,6 +4120,19 @@ if __name__ == "__main__":
             strategy_logger.error(f"Failed to get executions for {strategy_name}: {e}")
             return []
 
+    async def get_executions_async(self, strategy_name: str, limit: int = 100):
+        try:
+            symbol = self._resolve_strategy_primary_symbol(strategy_name)
+            return await self.db_manager.load_strategy_orders_async(
+                strategy_name,
+                'strategy',
+                limit,
+                symbol,
+            )
+        except Exception as exc:
+            strategy_logger.error(f"Failed to get executions for {strategy_name}: {exc}")
+            return []
+
     def get_strategy_performance(self, strategy_name: str, start_date: Optional[datetime] = None, end_date: Optional[datetime] = None) -> Dict[str, Any]:
         """Get strategy performance metrics based on orders"""
         try:
@@ -3921,107 +4148,162 @@ if __name__ == "__main__":
 
             trigger_rebuild = not cache_stats or cache_stats.get("stale")
             orders = self.db_manager.load_strategy_orders(strategy_name, 'strategy', limit=1000)
-            if start_date:
-                orders = [o for o in orders if o.timestamp and parse_local_datetime(o.timestamp) >= start_date]
-            if end_date:
-                orders = [o for o in orders if o.timestamp and parse_local_datetime(o.timestamp) <= end_date]
-            pnl_values = [o.pnl for o in orders if o.pnl is not None]
-            commission_values: List[float] = []
-            for order in orders:
-                commission_raw = getattr(order, 'commission', None)
-                if commission_raw is None:
-                    continue
-                try:
-                    commission_values.append(float(commission_raw))
-                except (TypeError, ValueError):
-                    continue
-            total_commission = sum(commission_values) if commission_values else 0
-            total_executions = len(orders)
-            if total_executions == 0:
-                metrics = {
-                    'total_executions': 0,
-                    'total_pnl': 0,
-                    'avg_pnl': 0,
-                    'winning_trades': 0,
-                    'losing_trades': 0,
-                    'win_rate': 0,
-                    'max_drawdown': 0,
-                    'sharpe_ratio': 0,
-                    'avg_trade_duration': 0,
-                    'total_commission': 0,
-                }
-            else:
-                total_pnl = sum(pnl_values)
-                avg_pnl = total_pnl / len(pnl_values) if pnl_values else 0
-                winning_trades = len([p for p in pnl_values if p > 0])
-                losing_trades = len([p for p in pnl_values if p < 0])
-                win_rate = (winning_trades / len(pnl_values) * 100) if pnl_values else 0
-                cumulative = []
-                run_total = 0
-                for p in pnl_values:
-                    run_total += p
-                    cumulative.append(run_total)
-                max_drawdown = 0
-                if cumulative:
-                    peak = cumulative[0]
-                    for value in cumulative:
-                        if value > peak:
-                            peak = value
-                        drawdown = peak - value
-                        if drawdown > max_drawdown:
-                            max_drawdown = drawdown
-                sharpe_ratio = 0
-                if pnl_values and len(pnl_values) > 1:
-                    import statistics
-                    std_dev = statistics.stdev(pnl_values)
-                    if std_dev != 0:
-                        sharpe_ratio = (avg_pnl / std_dev) * (len(pnl_values) ** 0.5)
-                durations: List[float] = []
-                for order in orders:
-                    status = getattr(order, "status", "")
-                    if isinstance(status, str) and status.lower() != "filled":
-                        continue
-
-                    created_raw = getattr(order, "timestamp", None)
-                    executed_raw = getattr(order, "executed_at", None)
-                    created_dt = parse_local_datetime(created_raw) if created_raw else None
-                    executed_dt = parse_local_datetime(executed_raw) if executed_raw else None
-
-                    # 对于缺失成交时间的订单，使用创建时间作为结束时间，确保不会产生负值
-                    if created_dt and not executed_dt:
-                        executed_dt = created_dt
-
-                    if not created_dt or not executed_dt:
-                        continue
-
-                    duration_seconds = (executed_dt - created_dt).total_seconds()
-                    if duration_seconds >= 0:
-                        durations.append(duration_seconds)
-
-                avg_trade_duration = sum(durations) / len(durations) if durations else 0
-
-                metrics = {
-                    'total_executions': total_executions,
-                    'total_pnl': total_pnl,
-                    'avg_pnl': avg_pnl,
-                    'winning_trades': winning_trades,
-                    'losing_trades': losing_trades,
-                    'win_rate': win_rate,
-                    'max_drawdown': max_drawdown,
-                    'sharpe_ratio': sharpe_ratio,
-                    'avg_trade_duration': avg_trade_duration,
-                    'total_commission': total_commission,
-                }
-
-            if trigger_rebuild:
-                try:
-                    self.rebuild_strategy_cache([strategy_name])
-                except Exception:
-                    pass
-
-            return metrics
+            return self._compute_strategy_performance_from_orders(
+                strategy_name,
+                orders,
+                start_date=start_date,
+                end_date=end_date,
+                trigger_rebuild=trigger_rebuild,
+            )
         except Exception as e:
             strategy_logger.error(f"Failed to get strategy performance for {strategy_name}: {e}")
+            return {}
+
+    def _compute_strategy_performance_from_orders(
+        self,
+        strategy_name: str,
+        orders: List[Order],
+        *,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+        trigger_rebuild: bool = False,
+    ) -> Dict[str, Any]:
+        if start_date:
+            orders = [o for o in orders if o.timestamp and parse_local_datetime(o.timestamp) >= start_date]
+        if end_date:
+            orders = [o for o in orders if o.timestamp and parse_local_datetime(o.timestamp) <= end_date]
+
+        pnl_values = [o.pnl for o in orders if o.pnl is not None]
+        commission_values: List[float] = []
+        for order in orders:
+            commission_raw = getattr(order, 'commission', None)
+            if commission_raw is None:
+                continue
+            try:
+                commission_values.append(float(commission_raw))
+            except (TypeError, ValueError):
+                continue
+        total_commission = sum(commission_values) if commission_values else 0
+        total_executions = len(orders)
+
+        if total_executions == 0:
+            metrics = {
+                'total_executions': 0,
+                'total_pnl': 0,
+                'avg_pnl': 0,
+                'winning_trades': 0,
+                'losing_trades': 0,
+                'win_rate': 0,
+                'max_drawdown': 0,
+                'sharpe_ratio': 0,
+                'avg_trade_duration': 0,
+                'total_commission': 0,
+            }
+        else:
+            total_pnl = sum(pnl_values)
+            avg_pnl = total_pnl / len(pnl_values) if pnl_values else 0
+            winning_trades = len([p for p in pnl_values if p > 0])
+            losing_trades = len([p for p in pnl_values if p < 0])
+            win_rate = (winning_trades / len(pnl_values) * 100) if pnl_values else 0
+            cumulative = []
+            run_total = 0
+            for p in pnl_values:
+                run_total += p
+                cumulative.append(run_total)
+            max_drawdown = 0
+            if cumulative:
+                peak = cumulative[0]
+                for value in cumulative:
+                    if value > peak:
+                        peak = value
+                    drawdown = peak - value
+                    if drawdown > max_drawdown:
+                        max_drawdown = drawdown
+            sharpe_ratio = 0
+            if pnl_values and len(pnl_values) > 1:
+                import statistics
+
+                std_dev = statistics.stdev(pnl_values)
+                if std_dev != 0:
+                    sharpe_ratio = (avg_pnl / std_dev) * (len(pnl_values) ** 0.5)
+            durations: List[float] = []
+            for order in orders:
+                status = getattr(order, "status", "")
+                if isinstance(status, str) and status.lower() != "filled":
+                    continue
+
+                created_raw = getattr(order, "timestamp", None)
+                executed_raw = getattr(order, "executed_at", None)
+                created_dt = parse_local_datetime(created_raw) if created_raw else None
+                executed_dt = parse_local_datetime(executed_raw) if executed_raw else None
+
+                if created_dt and not executed_dt:
+                    executed_dt = created_dt
+
+                if not created_dt or not executed_dt:
+                    continue
+
+                duration_seconds = (executed_dt - created_dt).total_seconds()
+                if duration_seconds >= 0:
+                    durations.append(duration_seconds)
+
+            avg_trade_duration = sum(durations) / len(durations) if durations else 0
+
+            metrics = {
+                'total_executions': total_executions,
+                'total_pnl': total_pnl,
+                'avg_pnl': avg_pnl,
+                'winning_trades': winning_trades,
+                'losing_trades': losing_trades,
+                'win_rate': win_rate,
+                'max_drawdown': max_drawdown,
+                'sharpe_ratio': sharpe_ratio,
+                'avg_trade_duration': avg_trade_duration,
+                'total_commission': total_commission,
+            }
+
+        if trigger_rebuild:
+            try:
+                self.rebuild_strategy_cache([strategy_name])
+            except Exception:
+                pass
+
+        return metrics
+
+    async def get_strategy_performance_async(
+        self,
+        strategy_name: str,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+    ) -> Dict[str, Any]:
+        try:
+            cache_stats = self._get_cached_stats((strategy_name,)).get(strategy_name)
+            if cache_stats and not cache_stats.get("stale"):
+                cached_metrics = self._compute_cached_performance(
+                    strategy_name,
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+                if cached_metrics is not None:
+                    return cached_metrics
+
+            trigger_rebuild = not cache_stats or cache_stats.get("stale")
+            orders = await self.db_manager.load_strategy_orders_async(
+                strategy_name,
+                'strategy',
+                1000,
+            )
+            return self._compute_strategy_performance_from_orders(
+                strategy_name,
+                orders,
+                start_date=start_date,
+                end_date=end_date,
+                trigger_rebuild=trigger_rebuild,
+            )
+        except Exception as exc:
+            strategy_logger.error(
+                f"Failed to get strategy performance asynchronously for {strategy_name}: {exc}"
+            )
             return {}
     def generate_auth_token(self) -> str:
         """Generate a new authentication token"""

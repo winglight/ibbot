@@ -6,6 +6,7 @@ SQLite数据库模块
 import sqlite3
 import json
 import time
+import functools
 from contextlib import contextmanager
 from pathlib import Path
 from threading import RLock
@@ -17,6 +18,7 @@ import pandas as pd
 from loguru import logger
 import asyncio
 
+from src.async_executor import get_async_executor
 from src.utils import (
     ensure_local_timezone,
     now_local,
@@ -92,8 +94,13 @@ def _normalise_iso_timestamp(value: Optional[Any]) -> Optional[str]:
 
 class DatabaseManager:
     """数据库管理器"""
-    
-    def __init__(self, db_path: str = "data/trading_bot.db"):
+
+    def __init__(
+        self,
+        db_path: str = "data/trading_bot.db",
+        *,
+        async_executor=None,
+    ):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(exist_ok=True)
 
@@ -105,8 +112,36 @@ class DatabaseManager:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA busy_timeout = 10000")
 
+        self._async_executor = async_executor or get_async_executor()
+        self._db_executor = self._coerce_executor(self._async_executor)
+
         self._init_database()
         database_logger.info(f"Database initialized at: {self.db_path}")
+
+    @staticmethod
+    def _coerce_executor(executor_like):
+        if executor_like is None:
+            return None
+        candidate = getattr(executor_like, "db_executor", None)
+        return candidate if candidate is not None else executor_like
+
+    def set_async_executor(self, executor) -> None:
+        """Allow tests to inject a custom executor container."""
+
+        self._async_executor = executor or get_async_executor()
+        self._db_executor = self._coerce_executor(self._async_executor)
+
+    def _ensure_db_executor(self):
+        if self._db_executor is None:
+            self._async_executor = get_async_executor()
+            self._db_executor = self._coerce_executor(self._async_executor)
+        return self._db_executor
+
+    async def _run_in_db_executor(self, func, *args, **kwargs):
+        loop = asyncio.get_running_loop()
+        executor = self._ensure_db_executor()
+        callable_obj = functools.partial(func, *args, **kwargs)
+        return await loop.run_in_executor(executor, callable_obj)
 
     @contextmanager
     def _connection(self):
@@ -417,6 +452,9 @@ class DatabaseManager:
             )
             database_logger.debug(f"Order saved: {order.order_id}")
 
+    async def save_order_async(self, order: Order):
+        await self._run_in_db_executor(self.save_order, order)
+
 
     def update_order(self, order_id: str, status: str = None, price: float = None, executed_at: str = None, commission: float = None, pnl: float = None):
         """更新订单状态和价格（新）"""
@@ -472,10 +510,30 @@ class DatabaseManager:
                         database_logger.error(f"Failed to update order {order_id}: {exc}")
                         raise
     
+    async def update_order_async(
+        self,
+        order_id: str,
+        *,
+        status: str = None,
+        price: float = None,
+        executed_at: str = None,
+        commission: float = None,
+        pnl: float = None,
+    ):
+        await self._run_in_db_executor(
+            self.update_order,
+            order_id,
+            status=status,
+            price=price,
+            executed_at=executed_at,
+            commission=commission,
+            pnl=pnl,
+        )
+
     async def update_order_commission_pnl(self, order_id: str, commission: float, pnl: float):
         """异步更新订单的佣金和PnL"""
         try:
-            await asyncio.to_thread(self.update_order, order_id, commission=commission, pnl=pnl)
+            await self.update_order_async(order_id, commission=commission, pnl=pnl)
             database_logger.info(f"Updated order {order_id} commission={commission}, pnl={pnl}")
         except Exception as e:
             database_logger.error(f"Error updating order {order_id} commission/pnl: {e}")
@@ -503,6 +561,9 @@ class DatabaseManager:
             orders.append(Order(*row))
         database_logger.debug(f"Loaded {len(orders)} orders")
         return orders
+
+    async def load_orders_async(self) -> List[Order]:
+        return await self._run_in_db_executor(self.load_orders)
 
     def fetch_orders_for_pnl(self, include_deleted: bool = False) -> List[Dict[str, Any]]:
         """获取用于PnL统计的基础订单信息"""
@@ -570,6 +631,9 @@ class DatabaseManager:
             database_logger.debug(f"Loaded {len(rules)} risk rules")
             return rules
 
+    async def load_risk_rules_async(self) -> List[RiskRule]:
+        return await self._run_in_db_executor(self.load_risk_rules)
+
     def save_risk_rule(self, rule: RiskRule):
         """保存风险规则（按 symbol 幂等：存在则更新，不存在则插入）"""
         with self._cursor() as cursor:
@@ -620,12 +684,18 @@ class DatabaseManager:
                 ),
             )
             database_logger.debug(f"Risk rule saved: {rule.symbol}")
+
+    async def save_risk_rule_async(self, rule: RiskRule):
+        await self._run_in_db_executor(self.save_risk_rule, rule)
     
     def delete_risk_rule(self, symbol: str):
         """删除风险规则"""
         with self._cursor() as cursor:
             cursor.execute("DELETE FROM risk_rules WHERE symbol = ?", (symbol,))
             database_logger.debug(f"Risk rule deleted for symbol: {symbol}")
+
+    async def delete_risk_rule_async(self, symbol: str):
+        await self._run_in_db_executor(self.delete_risk_rule, symbol)
     
     # 策略相关方法
     def save_strategy(self, strategy: Strategy):
@@ -634,7 +704,7 @@ class DatabaseManager:
         if not strategy.created_at:
             strategy.created_at = now
         strategy.updated_at = now
-        
+
         with self._cursor() as cursor:
             cursor.execute("""
                 INSERT OR REPLACE INTO strategies
@@ -646,20 +716,26 @@ class DatabaseManager:
                 strategy.created_at, strategy.updated_at
             ))
             database_logger.debug(f"Strategy saved: {strategy.name}")
+
+    async def save_strategy_async(self, strategy: Strategy):
+        await self._run_in_db_executor(self.save_strategy, strategy)
     
     def load_strategies(self) -> List[Strategy]:
         """加载所有策略"""
         with self._cursor() as cursor:
             cursor.execute("SELECT name, strategy_type, enabled, api_endpoint, file_path, description, created_at, updated_at FROM strategies")
             rows = cursor.fetchall()
-            
+
             strategies = []
             for row in rows:
                 strategy = Strategy(*row)
                 strategies.append(strategy)
-            
-            database_logger.debug(f"Loaded {len(strategies)} strategies")
-            return strategies
+
+        database_logger.debug(f"Loaded {len(strategies)} strategies")
+        return strategies
+
+    async def load_strategies_async(self) -> List[Strategy]:
+        return await self._run_in_db_executor(self.load_strategies)
     
     def get_strategy(self, name: str) -> Optional[Strategy]:
         """获取指定策略"""
@@ -732,6 +808,21 @@ class DatabaseManager:
             orders.append(Order(*row))
         database_logger.debug(f"Loaded {len(orders)} orders for strategy {strategy_name}")
         return orders
+
+    async def load_strategy_orders_async(
+        self,
+        strategy_name: str,
+        order_source: str = 'strategy',
+        limit: Optional[int] = 100,
+        symbol: Optional[str] = None,
+    ) -> List[Order]:
+        return await self._run_in_db_executor(
+            self.load_strategy_orders,
+            strategy_name,
+            order_source,
+            limit,
+            symbol,
+        )
 
     def get_strategy_daily_pnl(self, strategy_name: str) -> List[Dict[str, float]]:
         """按天聚合指定策略的PNL数据"""
@@ -1149,7 +1240,7 @@ class DatabaseManager:
     # 通知相关方法
     # 旧的通知设置方法已删除，请使用 save_notification_config 和 load_notification_config
     
-    def save_notification_history(self, channel: str, event_type: str, message: str, 
+    def save_notification_history(self, channel: str, event_type: str, message: str,
                                  status: str = 'pending', error_message: str = None):
         """保存通知历史"""
         with self._cursor() as cursor:
@@ -1163,6 +1254,23 @@ class DatabaseManager:
             """, (channel, event_type, message, status, error_message, sent_at, now))
 
             database_logger.debug(f"Notification history saved: {channel} - {event_type}")
+
+    async def save_notification_history_async(
+        self,
+        channel: str,
+        event_type: str,
+        message: str,
+        status: str = 'pending',
+        error_message: str = None,
+    ):
+        await self._run_in_db_executor(
+            self.save_notification_history,
+            channel,
+            event_type,
+            message,
+            status,
+            error_message,
+        )
     
     def load_notification_history(self, channel: str = None, status: str = None,
                                  since: str = None, limit: int = 100) -> List[Dict[str, Any]]:
@@ -1216,6 +1324,21 @@ class DatabaseManager:
             
             database_logger.debug(f"Loaded notification history: {len(history)} records")
             return history
+
+    async def load_notification_history_async(
+        self,
+        channel: str = None,
+        status: str = None,
+        since: str = None,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        return await self._run_in_db_executor(
+            self.load_notification_history,
+            channel,
+            status,
+            since,
+            limit,
+        )
 
     def clear_notification_history(self) -> int:
         """清空通知历史记录"""
@@ -1281,12 +1404,15 @@ class DatabaseManager:
         """保存通知配置到config表"""
         self.save_config('notification_settings', settings, 'Notification configuration settings')
         database_logger.debug(f"Notification config saved to config table: {list(settings.keys())}")
-    
+
     def load_notification_config(self) -> Dict[str, Any]:
         """从config表加载通知配置"""
         config = self.get_config('notification_settings', {})
         database_logger.debug(f"Loaded notification config from config table: {list(config.keys()) if config else 'empty'}")
         return config
+
+    async def load_notification_config_async(self) -> Dict[str, Any]:
+        return await self._run_in_db_executor(self.load_notification_config)
 
     def save_dom_config(self, settings: Dict[str, Any]):
         """保存DOM设置到config表"""
@@ -1306,12 +1432,18 @@ class DatabaseManager:
         """保存策略配置到config表"""
         self.save_config('strategy_settings', settings, 'Strategy configuration settings')
         database_logger.debug(f"Strategy config saved to config table: {list(settings.keys())}")
-    
+
     def load_strategy_config(self) -> Dict[str, Any]:
         """从config表加载策略配置"""
         config = self.get_config('strategy_settings', {})
         database_logger.debug(f"Loaded strategy config from config table: {list(config.keys()) if config else 'empty'}")
         return config
+
+    async def save_strategy_config_async(self, settings: Dict[str, Any]):
+        await self._run_in_db_executor(self.save_strategy_config, settings)
+
+    async def load_strategy_config_async(self) -> Dict[str, Any]:
+        return await self._run_in_db_executor(self.load_strategy_config)
     
     def get_config(self, config_key: str, default_value: Any = None) -> Any:
         """获取配置"""
@@ -1359,9 +1491,17 @@ class DatabaseManager:
 # 全局数据库实例
 db_manager = None
 
-def get_db_manager(db_path: str = "data/trading_bot.db") -> DatabaseManager:
+
+def get_db_manager(
+    db_path: str = "data/trading_bot.db",
+    *,
+    async_executor=None,
+) -> DatabaseManager:
     """获取数据库管理器单例"""
+
     global db_manager
     if db_manager is None:
-        db_manager = DatabaseManager(db_path)
+        db_manager = DatabaseManager(db_path, async_executor=async_executor)
+    elif async_executor is not None:
+        db_manager.set_async_executor(async_executor)
     return db_manager

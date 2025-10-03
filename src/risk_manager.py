@@ -19,6 +19,7 @@ from dotenv import load_dotenv
 from .notification_manager import NotificationManager
 from .database import DatabaseManager, Order, get_db_manager
 from .database import RiskRule as DatabaseRiskRule
+from .async_executor import get_async_executor
 from .utils import ensure_local_timezone, now_local, parse_local_datetime, to_local_iso
 
 load_dotenv()
@@ -85,9 +86,18 @@ class PositionSizingResult:
     explanation: str = ""
 
 class RiskManager:
-    def __init__(self, notification_manager: NotificationManager):
+    def __init__(
+        self,
+        notification_manager: NotificationManager,
+        *,
+        db_manager: Optional[DatabaseManager] = None,
+        async_executor=None,
+    ):
         self.notification_manager = notification_manager
-        self.db_manager = get_db_manager()
+        self._async_executor = async_executor or get_async_executor()
+        self.db_manager = db_manager or get_db_manager(async_executor=self._async_executor)
+        self.db_manager.set_async_executor(self._async_executor)
+        self._db_executor = getattr(self._async_executor, "db_executor", None)
         
         # 内存中的缓存，从数据库加载
         self.risk_rules: Dict[str, RiskRule] = {}
@@ -212,9 +222,9 @@ class RiskManager:
         self._load_from_database()
         self._load_position_limits_from_db()
 
-    def _persist_risk_rule_sync(self, db_rule: DatabaseRiskRule) -> None:
-        """在后台线程中持久化风险规则，避免阻塞事件循环。"""
-        self.db_manager.save_risk_rule(db_rule)
+    async def _persist_risk_rule(self, db_rule: DatabaseRiskRule) -> None:
+        """Persist a risk rule using the shared database executor."""
+        await self.db_manager.save_risk_rule_async(db_rule)
 
     def _resolve_rule_type(
         self, rule_type: Optional[str], auto_trailing: Optional[bool]
@@ -554,6 +564,10 @@ class RiskManager:
             risk_logger.error(f"get_config error: {e}")
             return {}
 
+    async def get_config_async(self) -> Dict[str, Any]:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(self._db_executor, self.get_config)
+
     # 新增：更新风控配置并持久化
     def update_config(self, updates: Dict[str, Any]) -> Dict[str, Any]:
         try:
@@ -738,47 +752,102 @@ class RiskManager:
             risk_logger.info(
                 f"add_risk_rule called: symbol={symbol}, SL={stop_loss_price}, TP={take_profit_price}, max_loss%={max_loss_percent}, max_time_span={max_time_span}, auto_trailing={auto_trailing}, rule_type={rule_type}"
             )
-            normalised_rule_type, auto_trailing_flag = self._resolve_rule_type(
-                rule_type, auto_trailing
-            )
-            rule = RiskRule(
-                symbol=symbol,
+            rule, db_rule = self._create_risk_rule_objects(
+                symbol,
                 stop_loss_price=stop_loss_price,
                 take_profit_price=take_profit_price,
                 max_loss_percent=max_loss_percent,
-                enabled=True,
                 max_time_span=max_time_span,
-                created_at=now_local(),
-                auto_trailing=auto_trailing_flag,
-                atr_params=atr_params or {},
-                rule_type=normalised_rule_type,
+                auto_trailing=auto_trailing,
+                atr_params=atr_params,
+                rule_type=rule_type,
             )
 
-            # 转换为数据库层的 RiskRule 并保存到数据库
-            db_rule = DatabaseRiskRule(
-                symbol=rule.symbol,
-                stop_loss_price=rule.stop_loss_price,
-                take_profit_price=rule.take_profit_price,
-                max_loss_percent=rule.max_loss_percent,
-                enabled=rule.enabled,
-                max_time_span=rule.max_time_span,
-                timestamp=to_local_iso(rule.created_at) or now_local().isoformat(),
-                auto_trailing=rule.auto_trailing,
-                atr_params=rule.atr_params,
-                rule_type=rule.rule_type,
-            )
             self.db_manager.save_risk_rule(db_rule)
             risk_logger.debug(f"Risk rule persisted: {db_rule}")
 
-            # 更新内存缓存
-            self.risk_rules[symbol] = rule
-            self._sync_rule_trailing_state(rule)
-
-            risk_logger.info(f"Risk rule added for {symbol}")
+            self._finalise_risk_rule_add(symbol, rule)
             return True
         except Exception as e:
             risk_logger.error(f"Error adding risk rule: {e}")
             return False
+
+    async def add_risk_rule_async(
+        self,
+        symbol: str,
+        stop_loss_price: Optional[float] = None,
+        take_profit_price: Optional[float] = None,
+        max_loss_percent: Optional[float] = None,
+        max_time_span: Optional[int] = None,
+        auto_trailing: bool = False,
+        atr_params: Optional[Dict[str, Any]] = None,
+        rule_type: str = "fixed",
+    ) -> bool:
+        try:
+            rule, db_rule = self._create_risk_rule_objects(
+                symbol,
+                stop_loss_price=stop_loss_price,
+                take_profit_price=take_profit_price,
+                max_loss_percent=max_loss_percent,
+                max_time_span=max_time_span,
+                auto_trailing=auto_trailing,
+                atr_params=atr_params,
+                rule_type=rule_type,
+            )
+            await self.db_manager.save_risk_rule_async(db_rule)
+            risk_logger.debug(f"Risk rule persisted asynchronously: {db_rule}")
+            self._finalise_risk_rule_add(symbol, rule)
+            return True
+        except Exception as exc:
+            risk_logger.error(f"Error adding risk rule asynchronously: {exc}")
+            return False
+
+    def _create_risk_rule_objects(
+        self,
+        symbol: str,
+        *,
+        stop_loss_price: Optional[float] = None,
+        take_profit_price: Optional[float] = None,
+        max_loss_percent: Optional[float] = None,
+        max_time_span: Optional[int] = None,
+        auto_trailing: bool = False,
+        atr_params: Optional[Dict[str, Any]] = None,
+        rule_type: str = "fixed",
+    ) -> Tuple[RiskRule, DatabaseRiskRule]:
+        normalised_rule_type, auto_trailing_flag = self._resolve_rule_type(
+            rule_type, auto_trailing
+        )
+        rule = RiskRule(
+            symbol=symbol,
+            stop_loss_price=stop_loss_price,
+            take_profit_price=take_profit_price,
+            max_loss_percent=max_loss_percent,
+            enabled=True,
+            max_time_span=max_time_span,
+            created_at=now_local(),
+            auto_trailing=auto_trailing_flag,
+            atr_params=atr_params or {},
+            rule_type=normalised_rule_type,
+        )
+        timestamp = to_local_iso(rule.created_at) or now_local().isoformat()
+        db_rule = DatabaseRiskRule(
+            symbol=rule.symbol,
+            stop_loss_price=rule.stop_loss_price,
+            take_profit_price=rule.take_profit_price,
+            max_loss_percent=rule.max_loss_percent,
+            enabled=rule.enabled,
+            max_time_span=rule.max_time_span,
+            timestamp=timestamp,
+            auto_trailing=rule.auto_trailing,
+            atr_params=rule.atr_params,
+            rule_type=rule.rule_type,
+        )
+        return rule, db_rule
+
+    def _finalise_risk_rule_add(self, symbol: str, rule: RiskRule) -> None:
+        self.risk_rules[symbol] = rule
+        self._sync_rule_trailing_state(rule)
+        risk_logger.info(f"Risk rule added for {symbol}")
 
     def remove_risk_rule(self, symbol: str):
         """删除风险规则"""
@@ -786,30 +855,38 @@ class RiskManager:
             risk_logger.info(f"remove_risk_rule called: symbol={symbol}")
             # 从数据库删除
             self.db_manager.delete_risk_rule(symbol)
-
-            # 从内存删除
-            if symbol in self.risk_rules:
-                rule = self.risk_rules[symbol]
-                resolved_type, _ = self._resolve_rule_type(rule.rule_type, rule.auto_trailing)
-                if (
-                    resolved_type == "trailing"
-                    and getattr(self, 'atr_service', None)
-                ):
-                    try:
-                        self.atr_service.disable_symbol(symbol)
-                    except Exception as atr_err:
-                        risk_logger.warning(
-                            f"Failed to disable ATR subscription for {symbol}: {atr_err}"
-                        )
-                del self.risk_rules[symbol]
-                risk_logger.info(f"Risk rule removed for {symbol}")
-                return True
-            else:
-                risk_logger.warning(f"Risk rule for {symbol} not found")
-                return False
+            return self._remove_risk_rule_from_cache(symbol)
         except Exception as e:
             risk_logger.error(f"Error removing risk rule: {e}")
             return False
+
+    async def remove_risk_rule_async(self, symbol: str) -> bool:
+        try:
+            await self.db_manager.delete_risk_rule_async(symbol)
+            return self._remove_risk_rule_from_cache(symbol)
+        except Exception as exc:
+            risk_logger.error(f"Error removing risk rule asynchronously: {exc}")
+            return False
+
+    def _remove_risk_rule_from_cache(self, symbol: str) -> bool:
+        if symbol in self.risk_rules:
+            rule = self.risk_rules[symbol]
+            resolved_type, _ = self._resolve_rule_type(rule.rule_type, rule.auto_trailing)
+            if (
+                resolved_type == "trailing"
+                and getattr(self, 'atr_service', None)
+            ):
+                try:
+                    self.atr_service.disable_symbol(symbol)
+                except Exception as atr_err:
+                    risk_logger.warning(
+                        f"Failed to disable ATR subscription for {symbol}: {atr_err}"
+                    )
+            del self.risk_rules[symbol]
+            risk_logger.info(f"Risk rule removed for {symbol}")
+            return True
+        risk_logger.warning(f"Risk rule for {symbol} not found")
+        return False
 
     def update_risk_rule(self, symbol: str, stop_loss_price: float = None,
                          take_profit_price: float = None, enabled: Optional[bool] = None,
@@ -822,70 +899,131 @@ class RiskManager:
             risk_logger.info(
                 f"update_risk_rule called: symbol={symbol}, SL={stop_loss_price}, TP={take_profit_price}, enabled={enabled}, max_time_span={max_time_span}, auto_trailing={auto_trailing}, rule_type={rule_type}"
             )
-            if symbol in self.risk_rules:
-                rule = self.risk_rules[symbol]
-                if stop_loss_price is not None:
-                    risk_logger.debug(f"Updating SL for {symbol}: {rule.stop_loss_price} -> {stop_loss_price}")
-                    rule.stop_loss_price = stop_loss_price
-                if take_profit_price is not None:
-                    risk_logger.debug(f"Updating TP for {symbol}: {rule.take_profit_price} -> {take_profit_price}")
-                    rule.take_profit_price = take_profit_price
-                if enabled is not None and rule.enabled != enabled:
-                    risk_logger.debug(f"Updating enabled for {symbol}: {rule.enabled} -> {enabled}")
-                    rule.enabled = enabled
-                if max_time_span is not None:
-                    rule.max_time_span = max_time_span
-                if rule_type is not None:
-                    resolved_type, resolved_auto = self._resolve_rule_type(
-                        rule_type, auto_trailing
-                    )
-                    rule.rule_type = resolved_type
-                    rule.auto_trailing = resolved_auto
-                elif auto_trailing is not None:
-                    resolved_type, resolved_auto = self._resolve_rule_type(
-                        "trailing" if auto_trailing else "fixed", auto_trailing
-                    )
-                    rule.rule_type = resolved_type
-                    rule.auto_trailing = resolved_auto
-                else:
-                    resolved_type, resolved_auto = self._resolve_rule_type(
-                        rule.rule_type, rule.auto_trailing
-                    )
-                    rule.rule_type = resolved_type
-                    rule.auto_trailing = resolved_auto
-                if atr_params is not None:
-                    rule.atr_params = dict(atr_params)
-
-                # 转换为数据库层的 RiskRule 并保存到数据库
-                db_rule = DatabaseRiskRule(
-                    symbol=rule.symbol,
-                    stop_loss_price=rule.stop_loss_price,
-                    take_profit_price=rule.take_profit_price,
-                    max_loss_percent=rule.max_loss_percent,
-                    enabled=rule.enabled,
-                    max_time_span=rule.max_time_span,
-                    timestamp=to_local_iso(rule.created_at),
-                    auto_trailing=rule.auto_trailing,
-                    atr_params=rule.atr_params,
-                    rule_type=rule.rule_type,
-                )
-                self.db_manager.save_risk_rule(db_rule)
-                risk_logger.debug(f"Risk rule persisted after update: {db_rule}")
-
-                self._sync_rule_trailing_state(rule)
-
-                risk_logger.info(f"Risk rule updated for {symbol}")
-                return True
-            else:
-                risk_logger.warning(f"Risk rule for {symbol} not found")
+            updated, db_rule, rule = self._apply_risk_rule_updates(
+                symbol,
+                stop_loss_price=stop_loss_price,
+                take_profit_price=take_profit_price,
+                enabled=enabled,
+                max_time_span=max_time_span,
+                auto_trailing=auto_trailing,
+                atr_params=atr_params,
+                rule_type=rule_type,
+            )
+            if not updated or not db_rule or not rule:
                 return False
+
+            self.db_manager.save_risk_rule(db_rule)
+            risk_logger.debug(f"Risk rule persisted after update: {db_rule}")
+            self._sync_rule_trailing_state(rule)
+            risk_logger.info(f"Risk rule updated for {symbol}")
+            return True
         except Exception as e:
             risk_logger.error(f"Error updating risk rule for {symbol}: {e}")
             return False
 
+    async def update_risk_rule_async(
+        self,
+        symbol: str,
+        stop_loss_price: float = None,
+        take_profit_price: float = None,
+        enabled: Optional[bool] = None,
+        max_time_span: Optional[int] = None,
+        auto_trailing: Optional[bool] = None,
+        atr_params: Optional[Dict[str, Any]] = None,
+        rule_type: Optional[str] = None,
+    ) -> bool:
+        try:
+            updated, db_rule, rule = self._apply_risk_rule_updates(
+                symbol,
+                stop_loss_price=stop_loss_price,
+                take_profit_price=take_profit_price,
+                enabled=enabled,
+                max_time_span=max_time_span,
+                auto_trailing=auto_trailing,
+                atr_params=atr_params,
+                rule_type=rule_type,
+            )
+            if not updated or not db_rule or not rule:
+                return False
+            await self.db_manager.save_risk_rule_async(db_rule)
+            risk_logger.debug(f"Risk rule persisted asynchronously after update: {db_rule}")
+            self._sync_rule_trailing_state(rule)
+            risk_logger.info(f"Risk rule updated for {symbol}")
+            return True
+        except Exception as exc:
+            risk_logger.error(f"Error updating risk rule asynchronously for {symbol}: {exc}")
+            return False
+
+    def _apply_risk_rule_updates(
+        self,
+        symbol: str,
+        *,
+        stop_loss_price: float = None,
+        take_profit_price: float = None,
+        enabled: Optional[bool] = None,
+        max_time_span: Optional[int] = None,
+        auto_trailing: Optional[bool] = None,
+        atr_params: Optional[Dict[str, Any]] = None,
+        rule_type: Optional[str] = None,
+    ) -> Tuple[bool, Optional[DatabaseRiskRule], Optional[RiskRule]]:
+        if symbol not in self.risk_rules:
+            risk_logger.warning(f"Risk rule for {symbol} not found")
+            return False, None, None
+
+        rule = self.risk_rules[symbol]
+        if stop_loss_price is not None:
+            risk_logger.debug(f"Updating SL for {symbol}: {rule.stop_loss_price} -> {stop_loss_price}")
+            rule.stop_loss_price = stop_loss_price
+        if take_profit_price is not None:
+            risk_logger.debug(f"Updating TP for {symbol}: {rule.take_profit_price} -> {take_profit_price}")
+            rule.take_profit_price = take_profit_price
+        if enabled is not None and rule.enabled != enabled:
+            risk_logger.debug(f"Updating enabled for {symbol}: {rule.enabled} -> {enabled}")
+            rule.enabled = enabled
+        if max_time_span is not None:
+            rule.max_time_span = max_time_span
+        if rule_type is not None:
+            resolved_type, resolved_auto = self._resolve_rule_type(
+                rule_type, auto_trailing
+            )
+            rule.rule_type = resolved_type
+            rule.auto_trailing = resolved_auto
+        elif auto_trailing is not None:
+            resolved_type, resolved_auto = self._resolve_rule_type(
+                "trailing" if auto_trailing else "fixed", auto_trailing
+            )
+            rule.rule_type = resolved_type
+            rule.auto_trailing = resolved_auto
+        else:
+            resolved_type, resolved_auto = self._resolve_rule_type(
+                rule.rule_type, rule.auto_trailing
+            )
+            rule.rule_type = resolved_type
+            rule.auto_trailing = resolved_auto
+        if atr_params is not None:
+            rule.atr_params = dict(atr_params)
+
+        db_rule = DatabaseRiskRule(
+            symbol=rule.symbol,
+            stop_loss_price=rule.stop_loss_price,
+            take_profit_price=rule.take_profit_price,
+            max_loss_percent=rule.max_loss_percent,
+            enabled=rule.enabled,
+            max_time_span=rule.max_time_span,
+            timestamp=to_local_iso(rule.created_at),
+            auto_trailing=rule.auto_trailing,
+            atr_params=rule.atr_params,
+            rule_type=rule.rule_type,
+        )
+        return True, db_rule, rule
+
     def get_risk_rules(self) -> Dict[str, RiskRule]:
         """获取所有风险规则"""
         return self.risk_rules.copy()
+
+    async def get_risk_rules_async(self) -> Dict[str, RiskRule]:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(self._db_executor, self.get_risk_rules)
 
     async def _monitor_positions_tick(self):
         """调度器入口，确保持仓监控任务串行执行"""
@@ -954,7 +1092,7 @@ class RiskManager:
                         atr_params=rule.atr_params,
                         rule_type=rule.rule_type,
                     )
-                    await asyncio.to_thread(self._persist_risk_rule_sync, db_rule)
+                    await self._persist_risk_rule(db_rule)
                     self._sync_rule_trailing_state(rule)
                     risk_logger.info(f"Risk rule for {symbol} has been deactivated due to zero position")
             
@@ -1075,7 +1213,7 @@ class RiskManager:
                 atr_params=rule.atr_params,
                 rule_type=rule.rule_type,
             )
-            await asyncio.to_thread(self._persist_risk_rule_sync, db_rule)
+            await self._persist_risk_rule(db_rule)
             self._sync_rule_trailing_state(rule)
             return
         
@@ -1145,7 +1283,7 @@ class RiskManager:
                         )
                         self.auto_orders[str(trade.order.orderId)] = auto_order
                         # 保存到数据库，保证持久化
-                        await asyncio.to_thread(self.save_auto_order_to_db, auto_order)
+                        await self.save_auto_order_to_db_async(auto_order)
                         
                         risk_logger.info(f"✅ Market order placed for take profit: {symbol} at market price ${current_price:.2f}")
                         risk_logger.info(f"Take profit market order successfully placed for {symbol}, rule remains active")
@@ -1173,7 +1311,7 @@ class RiskManager:
                             atr_params=rule.atr_params,
                             rule_type=rule.rule_type,
                         )
-                        await asyncio.to_thread(self._persist_risk_rule_sync, db_rule)
+                        await self._persist_risk_rule(db_rule)
                         self._sync_rule_trailing_state(rule)
                         risk_logger.info(f"Take profit rule disabled after market order for {symbol}")
                         return
@@ -1193,7 +1331,7 @@ class RiskManager:
                             atr_params=rule.atr_params,
                             rule_type=rule.rule_type,
                         )
-                        await asyncio.to_thread(self._persist_risk_rule_sync, db_rule)
+                        await self._persist_risk_rule(db_rule)
                         self._sync_rule_trailing_state(rule)
                         risk_logger.info(f"Take profit rule disabled due to order failure for {symbol}")
                 except Exception as e:
@@ -1212,7 +1350,7 @@ class RiskManager:
                         atr_params=rule.atr_params,
                         rule_type=rule.rule_type,
                     )
-                    await asyncio.to_thread(self._persist_risk_rule_sync, db_rule)
+                    await self._persist_risk_rule(db_rule)
                     self._sync_rule_trailing_state(rule)
                     risk_logger.info(f"Take profit rule disabled due to exception for {symbol}")
             
@@ -1254,7 +1392,7 @@ class RiskManager:
                     atr_params=rule.atr_params,
                     rule_type=rule.rule_type,
                 )
-                await asyncio.to_thread(self._persist_risk_rule_sync, db_rule)
+                await self._persist_risk_rule(db_rule)
                 self._sync_rule_trailing_state(rule)
                 risk_logger.info(f"Take profit order queued for {symbol} at ${current_price:.2f}, rule disabled")
                 return  # 当触发止盈市价单时立即返回，不再检查止损
@@ -1314,7 +1452,7 @@ class RiskManager:
                             order_source="sl",
                         )
                         self.auto_orders[str(trade.order.orderId)] = auto_order
-                        await asyncio.to_thread(self.save_auto_order_to_db, auto_order)
+                        await self.save_auto_order_to_db_async(auto_order)
 
                         # 同步到订单管理器，保持前端订单列表与数据库一致
                         if self.order_manager:
@@ -1369,7 +1507,7 @@ class RiskManager:
                             atr_params=rule.atr_params,
                             rule_type=rule.rule_type,
                         )
-                        await asyncio.to_thread(self._persist_risk_rule_sync, db_rule)
+                        await self._persist_risk_rule(db_rule)
                         self._sync_rule_trailing_state(rule)
                         risk_logger.warning(f"🔒 Stop loss rule disabled for {symbol} after triggering at ${current_price:.2f}")
 
@@ -1390,7 +1528,7 @@ class RiskManager:
                             atr_params=rule.atr_params,
                             rule_type=rule.rule_type,
                         )
-                        await asyncio.to_thread(self._persist_risk_rule_sync, db_rule)
+                        await self._persist_risk_rule(db_rule)
                         self._sync_rule_trailing_state(rule)
                         risk_logger.info(f"Stop loss rule disabled due to order failure for {symbol}")
                 except Exception as e:
@@ -1409,7 +1547,7 @@ class RiskManager:
                         atr_params=rule.atr_params,
                         rule_type=rule.rule_type,
                     )
-                    await asyncio.to_thread(self._persist_risk_rule_sync, db_rule)
+                    await self._persist_risk_rule(db_rule)
                     self._sync_rule_trailing_state(rule)
                     risk_logger.info(f"Stop loss rule disabled due to exception for {symbol}")
             
@@ -1451,7 +1589,7 @@ class RiskManager:
                     atr_params=rule.atr_params,
                     rule_type=rule.rule_type,
                 )
-                await asyncio.to_thread(self._persist_risk_rule_sync, db_rule)
+                await self._persist_risk_rule(db_rule)
                 self._sync_rule_trailing_state(rule)
                 risk_logger.info(f"Stop loss order queued for {symbol} at ${current_price:.2f}, rule disabled")
                 return  # 触发市价单后立即返回，不再检查止盈
@@ -1661,7 +1799,7 @@ class RiskManager:
                 )
                 
                 self.auto_orders[str(order_id)] = auto_order
-                await asyncio.to_thread(self.save_auto_order_to_db, auto_order)
+                await self.save_auto_order_to_db_async(auto_order)
                 
                 # 同步到订单管理器
                 if self.order_manager:
@@ -1768,18 +1906,26 @@ class RiskManager:
                 break
         risk_logger.info("Order queue cleared")
     
+    def _cache_auto_order(self, order: Order) -> None:
+        self.auto_orders[order.order_id] = order
+        risk_logger.info(f"Order {order.order_id} saved to database")
+
     def save_auto_order_to_db(self, order: Order):
         """保存单个订单到数据库并更新内存缓存"""
         try:
             normalised = self._normalise_order(order)
 
-            # 保存到数据库
             self.db_manager.save_order(normalised)
+            self._cache_auto_order(normalised)
+        except Exception as e:
+            risk_logger.error(f"Error saving order to database: {e}")
 
-            # 更新内存缓存
-            self.auto_orders[normalised.order_id] = normalised
-
-            risk_logger.info(f"Order {normalised.order_id} saved to database")
+    async def save_auto_order_to_db_async(self, order: Order):
+        """Asynchronous variant used by coroutines."""
+        try:
+            normalised = self._normalise_order(order)
+            await self.db_manager.save_order_async(normalised)
+            self._cache_auto_order(normalised)
         except Exception as e:
             risk_logger.error(f"Error saving order to database: {e}")
     

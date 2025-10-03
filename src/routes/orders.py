@@ -653,7 +653,7 @@ async def reverse_position(request: dict, user: Optional[str] = Depends(get_curr
                             atr_params=rule.atr_params,
                             rule_type=rule.rule_type,
                         )
-                        risk_manager.db_manager.save_risk_rule(db_rule)
+                        await risk_manager.db_manager.save_risk_rule_async(db_rule)
                         
                         logger.info(f"🔒 反向下单前已停用风险规则: {symbol}")
                         

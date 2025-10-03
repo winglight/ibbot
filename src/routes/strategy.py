@@ -78,8 +78,7 @@ async def _ensure_strategy_cache_populated(name: str) -> Dict[str, Any]:
 
         db = get_db_manager()
         try:
-            orders = await asyncio.to_thread(
-                db.load_strategy_orders,
+            orders = await db.load_strategy_orders_async(
                 name,
                 "strategy",
                 None,
@@ -128,8 +127,7 @@ async def _load_strategy_performance(
 
     if not metrics:
         try:
-            metrics = await asyncio.to_thread(
-                strategy_manager.get_strategy_performance,
+            metrics = await strategy_manager.get_strategy_performance_async(
                 name,
                 start_date,
                 end_date,
@@ -173,7 +171,7 @@ async def _load_strategy_executions(
     limit: int,
     cache_key: Tuple[str, int],
 ) -> Dict[str, Any]:
-    executions = await asyncio.to_thread(strategy_manager.get_executions, name, limit)
+    executions = await strategy_manager.get_executions_async(name, limit)
     formatted = [
         asdict(exec_item) if hasattr(exec_item, "__dict__") else exec_item
         for exec_item in executions
@@ -362,10 +360,9 @@ async def list_strategy_files(user: Optional[str] = Depends(get_current_user)):
 async def list_strategies(user: Optional[str] = Depends(get_current_user)):
     if not strategy_manager:
         raise HTTPException(status_code=500, detail="Strategy manager not initialized")
-    loop = asyncio.get_event_loop()
     try:
         strategies = await asyncio.wait_for(
-            loop.run_in_executor(None, strategy_manager.get_strategies),
+            strategy_manager.get_strategies_async(),
             timeout=6.0,
         )
     except asyncio.TimeoutError:
@@ -386,10 +383,9 @@ async def add_strategy_api(strategy: StrategyRequest, user: Optional[str] = Depe
 async def get_strategy_api(name: str, user: Optional[str] = Depends(get_current_user)):
     if not strategy_manager:
         raise HTTPException(status_code=500, detail="Strategy manager not initialized")
-    loop = asyncio.get_running_loop()
     try:
         strategy = await asyncio.wait_for(
-            loop.run_in_executor(None, strategy_manager.get_strategy, name),
+            strategy_manager.get_strategy_async(name),
             timeout=5.0,
         )
     except asyncio.TimeoutError:
@@ -406,10 +402,9 @@ async def get_strategy_api(name: str, user: Optional[str] = Depends(get_current_
 async def get_internal_strategy_info_api(name: str, user: Optional[str] = Depends(get_current_user)):
     if not strategy_manager:
         raise HTTPException(status_code=500, detail="Strategy manager not initialized")
-    loop = asyncio.get_running_loop()
     try:
         info = await asyncio.wait_for(
-            loop.run_in_executor(None, strategy_manager.get_internal_strategy_info, name),
+            strategy_manager.get_internal_strategy_info_async(name),
             timeout=6.0,
         )
     except asyncio.TimeoutError:
@@ -488,10 +483,9 @@ async def update_strategy_risk_settings_api(
 async def get_internal_strategy_status_api(name: str, user: Optional[str] = Depends(get_current_user)):
     if not strategy_manager:
         raise HTTPException(status_code=500, detail="Strategy manager not initialized")
-    loop = asyncio.get_event_loop()
     try:
         status = await asyncio.wait_for(
-            loop.run_in_executor(None, strategy_manager.get_internal_strategy_status, name),
+            strategy_manager.get_internal_strategy_status_async(name),
             timeout=5.0,
         )
     except asyncio.TimeoutError:
