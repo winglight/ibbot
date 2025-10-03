@@ -1,4 +1,4 @@
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Callable, TypeVar, Awaitable
 from datetime import datetime
 from dataclasses import dataclass
 
@@ -103,6 +103,9 @@ class ConnectionConfig:
             'client_id': self.client_id,
             'paper_trading': self.paper_trading
         }
+
+T = TypeVar("T")
+
 
 class ConnectionManager:
     """统一的IBKR连接管理器"""
@@ -1182,17 +1185,18 @@ class ConnectionManager:
         """获取当前配置"""
         return self.config
     
-    def run_in_connection_thread(
+    async def run_in_connection_thread(
         self,
-        func,
+        func: Callable[..., T],
         *args,
         timeout: Optional[float] = 60.0,
         **kwargs,
-    ):
-        """在连接线程的事件循环中执行同步函数，跨线程安全调度并等待结果。
+    ) -> Optional[T]:
+        """在连接线程事件循环中执行 ``func`` 并等待结果。
 
-        ``timeout`` 参数允许调用者为等待连接线程执行结果设置自定义超时时间，
-        从而避免在底层 API 卡住时长时间阻塞调用方的协程。
+        调用方可以 ``await`` 该方法以在当前协程中等待 ``func`` 在连接线程
+        上完成。 ``timeout`` 参数与原实现保持一致，用于在底层调用卡住时
+        提供超时保护。
         """
         try:
             loop = self._loop
@@ -1203,7 +1207,6 @@ class ConnectionManager:
                 connection_logger.warning("IBKR connection not available")
                 return None
 
-            # 如果已在连接线程，直接执行
             if threading.current_thread() == self._connection_thread:
                 try:
                     return func(*args, **kwargs)
@@ -1212,24 +1215,25 @@ class ConnectionManager:
                     raise
 
             import concurrent.futures
-            result_future: concurrent.futures.Future = concurrent.futures.Future()
 
-            def runner():
+            result_future: "concurrent.futures.Future[T]" = concurrent.futures.Future()
+
+            def runner() -> None:
                 try:
                     res = func(*args, **kwargs)
+                except Exception as exc:
+                    result_future.set_exception(exc)
+                else:
                     result_future.set_result(res)
-                except Exception as e:
-                    result_future.set_exception(e)
 
             try:
                 loop.call_soon_threadsafe(runner)
-            except Exception as e:
-                connection_logger.error(f"Failed to schedule function on connection loop: {e}")
+            except Exception as exc:
+                connection_logger.error(f"Failed to schedule function on connection loop: {exc}")
                 return None
 
-            wait_for: Optional[float]
             if timeout is None:
-                wait_for = None
+                wait_for: Optional[float] = None
             else:
                 try:
                     wait_for = float(timeout)
@@ -1243,36 +1247,74 @@ class ConnectionManager:
                     if wait_for <= 0:
                         wait_for = 60.0
 
+            wrapped = asyncio.wrap_future(result_future)
+
             try:
-                return result_future.result(timeout=wait_for)
-            except concurrent.futures.TimeoutError:
                 if wait_for is None:
-                    connection_logger.error(
-                        "Execution in connection thread timed out with no limit"
-                    )
+                    return await wrapped
+                return await asyncio.wait_for(wrapped, wait_for)
+            except asyncio.TimeoutError:
+                if wait_for is None:
+                    connection_logger.error("Execution in connection thread timed out with no limit")
                 else:
                     connection_logger.error(
                         "Execution in connection thread timed out after %.1f seconds",
                         wait_for,
                     )
                 return None
-            except Exception as e:
-                connection_logger.error(f"Execution in connection thread raised error: {e}")
+            except Exception as exc:
+                connection_logger.error(f"Execution in connection thread raised error: {exc}")
                 raise
-        except Exception as e:
-            connection_logger.error(f"Failed to execute function in connection thread: {e}")
+        except Exception as exc:
+            connection_logger.error(f"Failed to execute function in connection thread: {exc}")
             return None
 
-    def run_async_in_connection_thread(self, coro, timeout: float = 60):
-        """在连接线程的事件循环中执行协程，跨线程调度并等待结果。
+    def run_in_connection_thread_blocking(
+        self,
+        func: Callable[..., T],
+        *args,
+        timeout: Optional[float] = 60.0,
+        **kwargs,
+    ) -> Optional[T]:
+        """同步包装器，供无事件循环的调用方在连接线程上执行 ``func``。
 
-        该方法用于需要在连接线程的事件循环上运行的异步 IBKR API 调用，
-        可以避免在事件循环已运行时调用同步 API 导致的
-        "this event loop is already running" 错误。
+        如果当前线程已经有活动的事件循环，应直接 ``await``
+        :meth:`run_in_connection_thread` 以避免 ``asyncio.run`` 冲突。
+        """
+
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+
+        if running_loop and running_loop.is_running():
+            raise RuntimeError(
+                "run_in_connection_thread_blocking cannot be called while an event loop is running; "
+                "await run_in_connection_thread instead"
+            )
+
+        try:
+            return asyncio.run(
+                self.run_in_connection_thread(func, *args, timeout=timeout, **kwargs)
+            )
+        except Exception as exc:
+            connection_logger.error(
+                f"Failed to execute function in connection thread: {exc}"
+            )
+            return None
+
+    async def run_async_in_connection_thread(
+        self,
+        coro: Awaitable[T],
+        timeout: float = 60,
+    ) -> Optional[T]:
+        """在连接线程的事件循环中执行协程并等待结果。
+
+        与旧实现保持相同行为：若连接不可用则返回 ``None``，超时和异常
+        会按照既定的日志策略记录并重新抛出。
         """
         try:
             loop = self._loop
-            # 如果循环还未就绪，但连接线程可能刚启动，给出短暂重试机会
             if (not loop or loop.is_closed()) and self._connection_thread and self._connection_thread.is_alive():
                 try:
                     time.sleep(0.05)
@@ -1287,29 +1329,65 @@ class ConnectionManager:
                 connection_logger.warning("IBKR connection not available")
                 return None
 
-            # 检查事件循环是否正在运行
+            if threading.current_thread() == self._connection_thread:
+                return await coro
+
             if not loop.is_running():
                 connection_logger.warning("Connection event loop is not running")
                 return None
 
             import concurrent.futures
+
             try:
                 future = asyncio.run_coroutine_threadsafe(coro, loop)
-                return future.result(timeout=timeout)
-            except RuntimeError as e:
-                if "no current event loop" in str(e).lower():
-                    connection_logger.error(f"No current event loop in thread: {e}")
+            except RuntimeError as exc:
+                if "no current event loop" in str(exc).lower():
+                    connection_logger.error(f"No current event loop in thread: {exc}")
                     return None
-                else:
-                    raise
-            except concurrent.futures.TimeoutError:
-                connection_logger.error(f"Execution in connection thread timed out after {timeout} seconds")
-                return None
-            except Exception as e:
-                connection_logger.error(f"Execution in connection thread raised error: {e}")
                 raise
-        except Exception as e:
-            connection_logger.error(f"Failed to execute coroutine in connection thread: {e}")
+
+            wrapped = asyncio.wrap_future(future)
+
+            try:
+                return await asyncio.wait_for(wrapped, timeout)
+            except asyncio.TimeoutError:
+                connection_logger.error(
+                    f"Execution in connection thread timed out after {timeout} seconds"
+                )
+                return None
+            except Exception as exc:
+                connection_logger.error(f"Execution in connection thread raised error: {exc}")
+                raise
+        except Exception as exc:
+            connection_logger.error(f"Failed to execute coroutine in connection thread: {exc}")
+            return None
+
+    def run_async_in_connection_thread_blocking(
+        self,
+        coro: Awaitable[T],
+        timeout: float = 60,
+    ) -> Optional[T]:
+        """同步包装器，用于在没有活动事件循环时执行协程任务。"""
+
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+
+        if running_loop and running_loop.is_running():
+            raise RuntimeError(
+                "run_async_in_connection_thread_blocking cannot be called while an event loop is running; "
+                "await run_async_in_connection_thread instead"
+            )
+
+        try:
+            return asyncio.run(
+                self.run_async_in_connection_thread(coro, timeout=timeout)
+            )
+        except Exception as exc:
+            connection_logger.error(
+                f"Failed to execute coroutine in connection thread: {exc}"
+            )
             return None
 
 

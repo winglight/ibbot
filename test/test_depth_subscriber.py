@@ -12,6 +12,10 @@ class _StubConnectionManager:
         return self._connected
 
     def run_in_connection_thread(self, func, *args, timeout=None, **kwargs):
+        # Legacy pathway retained for completeness.
+        return self.run_in_connection_thread_blocking(func, *args, timeout=timeout, **kwargs)
+
+    def run_in_connection_thread_blocking(self, func, *args, timeout=None, **kwargs):
         # Record the timeout value that callers provide. Simulate a failure so
         # ``DepthSubscriber`` is forced to handle the timeout path.
         self.timeouts.append(timeout)
