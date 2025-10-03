@@ -1,15 +1,13 @@
 """HTTP proxy routes for the risk microservice.
 
-Write operations avoid synchronous HTTP calls by updating the Redis-backed
-configuration that the risk service watches.  Read endpoints continue to use
-the HTTP client for lightweight queries and include docstrings describing the
-cache semantics for clarity.
+All CRUD operations are delegated to :class:`RiskServiceClient` which persists
+state within the risk service itself.  The API still consults Redis caches for
+read-heavy endpoints to preserve existing latency characteristics.
 """
 
 from __future__ import annotations
 
 import json
-import os
 import uuid
 from typing import Any, Awaitable, Callable, Dict, Mapping, Optional
 
@@ -40,15 +38,6 @@ router = APIRouter()
 
 RISK_RULES_CACHE_KEY = "json:risk:rules"
 RISK_CONFIG_CACHE_KEY = "json:risk:config"
-RISK_CONFIG_MODULE = os.getenv("RISK_CONFIG_MODULE", "risk-service")
-RISK_CONFIG_HASH_KEY = os.getenv(
-    "RISK_CONFIG_HASH_KEY",
-    f"hash:config:{RISK_CONFIG_MODULE}",
-)
-RISK_CONFIG_UPDATE_CHANNEL = os.getenv(
-    "RISK_CONFIG_UPDATE_CHANNEL", "pubsub:config:update"
-)
-RISK_RULES_FIELD = "rules"
 
 _RISK_SERVICE_CLIENT = RiskServiceClient()
 
@@ -128,143 +117,6 @@ async def _cached_risk_rules() -> Dict[str, Any] | None:
     return payload
 
 
-async def _require_config_redis() -> Any:
-    try:
-        return await get_redis_client()
-    except Exception as exc:
-        logger.error("Redis unavailable for risk configuration", error=str(exc))
-        raise HTTPException(status_code=503, detail="Risk configuration store unavailable")
-
-
-def _stringify_value(value: Any) -> str:
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, (int, float)):
-        return str(value)
-    if isinstance(value, (dict, list)):
-        try:
-            return json.dumps(value, ensure_ascii=False)
-        except (TypeError, ValueError):
-            return str(value)
-    return str(value)
-
-
-def _parse_rules_from_config(values: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
-    rules: dict[str, dict[str, Any]] = {}
-    raw_rules = values.get(RISK_RULES_FIELD)
-    if isinstance(raw_rules, str) and raw_rules.strip():
-        try:
-            parsed = json.loads(raw_rules)
-        except (TypeError, ValueError):
-            parsed = []
-        if isinstance(parsed, list):
-            for item in parsed:
-                if not isinstance(item, Mapping):
-                    continue
-                symbol = str(item.get("symbol") or "").strip()
-                if not symbol:
-                    continue
-                payload = dict(item)
-                payload["symbol"] = symbol
-                rules[symbol] = payload
-        elif isinstance(parsed, Mapping):
-            for symbol, payload in parsed.items():
-                if not isinstance(payload, Mapping):
-                    continue
-                symbol_str = str(symbol or "").strip()
-                if not symbol_str:
-                    continue
-                data = dict(payload)
-                data.setdefault("symbol", symbol_str)
-                rules[symbol_str] = data
-
-    for key, value in values.items():
-        if not isinstance(key, str) or not key.startswith("rules."):
-            continue
-        parts = key.split(".", 2)
-        if len(parts) < 3:
-            continue
-        _, symbol, field = parts[0], parts[1], parts[2]
-        symbol = symbol.strip()
-        if not symbol:
-            continue
-        bucket = rules.setdefault(symbol, {"symbol": symbol})
-        bucket[field] = value
-
-    return rules
-
-
-async def _load_config_snapshot(redis: Any) -> tuple[dict[str, str], dict[str, dict[str, Any]]]:
-    try:
-        values = await redis.hgetall(RISK_CONFIG_HASH_KEY)
-    except Exception as exc:
-        logger.error("Failed to read risk configuration", error=str(exc))
-        raise HTTPException(status_code=503, detail="Failed to read risk configuration") from exc
-
-    mapping = {str(key): str(value) for key, value in values.items()} if values else {}
-    rules = _parse_rules_from_config(mapping)
-    return mapping, rules
-
-
-async def _persist_rules(redis: Any, rules: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
-    payload = []
-    for symbol, rule in rules.items():
-        if not symbol:
-            continue
-        entry = dict(rule)
-        entry["symbol"] = symbol
-        payload.append(entry)
-
-    try:
-        existing = await redis.hgetall(RISK_CONFIG_HASH_KEY)
-    except Exception as exc:
-        logger.error("Failed to load risk configuration before update", error=str(exc))
-        raise HTTPException(status_code=503, detail="Failed to update risk rules") from exc
-
-    try:
-        serialised = json.dumps(payload, ensure_ascii=False)
-    except (TypeError, ValueError) as exc:
-        logger.error("Failed to serialise risk rules", error=str(exc))
-        raise HTTPException(status_code=400, detail="Invalid risk rule payload") from exc
-
-    try:
-        if existing:
-            delete_fields = [key for key in existing if str(key).startswith("rules.")]
-            if delete_fields:
-                await redis.hdel(RISK_CONFIG_HASH_KEY, *delete_fields)
-        await redis.hset(RISK_CONFIG_HASH_KEY, mapping={RISK_RULES_FIELD: serialised})
-        await redis.publish(RISK_CONFIG_UPDATE_CHANNEL, RISK_CONFIG_MODULE)
-    except Exception as exc:
-        logger.error("Failed to persist risk rules", error=str(exc))
-        raise HTTPException(status_code=503, detail="Failed to update risk rules") from exc
-
-    return {entry["symbol"]: entry for entry in payload}
-
-
-async def _persist_config_updates(redis: Any, updates: Mapping[str, Any]) -> None:
-    to_set: dict[str, str] = {}
-    to_remove: list[str] = []
-    for key, value in updates.items():
-        key_str = str(key).strip()
-        if not key_str:
-            continue
-        if value is None:
-            to_remove.append(key_str)
-        else:
-            to_set[key_str] = _stringify_value(value)
-
-    try:
-        if to_set:
-            await redis.hset(RISK_CONFIG_HASH_KEY, mapping=to_set)
-        if to_remove:
-            await redis.hdel(RISK_CONFIG_HASH_KEY, *to_remove)
-        if to_set or to_remove:
-            await redis.publish(RISK_CONFIG_UPDATE_CHANNEL, RISK_CONFIG_MODULE)
-    except Exception as exc:
-        logger.error("Failed to persist risk configuration", error=str(exc))
-        raise HTTPException(status_code=503, detail="Failed to update risk configuration") from exc
-
-
 async def _cached_risk_config() -> Dict[str, Any] | None:
     payload = await _load_cached_payload(RISK_CONFIG_CACHE_KEY)
     if payload is None:
@@ -272,6 +124,22 @@ async def _cached_risk_config() -> Dict[str, Any] | None:
 
     payload.setdefault("source", payload.get("source", "redis"))
     return payload
+
+
+def _merge_service_command(
+    command_id: str,
+    service_payload: Any,
+    *,
+    defaults: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    response: dict[str, Any] = {"success": True, "command_id": command_id}
+    if defaults:
+        response.update({str(k): v for k, v in defaults.items()})
+    if isinstance(service_payload, Mapping):
+        response.update({str(k): v for k, v in service_payload.items()})
+    elif service_payload is not None:
+        response.setdefault("result", service_payload)
+    return response
 
 
 @router.post("/api/risk_rules")
@@ -284,14 +152,12 @@ async def add_risk_rule(
     if not symbol:
         raise HTTPException(status_code=400, detail="symbol is required")
 
-    redis = await _require_config_redis()
-    payload = rule.model_dump(exclude_none=True)
     command_id = uuid.uuid4().hex
 
     try:
-        _, rules = await _load_config_snapshot(redis)
-        rules[symbol] = {**payload, "symbol": symbol}
-        persisted = await _persist_rules(redis, rules)
+        service_payload = await _call_risk_service(
+            "create_rule", lambda client: client.create_rule(rule.model_dump(exclude_none=True))
+        )
     except HTTPException as exc:
         await audit_log_failure(
             request,
@@ -305,7 +171,7 @@ async def add_risk_rule(
         detail="risk rule added",
         extra={"symbol": symbol, "rule_type": rule.rule_type, "command_id": command_id},
     )
-    return {"success": True, "command_id": command_id, "rule": persisted.get(symbol, {})}
+    return _merge_service_command(command_id, service_payload)
 
 
 @router.get("/api/risk_rules")
@@ -329,15 +195,15 @@ async def update_risk_rule(
     if not symbol_key:
         raise HTTPException(status_code=400, detail="symbol is required")
 
-    redis = await _require_config_redis()
     command_id = uuid.uuid4().hex
 
     try:
-        _, rules = await _load_config_snapshot(redis)
-        if symbol_key not in rules:
-            rules[symbol_key] = {"symbol": symbol_key}
-        rules[symbol_key].update(rule.model_dump(exclude_none=True))
-        persisted = await _persist_rules(redis, rules)
+        service_payload = await _call_risk_service(
+            "update_rule",
+            lambda client: client.update_rule(
+                symbol_key, rule.model_dump(exclude_none=True)
+            ),
+        )
     except HTTPException as exc:
         await audit_log_failure(
             request,
@@ -351,7 +217,7 @@ async def update_risk_rule(
         detail="risk rule updated",
         extra={"symbol": symbol_key, "command_id": command_id},
     )
-    return {"success": True, "command_id": command_id, "rule": persisted.get(symbol_key, {})}
+    return _merge_service_command(command_id, service_payload)
 
 
 @router.delete("/api/risk_rules/{symbol}")
@@ -364,13 +230,12 @@ async def delete_risk_rule(
     if not symbol_key:
         raise HTTPException(status_code=400, detail="symbol is required")
 
-    redis = await _require_config_redis()
     command_id = uuid.uuid4().hex
 
     try:
-        _, rules = await _load_config_snapshot(redis)
-        removed = rules.pop(symbol_key, None)
-        persisted = await _persist_rules(redis, rules)
+        service_payload = await _call_risk_service(
+            "delete_rule", lambda client: client.delete_rule(symbol_key)
+        )
     except HTTPException as exc:
         await audit_log_failure(
             request,
@@ -384,7 +249,10 @@ async def delete_risk_rule(
         detail="risk rule removed",
         extra={"symbol": symbol_key, "command_id": command_id},
     )
-    return {"success": True, "command_id": command_id, "removed": removed or symbol_key, "rules": persisted}
+    defaults = {"removed": symbol_key}
+    if isinstance(service_payload, Mapping) and "removed" in service_payload:
+        defaults["removed"] = service_payload["removed"]
+    return _merge_service_command(command_id, service_payload, defaults=defaults)
 
 
 @router.get("/api/order_queue_status")
@@ -413,12 +281,15 @@ async def update_risk_config(
     request: Request,
     user: Optional[str] = Depends(require_roles("admin", "operator", action="risk.update_config")),
 ) -> Any:
-    updates = payload.model_dump(exclude_unset=True)
-    redis = await _require_config_redis()
     command_id = uuid.uuid4().hex
 
+    updates = payload.model_dump(exclude_unset=True)
+
     try:
-        await _persist_config_updates(redis, updates)
+        service_payload = await _call_risk_service(
+            "update_config",
+            lambda client: client.update_config(updates),
+        )
     except HTTPException as exc:
         await audit_log_failure(
             request,
@@ -431,7 +302,8 @@ async def update_risk_config(
         detail="risk config updated",
         extra={"fields": sorted(updates.keys()), "command_id": command_id},
     )
-    return {"success": True, "command_id": command_id, "updated": sorted(updates.keys())}
+    defaults = {"updated": sorted(updates.keys())}
+    return _merge_service_command(command_id, service_payload, defaults=defaults)
 
 
 @router.post("/api/position-sizing")
@@ -479,22 +351,25 @@ async def update_config_rules(
     request: Request,
     user: Optional[str] = Depends(require_roles("admin", "operator", action="risk.update_rules")),
 ) -> Any:
-    redis = await _require_config_redis()
     command_id = uuid.uuid4().hex
 
-    updates: dict[str, dict[str, Any]] = {}
+    filtered: dict[str, dict[str, Any]] = {}
+    symbols: list[str] = []
     for symbol, value in (payload or {}).items():
         if not isinstance(value, Mapping):
             continue
         symbol_key = str(symbol or "").strip()
         if not symbol_key:
             continue
-        updates[symbol_key] = {**dict(value), "symbol": symbol_key}
+        filtered[symbol_key] = {**dict(value)}
+        filtered[symbol_key].setdefault("symbol", symbol_key)
+        symbols.append(symbol_key)
 
     try:
-        _, rules = await _load_config_snapshot(redis)
-        rules.update(updates)
-        persisted = await _persist_rules(redis, rules)
+        service_payload = await _call_risk_service(
+            "update_config_rules",
+            lambda client: client.update_config_rules(filtered),
+        )
     except HTTPException as exc:
         await audit_log_failure(
             request,
@@ -505,6 +380,7 @@ async def update_config_rules(
     await audit_log_success(
         request,
         detail="risk rules config updated",
-        extra={"symbols": sorted(updates.keys()), "command_id": command_id},
+        extra={"symbols": sorted(symbols), "command_id": command_id},
     )
-    return {"success": True, "command_id": command_id, "rules": persisted}
+    defaults = {"symbols": sorted(symbols)}
+    return _merge_service_command(command_id, service_payload, defaults=defaults)

@@ -63,7 +63,8 @@ async def test_rule_lifecycle_persists_and_records_history() -> None:
     assert "ES" not in rules_snapshot
 
     history = await runtime.fetch_rules_history()
-    events = [item.get("event") for item in history["items"]]
+    assert "history" in history
+    events = [item.get("event") for item in history["history"]]
     assert events[-1] == "delete"
     assert history["count"] >= 3
 
@@ -139,10 +140,11 @@ async def test_sizing_history_stream_filters_and_counts() -> None:
 
     history_all = await runtime.fetch_sizing_history(limit=10)
     assert history_all["count"] == 2
+    assert history_all["history"][0]["symbol"]
 
     history_filtered = await runtime.fetch_sizing_history(symbol="ES", limit=10)
     assert history_filtered["count"] == 1
-    assert history_filtered["items"][0]["symbol"] == "ES"
+    assert history_filtered["history"][0]["symbol"] == "ES"
 
     metrics = runtime.health_snapshot()
     assert metrics["sizing_history_events"] == await redis.xlen(runtime.sizing_history_stream)
