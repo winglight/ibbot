@@ -186,15 +186,49 @@ class RiskRuntime:
         if not payload:
             return {}
         rules: dict[str, dict[str, Any]] = {}
+        updates: dict[str, str] = {}
+        removals: set[str] = set()
         for key, value in payload.items():
-            symbol = key.decode("utf-8") if isinstance(key, bytes) else str(key)
+            symbol_raw = key.decode("utf-8") if isinstance(key, bytes) else str(key)
             data = self._decode_value(value)
-            if isinstance(data, Mapping):
-                payload_dict = {str(k): v for k, v in data.items()}
-                payload_dict.setdefault("symbol", symbol)
-                normalised = RiskRule.normalise_payload(payload_dict)
-                normalised.setdefault("symbol", self._normalise_symbol(symbol))
-                rules[self._normalise_symbol(symbol)] = normalised
+            if not isinstance(data, Mapping):
+                removals.add(symbol_raw)
+                continue
+            original_payload = {str(k): v for k, v in data.items()}
+            working_payload = dict(original_payload)
+            symbol_normalised = self._normalise_symbol(symbol_raw)
+            rule_key = symbol_normalised or symbol_raw
+            working_payload.setdefault("symbol", rule_key)
+            normalised = RiskRule.normalise_payload(working_payload)
+            normalised_symbol = self._normalise_symbol(
+                str(normalised.get("symbol") or rule_key)
+            )
+            if normalised_symbol:
+                normalised["symbol"] = normalised_symbol
+                rule_key = normalised_symbol
+            else:
+                normalised.setdefault("symbol", rule_key)
+            rules[rule_key] = normalised
+
+            needs_update = original_payload != normalised or rule_key != symbol_raw
+            if needs_update:
+                updates[rule_key] = self._encode_value(normalised)
+                if rule_key != symbol_raw:
+                    removals.add(symbol_raw)
+
+        if (updates or removals) and redis is not None:
+            try:
+                if updates:
+                    await redis.hset(self.rules_hash_key, mapping=updates)
+                if removals:
+                    try:
+                        await redis.hdel(self.rules_hash_key, *removals)
+                    except TypeError:
+                        for field in removals:
+                            await redis.hdel(self.rules_hash_key, field)
+            except Exception:
+                logger = self._logger or get_logger(self.logger_name)
+                logger.debug("Failed to migrate cached risk rules", exc_info=True)
         return rules
 
     def _merge_rule_payload(
