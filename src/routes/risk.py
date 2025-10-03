@@ -11,7 +11,7 @@ import json
 import uuid
 from typing import Any, Awaitable, Callable, Dict, Mapping, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from loguru import logger
 
 from .auth import (
@@ -175,8 +175,14 @@ async def add_risk_rule(
 
 
 @router.get("/api/risk_rules")
-async def get_risk_rules(user: Optional[str] = Depends(get_current_user)) -> Any:
+async def get_risk_rules(
+    user: Optional[str] = Depends(get_current_user),
+    force_refresh: bool = Query(False, description="Bypass cache and fetch from risk service."),
+) -> Any:
     """Return configured risk rules, preferring the Redis cache when available."""
+
+    if force_refresh:
+        return await _call_risk_service("fetch_rules", lambda client: client.fetch_rules())
 
     cached = await _cached_risk_rules()
     if cached is not None:
