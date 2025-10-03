@@ -6,7 +6,10 @@ from contextlib import AsyncExitStack
 from typing import Any, Mapping
 
 from services.risk import RiskRuntime
-from services.risk.runtime import RiskSnapshotRepositoryFactory
+from services.risk.runtime import (
+    RiskSnapshotRepositoryFactory,
+    create_risk_snapshot_repository_factory,
+)
 from src.ibbot.config import ConfigProvider
 from src.ibbot.logging import get_logger
 from src.ibbot.redis import close_global_client, get_redis_client
@@ -23,16 +26,9 @@ async def run_service() -> None:
 
     initial_config = await provider.get_module(SERVICE_NAME)
 
-    snapshot_repository_factory: RiskSnapshotRepositoryFactory | None = None
-    try:
-        from src.db import risk_snapshot_repository
-    except ModuleNotFoundError:
-        pass
-    else:
-        def _snapshot_repository_factory() -> Any:
-            return risk_snapshot_repository()
-
-        snapshot_repository_factory = _snapshot_repository_factory
+    snapshot_repository_factory: RiskSnapshotRepositoryFactory | None = (
+        create_risk_snapshot_repository_factory()
+    )
 
     async def redis_factory() -> Any:
         return redis
