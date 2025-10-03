@@ -5,6 +5,11 @@ running blocking database and CPU heavy workloads without stalling the main
 asyncio event loop.  The executors are managed as a singleton so that all
 modules share the same resources and we can coordinate a clean shutdown during
 application exit.
+
+See ``docs/async_executor.md`` for the high level contract, including the
+default worker counts (4 DB workers and ``min(32, cpu_count)`` CPU workers) and
+the ``DB_EXECUTOR_WORKERS``/``CPU_EXECUTOR_WORKERS`` environment overrides that
+are applied during ``core`` initialisation.
 """
 
 from __future__ import annotations
@@ -48,9 +53,15 @@ class AsyncExecutor:
         return self._cpu_executor
 
     def run_in_db(self, func: ExecutorFunc, *args: Any, **kwargs: Any):
+        """Execute ``func`` in the shared DB executor.
+
+        All async database helpers forward to this method so the coroutine must
+        be awaited; see :mod:`src.database` for examples.
+        """
         return self._submit(self._db_executor, func, *args, **kwargs)
 
     def run_in_cpu(self, func: ExecutorFunc, *args: Any, **kwargs: Any):
+        """Execute ``func`` in the CPU-bound helper pool."""
         return self._submit(self._cpu_executor, func, *args, **kwargs)
 
     def shutdown(self, wait: bool = False) -> None:
