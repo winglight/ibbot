@@ -116,13 +116,13 @@ async def backfill_commissions(
     """Backfill commissions and PnL for recent orders."""
     if not connection_manager or not connection_manager.is_connected():
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
+    ib_client = _get_active_ib_client()
+    if ib_client is None:
+        raise HTTPException(status_code=500, detail="IBKR client unavailable")
     try:
-        loop = asyncio.get_event_loop()
         updates = await asyncio.wait_for(
-            loop.run_in_executor(
-                None, lambda: connection_manager.backfill_commissions(days)
-            ),
-            timeout=30.0,
+            ib_client.backfill_commissions(days),
+            timeout=35.0,
         )
         updates = int(updates or 0)
         logger.info(
