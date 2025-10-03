@@ -60,12 +60,19 @@ class RiskSnapshotRepositoryProtocol(Protocol):
         ...
 
 
+RiskSnapshotRepositoryFactory = Callable[
+    [],
+    Awaitable[RiskSnapshotRepositoryProtocol] | RiskSnapshotRepositoryProtocol,
+]
+
+
 @dataclass(slots=True)
 class RiskRuntime:
     """Orchestrate the risk engine and connect it to external services."""
 
     redis_factory: Callable[[], Awaitable[Redis]]
     risk_snapshot_repository: RiskSnapshotRepositoryProtocol | None = None
+    risk_snapshot_repository_factory: RiskSnapshotRepositoryFactory | None = None
     logger_name: str = "risk-service"
     service_name: str = "risk-service"
     market_stream_key: str = "stream:market-service"
@@ -111,6 +118,12 @@ class RiskRuntime:
     _rules_snapshot_timestamp: str | None = field(default=None, init=False, repr=False)
     _sizing_history_length: int = field(default=0, init=False, repr=False)
     _rules_history_length: int = field(default=0, init=False, repr=False)
+    _risk_snapshot_repository_close: Callable[[], Awaitable[None]] | None = field(
+        default=None, init=False, repr=False
+    )
+    _risk_snapshot_repository_created: bool = field(
+        default=False, init=False, repr=False
+    )
 
     # ------------------------------------------------------------------
     # redis helpers
@@ -576,7 +589,7 @@ class RiskRuntime:
         rules_payload: Mapping[str, Mapping[str, Any]],
         timestamp: str,
     ) -> None:
-        repository = self.risk_snapshot_repository
+        repository = await self._ensure_risk_snapshot_repository()
         if repository is None:
             return
 
@@ -608,6 +621,80 @@ class RiskRuntime:
             rules=normalised_rules,
             captured_at=timestamp,
         )
+
+    async def _ensure_risk_snapshot_repository(
+        self,
+    ) -> RiskSnapshotRepositoryProtocol | None:
+        if self.risk_snapshot_repository is not None:
+            return self.risk_snapshot_repository
+        try:
+            await self._initialise_risk_snapshot_repository()
+        except Exception as exc:
+            logger = self._logger or get_logger(self.logger_name)
+            logger.warning(
+                "Failed to initialise risk snapshot repository", exc_info=True
+            )
+            self._last_exception_message = str(exc)
+            return None
+        return self.risk_snapshot_repository
+
+    async def _initialise_risk_snapshot_repository(self) -> None:
+        if self.risk_snapshot_repository is not None:
+            return
+        factory = self.risk_snapshot_repository_factory
+        if factory is None:
+            return
+        repository_candidate = factory()
+        repository = await _maybe_await(repository_candidate)
+        if repository is None:
+            self._risk_snapshot_repository_created = False
+            self._risk_snapshot_repository_close = None
+            return
+        self.risk_snapshot_repository = repository
+        self._risk_snapshot_repository_created = True
+        self._risk_snapshot_repository_close = self._resolve_repository_close(
+            repository
+        )
+
+    async def _shutdown_risk_snapshot_repository(self) -> None:
+        closer = self._risk_snapshot_repository_close
+        self._risk_snapshot_repository_close = None
+        if closer is not None:
+            try:
+                await closer()
+            except Exception:
+                logger = self._logger or get_logger(self.logger_name)
+                logger.debug(
+                    "Failed to close risk snapshot repository", exc_info=True
+                )
+        if self._risk_snapshot_repository_created:
+            self.risk_snapshot_repository = None
+            self._risk_snapshot_repository_created = False
+
+    def _resolve_repository_close(
+        self, repository: RiskSnapshotRepositoryProtocol
+    ) -> Callable[[], Awaitable[None]] | None:
+        for attr in ("aclose", "close"):
+            closer = getattr(repository, attr, None)
+            if callable(closer):
+                async def _close(
+                    closer: Callable[[], Awaitable[Any] | Any] = closer,
+                ) -> None:
+                    await _maybe_await(closer())
+
+                return _close
+
+        session = getattr(repository, "_session", None)
+        if session is not None:
+            close = getattr(session, "close", None)
+            if callable(close):
+                async def _close_session(
+                    close: Callable[[], Awaitable[Any] | Any] = close,
+                ) -> None:
+                    await _maybe_await(close())
+
+                return _close_session
+        return None
 
     @staticmethod
     def _json_default(value: Any) -> Any:
@@ -850,6 +937,14 @@ class RiskRuntime:
         if not self._configured:
             raise RuntimeError("RiskRuntime must be configured before starting")
         self._logger = get_logger(self.logger_name, log_dir=self.log_dir)
+        try:
+            await self._initialise_risk_snapshot_repository()
+        except Exception as exc:
+            logger = self._logger or get_logger(self.logger_name)
+            logger.warning(
+                "Failed to initialise risk snapshot repository", exc_info=True
+            )
+            self._last_exception_message = str(exc)
         self._redis = await self.redis_factory()
         await self._ensure_stream_groups()
         self._stop_event.clear()
@@ -876,6 +971,7 @@ class RiskRuntime:
             )
         self._redis = None
         self._pending_commands.clear()
+        await self._shutdown_risk_snapshot_repository()
 
     async def _await_task(self, task: asyncio.Task[None] | None) -> None:
         if task is None:

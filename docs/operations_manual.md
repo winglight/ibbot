@@ -82,6 +82,8 @@
   ```bash
   tail -f data/logs/risk-service.log
   ```
+- **风险快照持久化**：风险服务启动时会使用 `src.ibbot.db` 提供的仓库工厂创建 MariaDB 会话。
+  请在 `.env.local` 中配置 `IBBOT_DB_URL`，否则仅会在 Redis 中缓存风险配置与规则快照。
 
 ## 3. 常见故障排查
 

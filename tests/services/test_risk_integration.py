@@ -185,9 +185,12 @@ async def _run_integration(tmp_path: Path, redis: Any) -> None:
     async def redis_factory():
         return redis
 
+    async def _repository_factory() -> Any:
+        return repository
+
     runtime = RiskRuntime(
         redis_factory=redis_factory,
-        risk_snapshot_repository=repository,
+        risk_snapshot_repository_factory=_repository_factory,
         logger_name="risk-service-test",
         service_name="risk-service-test",
         log_dir=tmp_path,
