@@ -67,15 +67,23 @@ def test_account_info_and_positions_include_snapshot_status(
             self.info_calls: List[bool] = []
             self.position_calls: List[bool] = []
 
-        async def fetch_info(self, *, force_refresh: bool = False) -> Any:
+        async def fetch_info(
+            self, *, force_refresh: bool = False
+        ) -> AccountServiceResult:
             self.info_calls.append(force_refresh)
-            raise AssertionError("fetch_info should not be called when cache is used")
+            return AccountServiceResult(
+                data=account_snapshot["data"],
+                metadata={"from_cache": False},
+            )
 
         async def fetch_positions(
             self, *, fast: bool = True, force_refresh: bool = False
-        ) -> Any:
+        ) -> AccountServiceResult:
             self.position_calls.append(force_refresh)
-            raise AssertionError("fetch_positions should not be called when cache is used")
+            return AccountServiceResult(
+                data=list(positions_snapshot["data"]),
+                metadata={"from_cache": False},
+            )
 
     stub_client = StubClient()
 
@@ -101,7 +109,8 @@ def test_account_info_and_positions_include_snapshot_status(
     assert account_payload["stale_at"] == account_snapshot["stale_at"]
     assert account_payload["source"] == "redis"
     assert account_payload["cache_source"] == "redis"
-    assert account_payload["from_cache"] is True
+    assert account_payload["from_cache"] is False
+    assert stub_client.info_calls == [True]
 
     assert positions_response.status_code == 200
     positions_payload = positions_response.json()
@@ -109,7 +118,8 @@ def test_account_info_and_positions_include_snapshot_status(
     assert positions_payload["snapshot_updated_at"] == positions_snapshot["updated_at"]
     assert positions_payload["source"] == "redis"
     assert positions_payload["cache_source"] == "redis"
-    assert positions_payload["from_cache"] is True
+    assert positions_payload["from_cache"] is False
+    assert stub_client.position_calls == [True]
 
 
 def test_account_info_uses_service_metadata(
