@@ -8,7 +8,7 @@ import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, tzinfo as datetime_tzinfo
-from typing import Any, Awaitable, Callable, Deque, Dict, Iterable, Mapping
+from typing import Any, Awaitable, Callable, Deque, Dict, Iterable, Mapping, Protocol, runtime_checkable
 
 from zoneinfo import ZoneInfo
 
@@ -16,8 +16,13 @@ from fastapi import Depends, FastAPI, HTTPException, status
 from pydantic import BaseModel, ConfigDict, model_validator
 
 from src.ibbot import update_service_health
-from src.ibbot.influx import build_order_point, init_influx_client, write_points
 from src.ibbot.redis import DEFAULT_COMMAND_QUEUE, enqueue_ib_command, get_redis_client
+
+
+@runtime_checkable
+class OrderRepositoryProtocol(Protocol):
+    async def upsert_order(self, payload: Mapping[str, Any]) -> None:
+        ...
 
 LOGGER = logging.getLogger("ibbot.services.orders")
 
@@ -507,7 +512,10 @@ class FillMetricsUpdate(BaseModel):
 @dataclass
 class OrdersRuntime:
     redis_factory: Callable[[], Awaitable[Any]] = get_redis_client
-    write_fn: Callable[[Iterable[Any]], Awaitable[int] | int] = write_points
+    order_repository_factory: (
+        Callable[[], Awaitable[OrderRepositoryProtocol] | OrderRepositoryProtocol]
+        | None
+    ) = None
     command_queue: str = DEFAULT_COMMAND_QUEUE
     results_stream: str = "stream:ib:results"
     snapshot_key: str = "json:orders:snapshot"
@@ -532,32 +540,24 @@ class OrdersRuntime:
     _health_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _stop_event: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
-    _influx_initialised: bool = field(default=False, init=False, repr=False)
-    _influx_disabled: bool = field(default=False, init=False, repr=False)
-    _influx_disable_reason: str = field(default="", init=False, repr=False)
+    _order_repository: OrderRepositoryProtocol | None = field(
+        default=None, init=False, repr=False
+    )
+    _order_repository_close: Callable[[], Awaitable[None] | None] | None = field(
+        default=None, init=False, repr=False
+    )
+    _repository_failure_count: int = field(default=0, init=False, repr=False)
+    _repository_last_error: str = field(default="", init=False, repr=False)
 
     def __post_init__(self) -> None:
         self._history = deque(maxlen=self.history_limit)
-
-    def _configure_influx(self) -> None:
-        if self._influx_initialised:
-            return
-        self._influx_initialised = True
-        try:
-            init_influx_client()
-        except Exception as exc:  # pragma: no cover - depends on optional dependency
-            self._influx_disabled = True
-            self._influx_disable_reason = str(exc)
-            self.logger.info("Orders Influx integration disabled: %s", exc)
-        else:
-            self._influx_disabled = False
-            self._influx_disable_reason = ""
 
     async def start(self) -> None:
         if self._stream_task is not None or self._redis is not None:
             return
 
-        self._configure_influx()
+        if self.order_repository_factory is not None and self._order_repository is None:
+            await self._initialise_order_repository()
         self._redis = await self.redis_factory()
         await self._load_snapshot()
         await self._publish_health()
@@ -582,6 +582,7 @@ class OrdersRuntime:
         self._stream_task = None
         self._health_task = None
         self._redis = None
+        await self._shutdown_order_repository()
 
     async def submit_order(self, request: OrderSubmission) -> str:
         if self._redis is None:
@@ -607,7 +608,10 @@ class OrdersRuntime:
             await self._append_history({"event": "submitted", "command_id": command_id, "order": entry})
             entry_snapshot = _clone_order_record(entry)
         if entry_snapshot is not None:
-            await self._write_order_point(entry_snapshot, timestamp=entry_snapshot.get("requested_at"))
+            await self._upsert_order_snapshot(
+                entry_snapshot,
+                timestamp=entry_snapshot.get("requested_at"),
+            )
         await self._publish_health()
         return command_id
 
@@ -755,7 +759,7 @@ class OrdersRuntime:
             )
 
         if record_snapshot is not None:
-            await self._write_order_point(record_snapshot, timestamp=timestamp)
+            await self._upsert_order_snapshot(record_snapshot, timestamp=timestamp)
             return record_snapshot
         raise RuntimeError("failed to update fill metrics")
 
@@ -1076,199 +1080,107 @@ class OrdersRuntime:
         except Exception as exc:  # pragma: no cover - defensive guard
             self.logger.debug("Failed to append order history: %s", exc)
 
-    def _build_influx_order_point(
+    def _build_repository_order_payload(
         self,
         record: Mapping[str, Any],
         *,
         timestamp: str | datetime | None = None,
-    ) -> Any | None:
-        request = _coerce_mapping(record.get("request")) or {}
-        response = _coerce_mapping(record.get("response")) or {}
-        result = _coerce_mapping(record.get("result")) or {}
-        metadata = _coerce_mapping(record.get("metadata")) or {}
-        sources: tuple[Mapping[str, Any], ...] = tuple(
-            source
-            for source in (record, result, response, request, metadata)
-            if isinstance(source, Mapping)
-        )
+    ) -> Mapping[str, Any]:
+        payload = _normalise_cached_record(record)
+        if timestamp is not None:
+            normalised_timestamp = _normalise_timestamp(timestamp)
+            if normalised_timestamp is not None:
+                payload["timestamp"] = normalised_timestamp
+            elif isinstance(timestamp, datetime):
+                payload["timestamp"] = _serialise_datetime(timestamp)
+            else:
+                payload["timestamp"] = str(timestamp)
+        return payload
 
-        def _lookup(*keys: str) -> Any:
-            for source in sources:
-                for key in keys:
-                    if key in source:
-                        value = source[key]
-                        if value is None:
-                            continue
-                        if isinstance(value, str) and not value.strip():
-                            continue
-                        return value
-            return None
+    def _record_repository_failure(self, message: str) -> None:
+        self._repository_failure_count += 1
+        self._repository_last_error = message
 
-        order_identifier = _first_nonempty(
-            _lookup("order_id", "ib_order_id", "permid", "permId"),
-            record.get("id"),
-            record.get("command_id"),
-        )
-        symbol_value = _first_nonempty(_lookup("symbol", "ticker"))
-        if not order_identifier or not symbol_value:
-            return None
-
-        side_value = _first_nonempty(_lookup("action", "side"))
-        side = str(side_value).upper() if side_value is not None else "UNKNOWN"
-
-        exchange_value = _first_nonempty(_lookup("exchange"))
-        exchange = _coerce_str(exchange_value)
-
-        quantity_value = _coerce_float(
-            _lookup(
-                "quantity",
-                "total_quantity",
-                "totalQuantity",
-                "qty",
-                "filled_quantity",
-                "filledQuantity",
-            )
-        )
-        quantity = quantity_value if quantity_value is not None else 0.0
-
-        price_value = _coerce_float(
-            _lookup(
-                "avg_fill_price",
-                "avg_price",
-                "avgPrice",
-                "limit_price",
-                "lmt_price",
-                "limitPrice",
-                "stop_price",
-                "aux_price",
-                "stopPrice",
-                "price",
-            )
-        )
-        price = price_value if price_value is not None else 0.0
-
-        status_value = _first_nonempty(
-            record.get("status"),
-            _lookup("status", "order_status", "orderStatus"),
-        )
-        status = str(status_value) if status_value is not None else "unknown"
-
-        timestamp_dt = _parse_datetime(timestamp)
-        if timestamp_dt is None:
-            timestamp_dt = _parse_datetime(record.get("updated_at"))
-        if timestamp_dt is None:
-            timestamp_dt = _parse_datetime(record.get("requested_at"))
-        if timestamp_dt is None:
-            timestamp_dt = _utc_now()
-
-        extra_fields: dict[str, Any] = {}
-
-        float_fields: dict[str, tuple[str, ...]] = {
-            "filled_quantity": (
-                "filled_quantity",
-                "filled",
-                "filledQuantity",
-            ),
-            "remaining_quantity": (
-                "remaining_quantity",
-                "remaining",
-                "remainingQuantity",
-                "left",
-            ),
-            "avg_fill_price": ("avg_fill_price", "avg_price", "avgPrice"),
-            "limit_price": ("limit_price", "lmt_price", "limitPrice"),
-            "stop_price": ("stop_price", "aux_price", "stopPrice"),
-            "commission": ("commission",),
-            "realized_pnl": ("realized_pnl", "realizedPnl"),
-            "unrealized_pnl": ("unrealized_pnl", "unrealizedPnl"),
-            "trigger_price": ("trigger_price",),
-        }
-        for field_name, keys in float_fields.items():
-            value = None
-            for key in keys:
-                candidate = _lookup(key)
-                if candidate is not None:
-                    value = candidate
-                    break
-            coerced = _coerce_float(value)
-            if coerced is not None:
-                extra_fields[field_name] = coerced
-
-        string_fields: dict[str, tuple[str, ...]] = {
-            "order_type": ("order_type", "orderType", "type"),
-            "trigger": ("trigger",),
-            "trigger_type": ("trigger_type",),
-            "trigger_status": ("trigger_status", "triggerStatus"),
-            "notes": ("notes", "note", "comment"),
-        }
-        for field_name, keys in string_fields.items():
-            value = None
-            for key in keys:
-                candidate = _lookup(key)
-                if candidate is not None:
-                    value = candidate
-                    break
-            text = _coerce_str(value)
-            if text:
-                extra_fields[field_name] = text
-
-        extra_tags: dict[str, str] = {}
-        tag_fields: dict[str, tuple[str, ...]] = {
-            "account": ("account",),
-            "source": ("source",),
-            "strategy": ("strategy", "strategy_id"),
-            "sec_type": ("sec_type", "security_type", "secType"),
-        }
-        for tag_name, keys in tag_fields.items():
-            value = None
-            for key in keys:
-                candidate = _lookup(key)
-                if candidate is not None:
-                    value = candidate
-                    break
-            text = _coerce_str(value)
-            if text:
-                extra_tags[tag_name] = text
-
-        return build_order_point(
-            order_id=str(order_identifier),
-            symbol=str(symbol_value),
-            side=side,
-            quantity=quantity,
-            price=price,
-            status=status,
-            exchange=exchange,
-            timestamp=timestamp_dt,
-            extra_fields=extra_fields or None,
-            extra_tags=extra_tags or None,
-        )
-
-    async def _write_order_point(
+    async def _upsert_order_snapshot(
         self,
         record: Mapping[str, Any],
         *,
         timestamp: str | datetime | None = None,
     ) -> None:
-        if self._influx_disabled:
+        if self.order_repository_factory is None:
             return
-        if not self._influx_initialised:
-            self._configure_influx()
-            if self._influx_disabled:
-                return
 
-        point = self._build_influx_order_point(record, timestamp=timestamp)
-        if point is None:
+        repository = self._order_repository
+        if repository is None:
+            self.logger.warning("Order repository unavailable; dropping snapshot")
+            self._record_repository_failure("repository unavailable")
+            return
+
+        payload = self._build_repository_order_payload(record, timestamp=timestamp)
+
+        try:
+            await repository.upsert_order(payload)
+        except Exception as exc:
+            self._record_repository_failure(str(exc))
+            self.logger.warning(
+                "Failed to persist order snapshot to repository", exc_info=True
+            )
+        else:
+            self._repository_last_error = ""
+
+    async def _initialise_order_repository(self) -> None:
+        if self.order_repository_factory is None:
             return
         try:
-            await _maybe_await(self.write_fn([point]))
-        except ValueError as exc:
-            message = str(exc)
-            if not self._influx_disabled:
-                self.logger.info("Disabling orders Influx writes: %s", message)
-            self._influx_disabled = True
-            self._influx_disable_reason = message
-        except Exception:
-            self.logger.warning("Failed to write order point to InfluxDB", exc_info=True)
+            created = self.order_repository_factory()
+            repository = await _maybe_await(created)
+        except Exception as exc:
+            self._order_repository = None
+            self._order_repository_close = None
+            self._record_repository_failure(str(exc))
+            self.logger.exception("Failed to initialise order repository")
+            return
+
+        self._order_repository = repository
+
+        close_candidate = getattr(repository, "aclose", None)
+        if callable(close_candidate):
+            async def _async_close() -> None:
+                await _maybe_await(close_candidate())
+
+            self._order_repository_close = _async_close
+        else:
+            close_candidate = getattr(repository, "close", None)
+            if callable(close_candidate):
+                async def _sync_close() -> None:
+                    await _maybe_await(close_candidate())
+
+                self._order_repository_close = _sync_close
+            else:
+                self._order_repository_close = None
+
+        self._repository_last_error = ""
+
+    async def _shutdown_order_repository(self) -> None:
+        close_callable = self._order_repository_close
+        repository = self._order_repository
+        self._order_repository_close = None
+        self._order_repository = None
+        if close_callable is not None:
+            try:
+                await close_callable()
+            except Exception:  # pragma: no cover - defensive guard
+                self.logger.debug("Failed to close order repository", exc_info=True)
+            return
+        if repository is not None:
+            close_candidate = getattr(repository, "close", None)
+            if callable(close_candidate):
+                try:
+                    await _maybe_await(close_candidate())
+                except Exception:  # pragma: no cover - defensive guard
+                    self.logger.debug(
+                        "Failed to close order repository", exc_info=True
+                    )
 
     async def _publish_health(self) -> None:
         if self._redis is None:
@@ -1279,6 +1191,10 @@ class OrdersRuntime:
                 "last_event_id": self._last_message_id or "",
                 "updated_at": _serialise_datetime(self._last_updated_at),
             }
+            if self.order_repository_factory is not None:
+                metrics["repository_failures"] = self._repository_failure_count
+                metrics["repository_last_error"] = self._repository_last_error
+                metrics["repository_available"] = bool(self._order_repository)
         try:
             await update_service_health(
                 self._redis,
@@ -1439,7 +1355,7 @@ class OrdersRuntime:
             record_snapshot = _clone_order_record(record)
             updated = True
         if record_snapshot is not None:
-            await self._write_order_point(record_snapshot, timestamp=event_time)
+            await self._upsert_order_snapshot(record_snapshot, timestamp=event_time)
         return updated
 
     def _extract_order_id(
@@ -1494,7 +1410,27 @@ class OrdersRuntime:
 
 def create_app(runtime: OrdersRuntime | None = None, *, enable_events: bool = True) -> FastAPI:
     app = FastAPI(title="Orders Service", version="1.0.0")
-    runtime_instance = runtime or OrdersRuntime()
+
+    if runtime is None:
+        try:
+            from src.ibbot.db import get_async_session, order_repository
+        except ImportError as exc:  # pragma: no cover - optional dependency
+            LOGGER.info("Orders repository unavailable: %s", exc)
+            runtime_instance = OrdersRuntime()
+        else:
+            async def _default_order_repository() -> OrderRepositoryProtocol:
+                session = get_async_session()
+                repository = order_repository(session)
+
+                async def _close() -> None:
+                    await session.close()
+
+                setattr(repository, "close", _close)
+                return repository
+
+            runtime_instance = OrdersRuntime(order_repository_factory=_default_order_repository)
+    else:
+        runtime_instance = runtime
 
     async def get_runtime() -> OrdersRuntime:
         return runtime_instance
