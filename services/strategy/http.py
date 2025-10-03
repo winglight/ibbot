@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 import secrets
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, Field, ValidationError, validator
@@ -19,9 +19,18 @@ from services.strategy import StrategyTaskConsumer, sync_strategy_metadata
 from src.ibbot import update_service_health
 from src.ibbot.logging import get_logger
 from src.ibbot.redis import DEFAULT_REDIS_URL, close_global_client, get_redis_client
+from src.models import (
+    ExternalStrategyOrderRequest,
+    StrategyDataPushRequest,
+    StrategyParameterUpdateRequest,
+    StrategyRenameRequest,
+    StrategyRiskSettings,
+)
+from src.strategy_risk import StrategyRiskManager
 from src.utils import now_local, parse_local_datetime
 from src.utils.strategy_cache import (
     compute_performance_metrics,
+    get_daily_pnl,
     get_recent_fills,
     get_strategy_orders,
     get_strategy_orders_in_range,
@@ -206,6 +215,8 @@ class StrategyRuntime:
         health_interval: float = DEFAULT_HEALTH_INTERVAL,
         event_poll_interval: float = DEFAULT_EVENT_POLL_INTERVAL,
         consumer: StrategyTaskConsumer | None = None,
+        risk_manager: StrategyRiskManager | None = None,
+        data_push_handler: Callable[[str, Mapping[str, Any]], Awaitable[Any]] | None = None,
     ) -> None:
         self._redis = redis_client
         self._queue_key = queue_key
@@ -226,6 +237,8 @@ class StrategyRuntime:
         self._last_result_id: str | None = None
         self._logger = get_logger("ibbot.services.strategy.http")
         self._consumer = consumer
+        self._risk_manager = risk_manager
+        self._data_push_handler = data_push_handler
         self.pending_tasks: int = 0
         self.last_event_at: str | None = None
 
@@ -434,6 +447,150 @@ class StrategyRuntime:
         except Exception:
             self._logger.debug("Failed to delete strategy execution cache", exc_info=True)
         return {"success": True, "executions": []}
+
+    async def submit_external_order(self, payload: ExternalStrategyOrderRequest) -> dict[str, Any]:
+        message = {
+            "type": "external_order",
+            "order": payload.model_dump(exclude_none=True),
+            "enqueued_at": _utc_now().isoformat(),
+        }
+        try:
+            await self._redis.rpush(self._queue_key, json.dumps(message))
+        except Exception as exc:  # pragma: no cover - defensive guard
+            raise TaskEnqueueError(str(exc)) from exc
+        self.pending_tasks = await self._get_queue_length()
+        self._health_signal.set()
+        return {"success": True, "queued": True, "order": message["order"]}
+
+    async def get_internal_info(self, name: str) -> dict[str, Any]:
+        document = await self.get_strategy(name)
+        if document is None:
+            raise StrategyNotRegistered(name)
+        internal = await self._load_internal_snapshot(document)
+        return {
+            "success": True,
+            "strategy": document.dict(),
+            "internal_info": internal,
+        }
+
+    async def update_internal_parameter(
+        self,
+        name: str,
+        parameter: StrategyParameterUpdateRequest,
+    ) -> dict[str, Any]:
+        document = await self.get_strategy(name)
+        if document is None:
+            raise StrategyNotRegistered(name)
+        internal = await self._load_internal_snapshot(document)
+        current = internal.get("parameters")
+        if not isinstance(current, Mapping):
+            current = {}
+        updated = dict(current)
+        updated[str(parameter.parameter_name)] = parameter.value
+        internal["parameters"] = updated
+        await self._persist_internal_info(name, internal)
+        return {
+            "success": True,
+            "parameter": {"name": parameter.parameter_name, "value": parameter.value},
+            "internal_info": internal,
+        }
+
+    async def get_strategy_status(self, name: str) -> dict[str, Any]:
+        document = await self.get_strategy(name)
+        if document is None:
+            raise StrategyNotRegistered(name)
+        status = await self._load_status_snapshot(name)
+        data_push = await self._load_data_push_snapshot(name)
+        if data_push:
+            status.setdefault("data_push", data_push)
+        status.setdefault("pending_tasks", self.pending_tasks)
+        return {"success": True, "strategy": document.dict(), "status": status}
+
+    async def request_data_push(self, name: str, payload: StrategyDataPushRequest) -> dict[str, Any]:
+        document = await self.get_strategy(name)
+        if document is None:
+            raise StrategyNotRegistered(name)
+        data = payload.model_dump(exclude_none=True)
+        data["updated_at"] = _utc_now().isoformat()
+        await self._persist_data_push_state(name, data)
+        if self._data_push_handler is not None:
+            try:
+                await self._data_push_handler(name, data)
+            except Exception:  # pragma: no cover - defensive guard
+                self._logger.warning("Data push handler failed", exc_info=True)
+        return {"success": True, "data_push": data}
+
+    async def rename_strategy(self, name: str, payload: StrategyRenameRequest) -> StrategyDocument:
+        new_name = (payload.new_name or "").strip()
+        if not new_name:
+            raise StrategyError("new strategy name must not be empty")
+        async with self._lock:
+            document = self._strategies.get(name)
+            if document is None:
+                raise StrategyNotRegistered(name)
+            if new_name == name:
+                return document.copy()
+            if new_name in self._strategies:
+                raise StrategyError(f"strategy already exists: {new_name}")
+            updated = document.copy(
+                update={"name": new_name, "updated_at": _utc_now().isoformat()}
+            )
+            self._strategies.pop(name)
+            self._strategies[new_name] = updated
+            await self._persist_document(updated)
+            await self._persist_index()
+        await self._redis.delete(self._metadata_key(name))
+        await self._rename_related_keys(name, new_name)
+        self._health_signal.set()
+        return updated
+
+    async def get_daily_pnl(self, name: str, *, force_refresh: bool = False) -> dict[str, Any]:
+        document = await self.get_strategy(name)
+        if document is None:
+            raise StrategyNotRegistered(name)
+        if force_refresh:
+            try:
+                await mark_strategy_cache_stale(name)
+            except Exception:
+                self._logger.debug("Failed to mark daily pnl cache stale", exc_info=True)
+        pnl = await get_daily_pnl(name)
+        return {"success": True, "strategy": document.dict(), "pnl": pnl}
+
+    async def get_risk_settings(self, name: str) -> StrategyRiskSettings:
+        document = await self.get_strategy(name)
+        if document is None:
+            raise StrategyNotRegistered(name)
+        payload: dict[str, Any] = {}
+        stored = await self._redis.get(self._risk_settings_key(name))
+        if stored:
+            payload.update(_normalise_json_payload(stored))
+        symbol = self._resolve_primary_symbol(document)
+        if self._risk_manager is not None and symbol:
+            try:
+                rule = await self._risk_manager.load_rule(symbol)
+            except Exception:  # pragma: no cover - defensive guard
+                self._logger.debug("Failed to load risk settings for %s", symbol, exc_info=True)
+            else:
+                if isinstance(rule, Mapping):
+                    payload.update({str(k): v for k, v in rule.items()})
+        try:
+            return StrategyRiskSettings(**payload)
+        except ValidationError as exc:
+            raise StrategyError(str(exc)) from exc
+
+    async def update_risk_settings(self, name: str, settings: StrategyRiskSettings) -> StrategyRiskSettings:
+        document = await self.get_strategy(name)
+        if document is None:
+            raise StrategyNotRegistered(name)
+        payload = settings.model_dump(exclude_none=True)
+        await self._redis.set(self._risk_settings_key(name), json.dumps(payload))
+        symbol = self._resolve_primary_symbol(document)
+        if self._risk_manager is not None and symbol:
+            try:
+                await self._risk_manager.update_rule(symbol, payload=payload)
+            except Exception:  # pragma: no cover - defensive guard
+                self._logger.warning("Failed to persist risk settings", exc_info=True)
+        return settings
 
     @staticmethod
     def _strategy_cache_keys(name: str) -> list[str]:
@@ -728,6 +885,87 @@ class StrategyRuntime:
         except Exception:
             self._logger.debug("Failed to publish strategy health", exc_info=True)
 
+    def _internal_info_key(self, name: str) -> str:
+        return f"{self._metadata_prefix}:{name}:internal"
+
+    def _status_key(self, name: str) -> str:
+        return f"{self._metadata_prefix}:{name}:status"
+
+    def _data_push_key(self, name: str) -> str:
+        return f"{self._metadata_prefix}:{name}:data-push"
+
+    def _risk_settings_key(self, name: str) -> str:
+        return f"{self._metadata_prefix}:{name}:risk"
+
+    async def _load_internal_snapshot(self, document: StrategyDocument) -> dict[str, Any]:
+        cached = await self._redis.get(self._internal_info_key(document.name))
+        payload = _normalise_json_payload(cached)
+        if payload:
+            return payload
+        internal: dict[str, Any] = {}
+        metadata = document.metadata or {}
+        if isinstance(metadata, Mapping):
+            entry = metadata.get("internal_info")
+            if isinstance(entry, Mapping):
+                internal.update({str(k): v for k, v in entry.items()})
+        if document.description and "description" not in internal:
+            internal["description"] = document.description
+        if document.params and "parameters" not in internal:
+            internal["parameters"] = dict(document.params)
+        await self._persist_internal_info(document.name, internal)
+        return internal
+
+    async def _persist_internal_info(self, name: str, payload: Mapping[str, Any]) -> None:
+        await self._redis.set(self._internal_info_key(name), json.dumps(dict(payload)))
+
+    async def _load_status_snapshot(self, name: str) -> dict[str, Any]:
+        stored = await self._redis.get(self._status_key(name))
+        payload = _normalise_json_payload(stored)
+        return payload if payload else {}
+
+    async def _load_data_push_snapshot(self, name: str) -> dict[str, Any]:
+        stored = await self._redis.get(self._data_push_key(name))
+        payload = _normalise_json_payload(stored)
+        return payload if payload else {}
+
+    async def _persist_data_push_state(self, name: str, payload: Mapping[str, Any]) -> None:
+        await self._redis.set(self._data_push_key(name), json.dumps(dict(payload)))
+
+    async def _rename_related_keys(self, old: str, new: str) -> None:
+        related = {
+            self._internal_info_key(old): self._internal_info_key(new),
+            self._status_key(old): self._status_key(new),
+            self._data_push_key(old): self._data_push_key(new),
+            self._risk_settings_key(old): self._risk_settings_key(new),
+        }
+        for source, target in related.items():
+            try:
+                payload = await self._redis.get(source)
+            except Exception:  # pragma: no cover - defensive guard
+                self._logger.debug("Failed to load key %s during rename", source, exc_info=True)
+                continue
+            if payload is None:
+                continue
+            try:
+                await self._redis.set(target, payload)
+                await self._redis.delete(source)
+            except Exception:  # pragma: no cover - defensive guard
+                self._logger.debug("Failed to rename key %s", source, exc_info=True)
+
+    @staticmethod
+    def _resolve_primary_symbol(document: StrategyDocument) -> str | None:
+        metadata_symbol = None
+        if isinstance(document.metadata, Mapping):
+            candidate = document.metadata.get("primary_symbol")
+            if isinstance(candidate, str) and candidate.strip():
+                metadata_symbol = candidate.strip().upper()
+        param_symbol = None
+        if isinstance(document.params, Mapping):
+            candidate = document.params.get("symbol")
+            if isinstance(candidate, str) and candidate.strip():
+                param_symbol = candidate.strip().upper()
+        return metadata_symbol or param_symbol
+
 
 class StrategyError(RuntimeError):
     """Base error for strategy HTTP operations."""
@@ -784,11 +1022,14 @@ def create_app(
     health_interval: float = DEFAULT_HEALTH_INTERVAL,
     event_poll_interval: float = DEFAULT_EVENT_POLL_INTERVAL,
     consumer_factory: Callable[[Any], StrategyTaskConsumer] | None = None,
+    risk_manager_factory: Callable[[], StrategyRiskManager] | None = None,
+    data_push_handler: Callable[[str, Mapping[str, Any]], Awaitable[Any]] | None = None,
 ) -> FastAPI:
     def _runtime_factory(redis: Any) -> StrategyRuntime:
         if runtime is not None:
             return runtime
         consumer = consumer_factory(redis) if consumer_factory is not None else None
+        risk_manager = risk_manager_factory() if risk_manager_factory is not None else None
         return StrategyRuntime(
             redis,
             queue_key=queue_key,
@@ -797,6 +1038,8 @@ def create_app(
             health_interval=health_interval,
             event_poll_interval=event_poll_interval,
             consumer=consumer,
+            risk_manager=risk_manager,
+            data_push_handler=data_push_handler,
         )
 
     app = FastAPI(
@@ -861,7 +1104,16 @@ def create_app(
         files = await runtime.list_strategy_files()
         return {"success": True, "files": files}
 
-    @app.post("/strategy", response_model=StrategyDocument, status_code=status.HTTP_201_CREATED)
+    @app.post("/strategy", status_code=status.HTTP_202_ACCEPTED)
+    async def submit_external_order(
+        payload: ExternalStrategyOrderRequest,
+        runtime: StrategyRuntime = Depends(_get_runtime),
+    ) -> dict[str, Any]:
+        try:
+            return await runtime.submit_external_order(payload)
+        except TaskEnqueueError as exc:
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
+
     @app.post("/strategies", response_model=StrategyDocument, status_code=status.HTTP_201_CREATED)
     async def create_strategy(
         payload: StrategyUpsertRequest,
@@ -898,6 +1150,75 @@ def create_app(
         if document is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="strategy not found")
         return document
+
+    @app.get("/strategies/{name}/internal-info")
+    async def get_strategy_internal_info(
+        name: str,
+        runtime: StrategyRuntime = Depends(_get_runtime),
+    ) -> dict[str, Any]:
+        try:
+            return await runtime.get_internal_info(name)
+        except StrategyNotRegistered as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    @app.post("/strategies/{name}/internal-info/parameter")
+    async def update_strategy_internal_parameter(
+        name: str,
+        payload: StrategyParameterUpdateRequest,
+        runtime: StrategyRuntime = Depends(_get_runtime),
+    ) -> dict[str, Any]:
+        try:
+            return await runtime.update_internal_parameter(name, payload)
+        except StrategyNotRegistered as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    @app.get("/strategies/{name}/risk-settings")
+    async def get_strategy_risk_settings(
+        name: str,
+        runtime: StrategyRuntime = Depends(_get_runtime),
+    ) -> dict[str, Any]:
+        try:
+            settings = await runtime.get_risk_settings(name)
+        except StrategyNotRegistered as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        except StrategyError as exc:
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
+        return {"success": True, "settings": settings.model_dump(exclude_none=True)}
+
+    @app.put("/strategies/{name}/risk-settings")
+    async def update_strategy_risk_settings(
+        name: str,
+        payload: StrategyRiskSettings,
+        runtime: StrategyRuntime = Depends(_get_runtime),
+    ) -> dict[str, Any]:
+        try:
+            updated = await runtime.update_risk_settings(name, payload)
+        except StrategyNotRegistered as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        except StrategyError as exc:
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
+        return {"success": True, "settings": updated.model_dump(exclude_none=True)}
+
+    @app.get("/strategies/{name}/status")
+    async def get_strategy_status(
+        name: str,
+        runtime: StrategyRuntime = Depends(_get_runtime),
+    ) -> dict[str, Any]:
+        try:
+            return await runtime.get_strategy_status(name)
+        except StrategyNotRegistered as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    @app.post("/strategies/{name}/data-push")
+    async def request_strategy_data_push(
+        name: str,
+        payload: StrategyDataPushRequest,
+        runtime: StrategyRuntime = Depends(_get_runtime),
+    ) -> dict[str, Any]:
+        try:
+            return await runtime.request_data_push(name, payload)
+        except StrategyNotRegistered as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
     @app.get("/strategies/{name}/performance")
     async def get_strategy_performance(
@@ -1035,6 +1356,30 @@ def create_app(
         except StrategyNotRegistered as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
         return {"success": True, "strategy": document}
+
+    @app.post("/strategies/{name}/rename", response_model=StrategyDocument)
+    async def rename_strategy(
+        name: str,
+        payload: StrategyRenameRequest,
+        runtime: StrategyRuntime = Depends(_get_runtime),
+    ) -> StrategyDocument:
+        try:
+            return await runtime.rename_strategy(name, payload)
+        except StrategyNotRegistered as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        except StrategyError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    @app.get("/strategies/{name}/pnl/daily")
+    async def get_strategy_daily_pnl(
+        name: str,
+        runtime: StrategyRuntime = Depends(_get_runtime),
+        force_refresh: bool = Query(False, alias="force_refresh"),
+    ) -> dict[str, Any]:
+        try:
+            return await runtime.get_daily_pnl(name, force_refresh=force_refresh)
+        except StrategyNotRegistered as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
     @app.post("/strategy/{name}/run", response_model=StrategyRunResponse, status_code=status.HTTP_202_ACCEPTED)
     async def run_strategy(

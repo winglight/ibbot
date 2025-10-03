@@ -7,12 +7,15 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+from typing import Any, Mapping
+
 import pytest
 from fastapi.testclient import TestClient
 
 from services.strategy.discovery import sync_strategy_metadata
 from services.strategy.http import (
     DEFAULT_SETTINGS,
+    DEFAULT_STRATEGY_QUEUE,
     StrategyRuntime,
     create_app,
     persist_strategy_settings,
@@ -32,14 +35,22 @@ def redis_client() -> InMemoryRedis:
         asyncio.run(client.close())
 
 
-def _build_client(redis: InMemoryRedis) -> TestClient:
+def _build_client(
+    redis: InMemoryRedis,
+    *,
+    runtime: StrategyRuntime | None = None,
+    app_kwargs: dict[str, Any] | None = None,
+) -> TestClient:
     def redis_factory() -> InMemoryRedis:
         return redis
 
+    kwargs = app_kwargs or {}
     app = create_app(
         redis_factory=redis_factory,
         health_interval=0.05,
         event_poll_interval=0.05,
+        runtime=runtime,
+        **kwargs,
     )
     return TestClient(app)
 
@@ -83,6 +94,39 @@ def _prepare_recent_fills(redis: InMemoryRedis, name: str, fills: list[dict[str,
     for fill in fills:
         asyncio.run(redis.rpush(key, json.dumps(fill)))
 
+
+def _read_json_value(redis: InMemoryRedis, key: str) -> Any:
+    value = asyncio.run(redis.get(key))
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return value
+    return value
+
+
+class StubRiskManager:
+    def __init__(self) -> None:
+        self.rule: dict[str, Any] | None = None
+        self.loaded: list[str] = []
+        self.updated: list[tuple[str, dict[str, Any]]] = []
+
+    async def load_rule(self, symbol: str) -> dict[str, Any] | None:
+        self.loaded.append(symbol)
+        return self.rule
+
+    async def update_rule(
+        self,
+        symbol: str,
+        payload: Mapping[str, Any] | None = None,
+        *,
+        enabled: bool | None = None,
+    ) -> None:
+        update_payload = dict(payload or {})
+        if enabled is not None:
+            update_payload["enabled"] = enabled
+        self.updated.append((symbol, update_payload))
+        self.rule = update_payload
 
 def test_discovered_strategy_available_on_start(redis_client: InMemoryRedis) -> None:
     asyncio.run(sync_strategy_metadata(redis_client, {}))
@@ -142,7 +186,7 @@ def test_strategy_crud_lifecycle(redis_client: InMemoryRedis) -> None:
         initial = response.json()
         assert all(entry["name"] != "demo" for entry in initial)
 
-        response = client.post("/strategy", json=payload)
+        response = client.post("/strategies", json=payload)
         assert response.status_code == 201
         created = response.json()
         assert created["name"] == "demo"
@@ -220,7 +264,7 @@ def test_strategy_run_enqueues_tasks(redis_client: InMemoryRedis) -> None:
     }
 
     with client:
-        assert client.post("/strategy", json=payload).status_code == 201
+        assert client.post("/strategies", json=payload).status_code == 201
         response = client.post("/strategy/momentum/run", json={"params": {"symbol": "CL"}})
         assert response.status_code == 202
         queued = response.json()
@@ -281,7 +325,7 @@ def test_get_strategy_performance_success(
     ]
 
     with client:
-        assert client.post("/strategy", json=payload).status_code == 201
+        assert client.post("/strategies", json=payload).status_code == 201
         _prepare_strategy_orders(redis_client, "alpha", orders)
         response = client.get(
             "/strategies/alpha/performance",
@@ -333,7 +377,7 @@ def test_get_strategy_performance_invalid_range(
     }
 
     with client:
-        assert client.post("/strategy", json=payload).status_code == 201
+        assert client.post("/strategies", json=payload).status_code == 201
         response = client.get("/strategies/beta/performance", params={"range": "invalid"})
 
     assert response.status_code == 400
@@ -397,7 +441,7 @@ def test_strategy_toggle_aliases(redis_client: InMemoryRedis) -> None:
     }
 
     with client:
-        assert client.post("/strategy", json=payload).status_code == 201
+        assert client.post("/strategies", json=payload).status_code == 201
 
         toggle_resp = client.post("/strategies/switch/toggle?enabled=false")
         assert toggle_resp.status_code == 200
@@ -432,7 +476,7 @@ def test_strategy_reset_aliases(redis_client: InMemoryRedis) -> None:
     }
 
     with client:
-        assert client.post("/strategy", json=payload).status_code == 201
+        assert client.post("/strategies", json=payload).status_code == 201
 
         resp = client.post("/strategies/resetme/reset")
         assert resp.status_code == 200
@@ -475,7 +519,7 @@ def test_strategy_files_endpoint_merges_sources(
     }
 
     with client:
-        assert client.post("/strategy", json=payload).status_code == 201
+        assert client.post("/strategies", json=payload).status_code == 201
 
         response = client.get("/strategy/files")
         assert response.status_code == 200
@@ -556,7 +600,7 @@ def test_strategy_executions_endpoint_returns_recent_fills(
     }
 
     with client:
-        assert client.post("/strategy", json=payload).status_code == 201
+        assert client.post("/strategies", json=payload).status_code == 201
 
         response = client.get(f"/strategies/{strategy_name}/executions", params={"limit": 2})
         assert response.status_code == 200
@@ -635,7 +679,7 @@ def test_clear_strategy_executions_endpoint_purges_cache(
     }
 
     with client:
-        assert client.post("/strategy", json=payload).status_code == 201
+        assert client.post("/strategies", json=payload).status_code == 201
 
         response = client.delete(f"/strategies/{strategy_name}/executions")
         assert response.status_code == 200
@@ -652,3 +696,221 @@ def test_clear_strategy_executions_endpoint_purges_cache(
         assert recent_entries == []
         assert stats == {}
         assert daily == {}
+
+
+def test_submit_external_order_enqueues_message(redis_client: InMemoryRedis) -> None:
+    client = _build_client(redis_client)
+
+    payload = {
+        "strategy": "alpha",
+        "symbol": "ES",
+        "action": "BUY",
+        "qty": 2,
+        "type": "MARKET",
+    }
+
+    with client:
+        response = client.post("/strategy", json=payload)
+
+    assert response.status_code == 202
+    data = response.json()
+    assert data["success"] is True
+    assert data["order"]["strategy"] == "alpha"
+
+    queued = asyncio.run(redis_client.blpop(DEFAULT_STRATEGY_QUEUE, timeout=0.1))
+    assert queued is not None
+    _, raw = queued
+    message = json.loads(raw)
+    assert message["type"] == "external_order"
+    assert message["order"]["strategy"] == "alpha"
+
+
+def test_internal_info_endpoints_round_trip(redis_client: InMemoryRedis) -> None:
+    client = _build_client(redis_client)
+
+    payload = {
+        "name": "inspector",
+        "factory": "tests.services.strategy.sample:factory",
+        "description": "Internal strategy",
+        "params": {"symbol": "ES"},
+        "metadata": {"internal_info": {"parameters": {"window": 5}, "notes": "demo"}},
+    }
+
+    with client:
+        assert client.post("/strategies", json=payload).status_code == 201
+
+        info_resp = client.get("/strategies/inspector/internal-info")
+        assert info_resp.status_code == 200
+        info_payload = info_resp.json()
+        assert info_payload["success"] is True
+        assert info_payload["internal_info"]["parameters"]["window"] == 5
+
+        update_resp = client.post(
+            "/strategies/inspector/internal-info/parameter",
+            json={"name": "threshold", "value": 42},
+        )
+        assert update_resp.status_code == 200
+        updated = update_resp.json()["internal_info"]
+        assert updated["parameters"]["threshold"] == 42
+
+        cached = _read_json_value(redis_client, "json:strategy:inspector:internal")
+        assert cached["parameters"]["threshold"] == 42
+
+
+def test_internal_info_missing_strategy_returns_not_found(redis_client: InMemoryRedis) -> None:
+    client = _build_client(redis_client)
+
+    with client:
+        resp = client.get("/strategies/ghost/internal-info")
+        assert resp.status_code == 404
+
+        update_resp = client.post(
+            "/strategies/ghost/internal-info/parameter",
+            json={"name": "alpha", "value": 1},
+        )
+        assert update_resp.status_code == 404
+
+
+def test_risk_settings_round_trip(redis_client: InMemoryRedis) -> None:
+    stub = StubRiskManager()
+    stub.rule = {"max_positions": 3, "forbid_add_on_loss": False}
+    runtime = StrategyRuntime(redis_client, risk_manager=stub)
+    client = _build_client(redis_client, runtime=runtime)
+
+    payload = {
+        "name": "riskable",
+        "factory": "tests.services.strategy.sample:factory",
+        "params": {"symbol": "ES"},
+        "metadata": {"primary_symbol": "ES"},
+    }
+
+    with client:
+        assert client.post("/strategies", json=payload).status_code == 201
+
+        get_resp = client.get("/strategies/riskable/risk-settings")
+        assert get_resp.status_code == 200
+        settings = get_resp.json()["settings"]
+        assert settings["max_positions"] == 3
+        assert stub.loaded == ["ES"]
+
+        update_payload = {"max_positions": 5, "loss_pnl_threshold": 125.5}
+        put_resp = client.put("/strategies/riskable/risk-settings", json=update_payload)
+        assert put_resp.status_code == 200
+        persisted = put_resp.json()["settings"]
+        assert persisted["max_positions"] == 5
+        assert stub.updated[-1][0] == "ES"
+        assert stub.rule["loss_pnl_threshold"] == 125.5
+
+        stored = _read_json_value(redis_client, "json:strategy:riskable:risk")
+        assert stored["max_positions"] == 5
+
+
+def test_strategy_status_and_data_push(redis_client: InMemoryRedis) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def handler(name: str, payload: Mapping[str, Any]) -> None:
+        calls.append((name, dict(payload)))
+
+    runtime = StrategyRuntime(redis_client, data_push_handler=handler)
+    client = _build_client(redis_client, runtime=runtime)
+
+    payload = {
+        "name": "status-demo",
+        "factory": "tests.services.strategy.sample:factory",
+        "params": {"symbol": "NQ"},
+    }
+
+    status_key = "json:strategy:status-demo:status"
+    asyncio.run(redis_client.set(status_key, json.dumps({"heartbeat": 42})))
+
+    with client:
+        assert client.post("/strategies", json=payload).status_code == 201
+
+        status_resp = client.get("/strategies/status-demo/status")
+        assert status_resp.status_code == 200
+        status_payload = status_resp.json()["status"]
+        assert status_payload["heartbeat"] == 42
+
+        request_payload = {
+            "enabled": True,
+            "subscription": "dom_trend",
+            "symbol": "NQ",
+        }
+        push_resp = client.post("/strategies/status-demo/data-push", json=request_payload)
+        assert push_resp.status_code == 200
+        stored = _read_json_value(redis_client, "json:strategy:status-demo:data-push")
+        assert stored["enabled"] is True
+        assert calls and calls[-1][0] == "status-demo"
+
+        refreshed = client.get("/strategies/status-demo/status")
+        assert refreshed.json()["status"]["data_push"]["enabled"] is True
+
+
+def test_strategy_rename_updates_metadata_keys(redis_client: InMemoryRedis) -> None:
+    client = _build_client(redis_client)
+
+    payload = {
+        "name": "legacy",
+        "factory": "tests.services.strategy.sample:factory",
+        "params": {"symbol": "CL"},
+    }
+
+    asyncio.run(redis_client.set("json:strategy:legacy:internal", json.dumps({"parameters": {"base": 1}})))
+
+    with client:
+        assert client.post("/strategies", json=payload).status_code == 201
+
+        rename_resp = client.post("/strategies/legacy/rename", json={"new_name": "renewed"})
+        assert rename_resp.status_code == 200
+        renamed = rename_resp.json()
+        assert renamed["name"] == "renewed"
+
+        missing = client.get("/strategies/legacy")
+        assert missing.status_code == 404
+
+        listing = client.get("/strategies")
+        names = [entry["name"] for entry in listing.json()]
+        assert "renewed" in names
+
+        new_internal = _read_json_value(redis_client, "json:strategy:renewed:internal")
+        assert new_internal["parameters"]["base"] == 1
+        assert _read_json_value(redis_client, "json:strategy:legacy:internal") is None
+
+
+def test_daily_pnl_endpoint_uses_cache(redis_client: InMemoryRedis, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+    marks: list[str] = []
+
+    async def fake_daily(name: str) -> list[dict[str, Any]]:
+        calls.append(name)
+        return [{"date": "2024-01-01", "pnl": 10.5}]
+
+    async def fake_mark(name: str) -> None:
+        marks.append(name)
+
+    monkeypatch.setattr("services.strategy.http.get_daily_pnl", fake_daily)
+    monkeypatch.setattr("services.strategy.http.mark_strategy_cache_stale", fake_mark)
+
+    client = _build_client(redis_client)
+
+    payload = {
+        "name": "pnl-demo",
+        "factory": "tests.services.strategy.sample:factory",
+        "params": {"symbol": "YM"},
+    }
+
+    with client:
+        assert client.post("/strategies", json=payload).status_code == 201
+
+        resp = client.get("/strategies/pnl-demo/pnl/daily")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["pnl"][0]["pnl"] == 10.5
+        assert calls == ["pnl-demo"]
+
+        resp_force = client.get(
+            "/strategies/pnl-demo/pnl/daily",
+            params={"force_refresh": "true"},
+        )
+        assert resp_force.status_code == 200
+        assert marks == ["pnl-demo"]
