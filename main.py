@@ -81,6 +81,7 @@ from src.routes.logs import router as logs_router
 from src.routes.monitoring import router as monitoring_router
 from src.routes.service import router as service_router
 from src.routes.config import router as config_router
+from src.routes.runbooks import router as runbook_router
 from src.routes.websocket import router as websocket_router
 from src.routes.dom import router as dom_router
 from src.data_layer import get_data_source_manager
@@ -940,6 +941,7 @@ app.include_router(logs_router)
 app.include_router(monitoring_router)
 app.include_router(service_router)
 app.include_router(config_router)
+app.include_router(runbook_router)
 app.include_router(websocket_router)
 app.include_router(dom_router)
 
