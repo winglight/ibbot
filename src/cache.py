@@ -21,6 +21,7 @@ __all__ = [
     "init_redis",
     "get_redis_client",
     "ensure_redis",
+    "close_redis",
     "create_pipeline",
     "hgetall",
     "hset",
@@ -259,6 +260,20 @@ async def ensure_redis() -> Optional[Redis]:
     if client is not None:
         return client
     return await init_redis()
+
+
+async def close_redis() -> None:
+    """Close and clear the cached Redis client."""
+
+    global _client
+    client = _client
+    _client = None
+    if client is None:
+        return
+    try:
+        await client.close()
+    except Exception:  # pragma: no cover - depends on redis implementation
+        logger.debug("Failed to close Redis client", exc_info=True)
 
 
 async def create_pipeline(transaction: bool = True) -> Optional[Pipeline]:

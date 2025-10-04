@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 import pytest
 
+from src.ibbot import redis as redis_module
 from src.ibbot.redis import (
     PubSubListener,
     StreamMessage,
@@ -47,6 +48,52 @@ def redis_client(loop: asyncio.AbstractEventLoop) -> "fakeredis.aioredis.FakeRed
     finally:
         loop.run_until_complete(client.flushall())
         loop.run_until_complete(client.close())
+
+
+def test_get_redis_client_delegates_to_cache(run: Callable[[Any], Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    if redis_module.Redis is None:
+        pytest.skip("redis.asyncio not available")
+
+    sentinel = object()
+
+    async def fake_ensure() -> Any:
+        return sentinel
+
+    monkeypatch.setattr(redis_module, "cache_ensure_redis", fake_ensure)
+    result = run(redis_module.get_redis_client())
+    assert result is sentinel
+
+
+def test_get_redis_pool_uses_shared_client(run: Callable[[Any], Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    if redis_module.Redis is None:
+        pytest.skip("redis.asyncio not available")
+
+    class DummyPool:
+        pass
+
+    class DummyClient:
+        def __init__(self) -> None:
+            self.connection_pool = DummyPool()
+
+    async def fake_ensure() -> Any:
+        return DummyClient()
+
+    monkeypatch.setattr(redis_module, "cache_ensure_redis", fake_ensure)
+    monkeypatch.setattr(redis_module, "ConnectionPool", DummyPool)
+
+    pool = run(redis_module.get_redis_pool())
+    assert isinstance(pool, DummyPool)
+
+
+def test_close_global_client_delegates_to_cache(run: Callable[[Any], Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[None] = []
+
+    async def fake_close() -> None:
+        calls.append(None)
+
+    monkeypatch.setattr(redis_module, "cache_close_redis", fake_close)
+    run(redis_module.close_global_client())
+    assert calls
 
 
 def test_basic_get_set_and_queue(
