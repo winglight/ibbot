@@ -430,7 +430,7 @@ class MarketDataFeedService:
             await repository.insert_price(**payload)
         except Exception:  # pragma: no cover - depends on repository implementation
             if self._logger:
-                self._logger.exception("Failed to persist market price", symbol=symbol)
+                self._logger.exception("Failed to persist market price for %s", symbol)
 
     def _convert_snapshot_to_repository_payload(
         self, symbol: str, snapshot: Mapping[str, Any]

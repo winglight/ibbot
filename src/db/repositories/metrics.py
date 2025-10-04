@@ -150,7 +150,10 @@ class ServiceMetricRepository:
                 )
             return
         except Exception as exc:  # pragma: no cover - log and wrap
-            self._logger.exception("Failed to record service metrics", count=len(rows))
+            self._logger.exception(
+                "Failed to record service metrics (count=%d)",
+                len(rows),
+            )
             raise ServiceMetricRepositoryError("Failed to record service metrics") from exc
 
     def _write_metrics(self, rows: Sequence[Mapping[str, Any]]) -> None:

@@ -78,7 +78,7 @@ class AuditLogRepository:
         except MariaDBConfigurationError as exc:
             raise AuditLogRepositoryError(str(exc)) from exc
         except Exception as exc:  # pragma: no cover - log and wrap
-            self._logger.exception("Failed to record audit log entry", action=action)
+            self._logger.exception("Failed to record audit log entry for action %s", action)
             raise AuditLogRepositoryError("Failed to record audit log entry") from exc
 
     def _write_event(self, row: Mapping[str, Any]) -> None:

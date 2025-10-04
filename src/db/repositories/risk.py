@@ -96,7 +96,8 @@ class RiskSnapshotRepository:
             raise RiskSnapshotRepositoryError(str(exc)) from exc
         except Exception as exc:  # pragma: no cover - log and wrap
             self._logger.exception(
-                "Failed to persist risk config snapshot", service=service
+                "Failed to persist risk config snapshot for service %s",
+                service,
             )
             raise RiskSnapshotRepositoryError("Failed to persist risk config snapshot") from exc
 
@@ -150,7 +151,10 @@ class RiskSnapshotRepository:
         except MariaDBConfigurationError as exc:
             raise RiskSnapshotRepositoryError(str(exc)) from exc
         except Exception as exc:  # pragma: no cover - log and wrap
-            self._logger.exception("Failed to persist risk rule snapshots", service=service)
+            self._logger.exception(
+                "Failed to persist risk rule snapshots for service %s",
+                service,
+            )
             raise RiskSnapshotRepositoryError("Failed to persist risk rule snapshots") from exc
 
     async def bulk_upsert_rule_snapshots(
@@ -196,7 +200,9 @@ class RiskSnapshotRepository:
             raise RiskSnapshotRepositoryError(str(exc)) from exc
         except Exception as exc:  # pragma: no cover - log and wrap
             self._logger.exception(
-                "Failed to upsert risk rule snapshots", service=service, count=len(rows)
+                "Failed to upsert risk rule snapshots for service %s (count=%d)",
+                service,
+                len(rows),
             )
             raise RiskSnapshotRepositoryError("Failed to upsert risk rule snapshots") from exc
 

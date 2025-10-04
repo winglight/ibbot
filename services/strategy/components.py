@@ -183,7 +183,12 @@ class StrategyAdapter:
             await self._emit_event("failed", {**base_event, "error": str(exc)})
             raise
         except Exception as exc:
-            self._logger.exception("Strategy execution failed", task_id=task_id, strategy=strategy_name)
+            self._logger.exception(
+                "Strategy execution failed for task %s (%s)",
+                task_id,
+                strategy_name,
+                extra={"task_id": task_id, "strategy": strategy_name},
+            )
             await self._emit_event("failed", {**base_event, "error": str(exc)})
             raise StrategyExecutionError(str(exc)) from exc
 
@@ -352,7 +357,7 @@ class StrategyTaskConsumer:
             try:
                 task = json.loads(raw_payload)
             except json.JSONDecodeError as exc:
-                self._logger.error("Failed to decode strategy task", error=str(exc))
+                self._logger.error("Failed to decode strategy task: %s", exc)
                 await self._update_health(
                     healthy=False,
                     state="decode_error",
@@ -363,7 +368,7 @@ class StrategyTaskConsumer:
             try:
                 await self._adapter.execute_task(task)
             except StrategyNotFoundError as exc:
-                self._logger.error("Strategy not found", error=str(exc), task=task)
+                self._logger.error("Strategy not found: %s", exc, extra={"task": task})
                 await self._update_health(
                     healthy=False,
                     state="strategy_not_found",
@@ -371,7 +376,7 @@ class StrategyTaskConsumer:
                     task=task,
                 )
             except StrategyExecutionError as exc:
-                self._logger.error("Strategy execution error", error=str(exc), task=task)
+                self._logger.error("Strategy execution error: %s", exc, extra={"task": task})
                 await self._update_health(
                     healthy=False,
                     state="execution_error",

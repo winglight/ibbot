@@ -399,11 +399,11 @@ class MarketDataRuntime:
         try:
             data = json.loads(payload)
         except json.JSONDecodeError:
-            self._logger.warning("Invalid price payload", channel=channel)
+            self._logger.warning("Invalid price payload on channel %s", channel)
             return
         symbol = str(data.get("symbol")) if data.get("symbol") else None
         if not symbol:
-            self._logger.warning("Price payload missing symbol", channel=channel)
+            self._logger.warning("Price payload missing symbol on channel %s", channel)
             return
         timestamp = _parse_timestamp(data.get("timestamp")) or _now()
         await self._update_snapshot(symbol, {"price": data}, timestamp, message_type="price")
@@ -412,11 +412,11 @@ class MarketDataRuntime:
         try:
             data = json.loads(payload)
         except json.JSONDecodeError:
-            self._logger.warning("Invalid DOM payload", channel=channel)
+            self._logger.warning("Invalid DOM payload on channel %s", channel)
             return
         symbol = str(data.get("symbol")) if data.get("symbol") else None
         if not symbol:
-            self._logger.warning("DOM payload missing symbol", channel=channel)
+            self._logger.warning("DOM payload missing symbol on channel %s", channel)
             return
         timestamp = _parse_timestamp(data.get("timestamp")) or _now()
         await self._update_snapshot(symbol, {"dom": data}, timestamp, message_type="dom")
@@ -454,7 +454,12 @@ class MarketDataRuntime:
                 approximate=True,
             )
         except Exception:
-            self._logger.warning("Failed to append to market stream", symbol=symbol, type=message_type, exc_info=True)
+            self._logger.warning(
+                "Failed to append %s message for %s to market stream",
+                message_type,
+                symbol,
+                exc_info=True,
+            )
 
     async def _broadcast(self, symbol: str, message_type: str) -> None:
         snapshot = self.get_snapshot(symbol)

@@ -89,7 +89,7 @@ class MarketPriceRepository:
         except MariaDBConfigurationError as exc:
             raise MarketPriceRepositoryError(str(exc)) from exc
         except Exception as exc:  # pragma: no cover - log and wrap
-            self._logger.exception("Failed to insert market price", symbol=symbol)
+            self._logger.exception("Failed to insert market price for %s", symbol)
             raise MarketPriceRepositoryError("Failed to insert market price") from exc
 
     def _write_price(self, row: Mapping[str, Any]) -> None:
