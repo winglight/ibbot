@@ -30,7 +30,10 @@ UPDATE_CHANNEL = "pubsub:config:update"
 AUDIT_LOG_PATH = Path("data/config_audit.log")
 MAX_HISTORY_ENTRIES = 50
 DEFAULT_COMMAND_TIMEOUT = 2.0
+DEFAULT_SCAN_TIMEOUT = 5.0
 COMMAND_TIMEOUT_ENV = "CONFIG_CENTER_REDIS_COMMAND_TIMEOUT"
+SCAN_TIMEOUT_ENV = "CONFIG_CENTER_REDIS_SCAN_TIMEOUT"
+SCAN_ITER_COUNT = 500
 
 
 def _load_command_timeout() -> float:
@@ -57,7 +60,33 @@ def _load_command_timeout() -> float:
     return value
 
 
+def _load_scan_timeout(base_timeout: float) -> float:
+    raw = os.getenv(SCAN_TIMEOUT_ENV, "").strip()
+    baseline = max(base_timeout, DEFAULT_SCAN_TIMEOUT)
+    if not raw:
+        return baseline
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning(
+            "Invalid %s value %r; falling back to %.2fs",
+            SCAN_TIMEOUT_ENV,
+            raw,
+            baseline,
+        )
+        return baseline
+    if value <= 0:
+        logger.warning(
+            "%s must be positive; falling back to %.2fs",
+            SCAN_TIMEOUT_ENV,
+            baseline,
+        )
+        return baseline
+    return max(base_timeout, value)
+
+
 CONFIG_REDIS_COMMAND_TIMEOUT = _load_command_timeout()
+CONFIG_REDIS_SCAN_TIMEOUT = _load_scan_timeout(CONFIG_REDIS_COMMAND_TIMEOUT)
 
 
 class ConfigUpdatePayload(BaseModel):
@@ -163,20 +192,28 @@ async def _await_redis(
     action: str,
     module: str | None = None,
     suppress: bool = False,
+    timeout: float | None = None,
 ) -> Any:
-    timeout = CONFIG_REDIS_COMMAND_TIMEOUT
+    effective_timeout = CONFIG_REDIS_COMMAND_TIMEOUT if timeout is None else float(timeout)
     detail_timeout = "Redis request timed out"
     detail_unavailable = "Redis is unavailable"
+    log_module = module or "-"
     try:
-        return await asyncio.wait_for(awaitable, timeout=timeout)
+        return await asyncio.wait_for(awaitable, timeout=effective_timeout)
     except asyncio.TimeoutError as exc:
         if suppress:
             logger.warning(
-                "Redis command timed out", action=action, module=module, timeout=timeout
+                "Redis command timed out",
+                action=action,
+                module=log_module,
+                timeout=effective_timeout,
             )
             return None
         logger.error(
-            "Redis command timed out", action=action, module=module, timeout=timeout
+            "Redis command timed out",
+            action=action,
+            module=log_module,
+            timeout=effective_timeout,
         )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -187,15 +224,15 @@ async def _await_redis(
             logger.warning(
                 "Redis command timed out (native)",
                 action=action,
-                module=module,
-                timeout=timeout,
+                module=log_module,
+                timeout=effective_timeout,
             )
             return None
         logger.error(
             "Redis command timed out (native)",
             action=action,
-            module=module,
-            timeout=timeout,
+            module=log_module,
+            timeout=effective_timeout,
         )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -204,11 +241,17 @@ async def _await_redis(
     except RedisError as exc:
         if suppress:
             logger.warning(
-                "Redis command failed", action=action, module=module, error=str(exc)
+                "Redis command failed",
+                action=action,
+                module=log_module,
+                error=str(exc),
             )
             return None
         logger.error(
-            "Redis command failed", action=action, module=module, error=str(exc)
+            "Redis command failed",
+            action=action,
+            module=log_module,
+            error=str(exc),
         )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -234,11 +277,15 @@ async def _restore_previous_state(redis: Any, key: str, before: Mapping[str, Any
 
 
 async def _scan_config_modules(redis: Any, pattern: str) -> list[str]:
-    iterator = redis.scan_iter(match=pattern)  # type: ignore[attr-defined]
+    iterator = redis.scan_iter(match=pattern, count=SCAN_ITER_COUNT)  # type: ignore[attr-defined]
     modules: list[str] = []
     while True:
         try:
-            key = await _await_redis(iterator.__anext__(), action="scan_iter")
+            key = await _await_redis(
+                iterator.__anext__(),
+                action="scan_iter",
+                timeout=CONFIG_REDIS_SCAN_TIMEOUT,
+            )
         except StopAsyncIteration:
             break
         if key is None:
@@ -255,13 +302,27 @@ async def _scan_config_modules(redis: Any, pattern: str) -> list[str]:
 # while the canonical paths remain under `/api`.
 @router.get("/api/config/modules")
 @router.get("/config/modules", include_in_schema=False)
-async def list_modules(user: str | None = Depends(get_current_user)) -> dict[str, list[str]]:
+async def list_modules(user: str | None = Depends(get_current_user)) -> dict[str, Any]:
     redis = await ensure_redis()
     if redis is None:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Redis is unavailable")
 
     modules: set[str] = set()
-    members = await _await_redis(redis.smembers(MODULE_SET_KEY), action="smembers")
+    errors: list[dict[str, Any]] = []
+
+    try:
+        members = await _await_redis(redis.smembers(MODULE_SET_KEY), action="smembers")
+    except HTTPException as exc:
+        if exc.status_code != status.HTTP_503_SERVICE_UNAVAILABLE:
+            raise
+        logger.warning("Config module registry lookup timed out")
+        errors.append({"type": "redis_timeout", "context": "module_set", "message": "Redis 请求超时"})
+        members = None
+    except Exception as exc:  # pragma: no cover - defensive guard
+        logger.warning("Failed to read config module registry", error=str(exc))
+        errors.append({"type": "redis_error", "context": "module_set", "message": str(exc)})
+        members = None
+
     if members:
         modules.update(str(item) for item in members)
 
@@ -269,10 +330,21 @@ async def list_modules(user: str | None = Depends(get_current_user)) -> dict[str
     try:
         discovered = await _scan_config_modules(redis, pattern)
         modules.update(discovered)
+    except HTTPException as exc:
+        if exc.status_code != status.HTTP_503_SERVICE_UNAVAILABLE:
+            raise
+        logger.warning("Config module discovery timed out")
+        errors.append({"type": "redis_timeout", "context": "scan_iter", "message": "Redis 请求超时"})
     except AttributeError:
         logger.debug("Redis client does not support scan_iter; skipping hash discovery")
+    except Exception as exc:  # pragma: no cover - defensive guard
+        logger.warning("Config module discovery failed", error=str(exc))
+        errors.append({"type": "redis_error", "context": "scan_iter", "message": str(exc)})
 
-    return {"modules": sorted(modules)}
+    response: dict[str, Any] = {"modules": sorted(modules)}
+    if errors:
+        response["errors"] = errors
+    return response
 
 
 @router.get("/api/config/{module}")
@@ -497,4 +569,3 @@ async def rollback_module(
         "values": entry["values"],
         "version": new_version,
     }
-

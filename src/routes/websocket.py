@@ -792,6 +792,8 @@ async def websocket_endpoint(websocket: WebSocket):
     await _ensure_risk_rules_listener()
     await _websocket_manager().connect(websocket)
 
+    realtime_tasks: Dict[str, asyncio.Task] = {}
+
     account_service_outage_logged = False
     account_service_readiness: Optional[bool] = None
 
@@ -900,27 +902,27 @@ async def websocket_endpoint(websocket: WebSocket):
     _update_account_service_readiness(health_payload)
 
     # 新连接建立后，立即向该客户端单播当前连接状态
-    try:
-        payload = {
-            "type": "connection_status",
-            "success": health_payload is not None,
-            "connected": bool(connected_flag),
-            "account_type": account_type_label,
-            "error_code": error_code_value,
-        }
-        if last_error_value:
-            payload["last_error"] = last_error_value
-        if health_payload is not None:
-            payload["health"] = health_payload
-            if health_payload.get("stale"):
-                payload["stale"] = True
-        if health_error:
-            payload["error"] = health_error
-        await websocket.send_text(json.dumps(payload))
-    except Exception as e:
-        logger.debug(f"Failed to send initial connection status: {e}")
+    payload = {
+        "type": "connection_status",
+        "success": health_payload is not None,
+        "connected": bool(connected_flag),
+        "account_type": account_type_label,
+        "error_code": error_code_value,
+    }
+    if last_error_value:
+        payload["last_error"] = last_error_value
+    if health_payload is not None:
+        payload["health"] = health_payload
+        if health_payload.get("stale"):
+            payload["stale"] = True
+    if health_error:
+        payload["error"] = health_error
+    if not await _send_json(websocket, payload):
+        _websocket_manager().disconnect(websocket)
+        return
 
     # 初次连接后，向该连接单播账户信息快照
+    account_payloads: List[Dict[str, Any]] = []
     try:
         snapshot = await read_account_info_snapshot()
         snapshot_metadata = (
@@ -967,7 +969,7 @@ async def websocket_endpoint(websocket: WebSocket):
             payload.setdefault(
                 "stale", AccountServiceClient.is_metadata_stale(combined_meta)
             )
-            await websocket.send_text(json.dumps(payload))
+            account_payloads.append(payload)
         else:
             combined_meta = dict(snapshot_metadata)
             info_payload: Any = None
@@ -1042,7 +1044,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     if key in combined_meta and key not in response_payload:
                         response_payload[key] = combined_meta[key]
 
-                await websocket.send_text(json.dumps(response_payload))
+                account_payloads.append(response_payload)
 
                 if stale_flag:
                     status_payload: Dict[str, Any] = {
@@ -1059,7 +1061,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         status_payload["stale_reason"] = combined_meta["stale_reason"]
                     if combined_meta.get("stale_at"):
                         status_payload["stale_at"] = combined_meta["stale_at"]
-                    await websocket.send_text(json.dumps(status_payload))
+                    account_payloads.append(status_payload)
             else:
                 combined_meta.setdefault("source", snapshot_metadata.get("source") or "redis")
                 fallback_payload = _service_unavailable_payload(
@@ -1087,13 +1089,18 @@ async def websocket_endpoint(websocket: WebSocket):
                 ):
                     if key in combined_meta and key not in fallback_payload:
                         fallback_payload[key] = combined_meta[key]
-                await websocket.send_text(json.dumps(fallback_payload))
+                account_payloads.append(fallback_payload)
     except Exception as e:
         logger.debug(f"Failed to send initial account_update: {e}")
 
+    for payload_to_send in account_payloads:
+        if not await _send_json(websocket, payload_to_send):
+            _websocket_manager().disconnect(websocket)
+            return
+
     # 初次连接后，向该连接单播发送订单快照（最多300条）
+    initial_limit = 10
     try:
-        initial_limit = 10
         orders_result = await _fetch_orders(limit=initial_limit, offset=0)
         unavailable_orders = _extract_service_unavailable_payload(
             orders_result, "orders_snapshot"
@@ -1106,7 +1113,7 @@ async def websocket_endpoint(websocket: WebSocket):
             _log_account_service_outage("initial orders snapshot")
             payload = _service_unavailable_payload(
                 "orders_snapshot",
-                meta={"limit": 10, "page": 1},
+                meta={"limit": initial_limit, "page": 1},
             )
         else:
             orders, total, metadata = orders_result
@@ -1118,19 +1125,19 @@ async def websocket_endpoint(websocket: WebSocket):
                 page=1,
                 total=total,
             )
-        await websocket.send_text(json.dumps(payload))
     except Exception as e:
         logger.warning(f"Failed to send initial orders snapshot: {e}")
-        await websocket.send_text(
-            json.dumps(
-                _service_unavailable_payload(
-                    "orders_snapshot",
-                    meta={"limit": initial_limit, "page": 1},
-                )
-            )
+        payload = _service_unavailable_payload(
+            "orders_snapshot",
+            meta={"limit": initial_limit, "page": 1},
         )
 
+    if not await _send_json(websocket, payload):
+        _websocket_manager().disconnect(websocket)
+        return
+
     # 初次连接后，向该连接单播发送positions快照
+    position_payloads: List[Dict[str, Any]] = []
     try:
         positions_snapshot = await read_positions_snapshot()
         positions_snapshot_metadata = (
@@ -1183,7 +1190,7 @@ async def websocket_endpoint(websocket: WebSocket):
             )
             payload.setdefault("fast", bool(requested_fast))
             payload.setdefault("force_refresh", bool(requested_force_refresh))
-            await websocket.send_text(json.dumps(payload))
+            position_payloads.append(payload)
         else:
             combined_meta = dict(positions_snapshot_metadata)
             positions_payload: Optional[List[Dict[str, Any]]] = None
@@ -1251,7 +1258,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 if combined_meta:
                     response_payload["metadata"] = dict(combined_meta)
 
-                await websocket.send_text(json.dumps(response_payload))
+                position_payloads.append(response_payload)
 
                 if stale_flag:
                     status_payload = {
@@ -1268,7 +1275,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         status_payload["stale_reason"] = combined_meta["stale_reason"]
                     if combined_meta.get("stale_at"):
                         status_payload["stale_at"] = combined_meta["stale_at"]
-                    await websocket.send_text(json.dumps(status_payload))
+                    position_payloads.append(status_payload)
             else:
                 combined_meta.setdefault(
                     "source", positions_snapshot_metadata.get("source") or "redis"
@@ -1294,11 +1301,15 @@ async def websocket_endpoint(websocket: WebSocket):
                 ):
                     if key in combined_meta and key not in fallback_payload:
                         fallback_payload[key] = combined_meta[key]
-                await websocket.send_text(json.dumps(fallback_payload))
+                position_payloads.append(fallback_payload)
     except Exception as e:
         logger.debug(f"Failed to send initial positions snapshot: {e}")
-    
-    realtime_tasks: Dict[str, asyncio.Task] = {}
+
+    for payload_to_send in position_payloads:
+        if not await _send_json(websocket, payload_to_send):
+            _websocket_manager().disconnect(websocket)
+            return
+
     request_tracker: Dict[str, float] = {}
     last_responses: Dict[str, Dict[str, Any]] = {}
     dom_service = get_dom_service()
@@ -2568,4 +2579,3 @@ async def websocket_endpoint(websocket: WebSocket):
         for task in realtime_tasks.values():
             task.cancel()
         _websocket_manager().disconnect(websocket)
-

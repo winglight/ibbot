@@ -560,6 +560,56 @@ def test_chart_data_returns_cached_series() -> None:
         assert bar["volume"] == 1234
 
 
+def test_chart_data_uses_parquet_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    redis = FakeRedis()
+    repository = RecordingRepository()
+    runtime = _build_runtime(redis, repository, symbols=["ES"])
+
+    import services.market_data.main as market_main
+
+    now_ns = int(datetime.now(timezone.utc).timestamp() * 1_000_000_000)
+
+    class DummyWriter:
+        def __init__(self, *_, **__):
+            self.calls = []
+
+        def read_candles(self, symbol: str, interval: str, limit: int | None = None):
+            self.calls.append((symbol, interval, limit))
+            return [
+                {
+                    "interval_start_ns": now_ns - 60_000_000_000,
+                    "interval_end_ns": now_ns,
+                    "open": 100,
+                    "high": 110,
+                    "low": 95,
+                    "close": 108,
+                    "volume": 250,
+                }
+            ]
+
+    dummy_writer = DummyWriter()
+    monkeypatch.setattr(market_main, "MarketDataParquetWriter", lambda *args, **kwargs: dummy_writer)
+
+    with _start_client(runtime) as client:
+        response = client.post(
+            "/chart_data",
+            json={
+                "symbol": "ES",
+                "duration": "1 D",
+                "bar_size": "1 min",
+                "exchange": "CME",
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["success"] is True
+    assert payload["symbol"] == "ES"
+    assert payload["data"] and len(payload["data"]) == 1
+    bar = payload["data"][0]
+    assert bar["close"] == 108.0
+    assert dummy_writer.calls
+
 def test_chart_data_returns_404_when_series_missing() -> None:
     redis = FakeRedis()
     repository = RecordingRepository()

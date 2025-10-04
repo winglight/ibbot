@@ -457,6 +457,32 @@ async def _build_stream_metrics(
     return results
 
 
+def _build_monitoring_payload(
+    *,
+    queue_targets: Sequence[QueueTarget],
+    stream_targets: Sequence[StreamTarget],
+    queues: Sequence[Mapping[str, Any]],
+    streams: Sequence[Mapping[str, Any]],
+    data_fields: Mapping[str, Any],
+    source: str,
+    errors: Sequence[Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "timestamp": datetime.utcnow().isoformat(),
+        "queues": list(queues),
+        "streams": list(streams),
+        "source": source,
+        "data_fields": data_fields,
+        "requested_queues": [target.queue_key for target in queue_targets],
+        "requested_streams": [
+            {"stream_key": target.stream_key, "group": target.group} for target in stream_targets
+        ],
+    }
+    if errors:
+        payload["errors"] = list(errors)
+    return payload
+
+
 @router.get("/api/monitoring/queues")
 async def get_queue_metrics(
     queues: Sequence[str] | None = Query(default=None, alias="queue"),
@@ -464,36 +490,104 @@ async def get_queue_metrics(
 ) -> Mapping[str, Any]:
     """Return queue and stream metrics for dashboard consumption."""
 
+    queue_targets = _normalise_queue_targets(queues)
+    stream_targets = _normalise_stream_targets(streams)
+    errors: list[dict[str, Any]] = []
+
     try:
         redis = await get_redis_client()
+    except Exception as exc:  # pragma: no cover - depends on runtime redis availability
+        logger.warning("Redis client unavailable for monitoring queues", exc_info=True)
+        data_fields = await _collect_data_fields(None)
+        errors.append({"type": "redis_unavailable", "message": "Redis 服务不可用"})
+        return _build_monitoring_payload(
+            queue_targets=queue_targets,
+            stream_targets=stream_targets,
+            queues=[],
+            streams=[],
+            data_fields=data_fields,
+            source="unavailable",
+            errors=errors,
+        )
+
+    snapshot: dict[str, Any] | None = None
+    try:
         snapshot = await _load_snapshot_from_redis(redis)
+    except HTTPException as exc:
+        if exc.status_code != 503:
+            raise
+        logger.warning("Monitoring snapshot unavailable due to Redis timeout")
+        errors.append({"type": "redis_timeout", "context": "snapshot", "message": "Redis 请求超时"})
+    except Exception as exc:  # pragma: no cover - defensive guard
+        logger.warning("Failed to load monitoring snapshot", exc_info=True)
+        errors.append({"type": "redis_error", "context": "snapshot", "message": str(exc)})
+
+    try:
         data_fields = await _collect_data_fields(redis)
-        queue_targets = _normalise_queue_targets(queues)
-        stream_targets = _normalise_stream_targets(streams)
+    except HTTPException as exc:
+        if exc.status_code != 503:
+            raise
+        logger.warning("Monitoring data field summary timed out")
+        errors.append({"type": "redis_timeout", "context": "data_fields", "message": "Redis 请求超时"})
+        data_fields = await _collect_data_fields(None)
+    except Exception as exc:  # pragma: no cover - defensive guard
+        logger.warning("Failed to collect monitoring data fields", exc_info=True)
+        errors.append({"type": "redis_error", "context": "data_fields", "message": str(exc)})
+        data_fields = await _collect_data_fields(None)
 
-        if snapshot:
-            payload = dict(snapshot)
-            payload["requested_queues"] = [target.queue_key for target in queue_targets]
-            payload["requested_streams"] = [
-                {"stream_key": target.stream_key, "group": target.group}
-                for target in stream_targets
-            ]
-            payload["data_fields"] = data_fields
-            return payload
+    if snapshot:
+        payload = dict(snapshot)
+        payload["requested_queues"] = [target.queue_key for target in queue_targets]
+        payload["requested_streams"] = [
+            {"stream_key": target.stream_key, "group": target.group}
+            for target in stream_targets
+        ]
+        payload["data_fields"] = data_fields
+        if errors:
+            payload["errors"] = errors
+        return payload
 
-        metrics_queues = await _build_queue_metrics(redis, queue_targets)
-        metrics_streams = await _build_stream_metrics(redis, stream_targets)
-    except (RedisError, ConnectionError, asyncio.TimeoutError) as exc:
-        logger.warning("Redis unavailable for monitoring queues", exc_info=True)
-        raise HTTPException(status_code=503, detail=dict(_REDIS_UNAVAILABLE_DETAIL)) from exc
+    queues_payload: list[dict[str, Any]] = []
+    streams_payload: list[dict[str, Any]] = []
 
-    return {
-        "timestamp": datetime.utcnow().isoformat(),
-        "queues": metrics_queues,
-        "streams": metrics_streams,
-        "source": "live",
-        "data_fields": data_fields,
-    }
+    try:
+        queues_payload = await _build_queue_metrics(redis, queue_targets)
+    except HTTPException as exc:
+        if exc.status_code != 503:
+            raise
+        logger.warning("Queue metric collection timed out")
+        errors.append({"type": "redis_timeout", "context": "queues", "message": "Redis 请求超时"})
+    except Exception as exc:  # pragma: no cover - defensive guard
+        logger.warning("Queue metric collection failed", exc_info=True)
+        errors.append({"type": "redis_error", "context": "queues", "message": str(exc)})
+
+    try:
+        streams_payload = await _build_stream_metrics(redis, stream_targets)
+    except HTTPException as exc:
+        if exc.status_code != 503:
+            raise
+        logger.warning("Stream metric collection timed out")
+        errors.append({"type": "redis_timeout", "context": "streams", "message": "Redis 请求超时"})
+    except Exception as exc:  # pragma: no cover - defensive guard
+        logger.warning("Stream metric collection failed", exc_info=True)
+        errors.append({"type": "redis_error", "context": "streams", "message": str(exc)})
+
+    if queues_payload and streams_payload:
+        source = "live"
+    elif queues_payload or streams_payload:
+        source = "partial"
+    else:
+        source = "degraded"
+
+    return _build_monitoring_payload(
+        queue_targets=queue_targets,
+        stream_targets=stream_targets,
+        queues=queues_payload,
+        streams=streams_payload,
+        data_fields=data_fields,
+        source=source,
+        errors=errors,
+    )
 
 
 @router.post("/api/monitoring/queues/clear-cache")
@@ -843,4 +937,3 @@ __all__ = [
     "router",
     "build_metric_series_payload",
 ]
-

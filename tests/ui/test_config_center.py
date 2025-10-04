@@ -91,7 +91,7 @@ class FakeRedis:
     async def smembers(self, key: str) -> set[str]:
         return set(self.sets.get(key, set()))
 
-    async def scan_iter(self, match: str | None = None):
+    async def scan_iter(self, match: str | None = None, count: int | None = None):
         pattern = match or '*'
         for key in list(self.hashes.keys()):
             if fnmatch.fnmatch(key, pattern):

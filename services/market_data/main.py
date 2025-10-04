@@ -19,6 +19,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from src.ibbot import update_service_health
+from src.ibbot.storage.parquet_writer import MarketDataParquetWriter
 from src.ibbot.logging import get_logger
 from src.ibbot.redis import PubSubListener, get_redis_client
 from src.services.factories import (
@@ -607,6 +608,101 @@ def create_app(*, runtime: MarketDataRuntime | None = None) -> FastAPI:
     cache_prefix = os.getenv(CACHE_PREFIX_ENV, DEFAULT_CACHE_PREFIX).strip() or DEFAULT_CACHE_PREFIX
     cache_prefix = cache_prefix.rstrip(":")
 
+    parquet_writer: MarketDataParquetWriter | None = None
+    parquet_writer_failed = False
+
+    def _ensure_parquet_writer(logger: Any) -> MarketDataParquetWriter | None:
+        nonlocal parquet_writer, parquet_writer_failed
+        if parquet_writer_failed:
+            return None
+        if parquet_writer is not None:
+            return parquet_writer
+        storage_path = (
+            os.getenv("DATA_LAYER_PARQUET_PATH")
+            or os.getenv("MARKET_DATA_STORAGE_PATH")
+            or "data/market_data"
+        )
+        if isinstance(storage_path, str):
+            storage_path = storage_path.strip() or "data/market_data"
+        compression = os.getenv("MARKET_DATA_PARQUET_COMPRESSION") or "snappy"
+        if isinstance(compression, str):
+            compression = compression.strip() or "snappy"
+        try:
+            parquet_writer = MarketDataParquetWriter(base_dir=storage_path, compression=compression)
+            return parquet_writer
+        except Exception as exc:
+            if logger:
+                logger.warning(
+                    "Failed to initialise Parquet fallback for chart data: %s",
+                    exc,
+                )
+            parquet_writer = None
+            parquet_writer_failed = True
+            return None
+
+    async def _load_candles_from_storage(
+        query: ChartDataQuery,
+        *,
+        interval: str,
+        limit: int | None,
+        logger: Any,
+    ) -> list[dict[str, Any]]:
+        writer = _ensure_parquet_writer(logger)
+        if writer is None:
+            return []
+        try:
+            records = writer.read_candles(query.symbol, interval, limit=limit)
+        except Exception as exc:
+            if logger:
+                logger.warning(
+                    "Failed to read Parquet candles for %s interval=%s: %s",
+                    query.symbol,
+                    interval,
+                    exc,
+                )
+            return []
+        result: list[dict[str, Any]] = []
+        for record in records or []:
+            if isinstance(record, Mapping):
+                result.append(dict(record))
+        return result
+
+    async def _store_candles_in_cache(
+        *,
+        redis_client: Any,
+        key: str,
+        candles: list[dict[str, Any]],
+        limit: int | None,
+        logger: Any,
+    ) -> None:
+        if not candles:
+            return
+        pipeline_factory = getattr(redis_client, "pipeline", None)
+        if pipeline_factory is None:
+            return
+        try:
+            pipe = pipeline_factory()
+        except Exception:
+            return
+        try:
+            pipe.delete(key)
+            for candle in candles:
+                try:
+                    payload = json.dumps(candle, separators=(",", ":"))
+                except (TypeError, ValueError):
+                    continue
+                pipe.rpush(key, payload)
+            if limit and limit > 0:
+                pipe.ltrim(key, -int(limit), -1)
+            await pipe.execute()
+        except Exception:
+            if logger:
+                logger.warning(
+                    "Failed to populate Redis cache with Parquet candles for %s",
+                    key,
+                    exc_info=True,
+                )
+
     def _series_key(symbol: str, interval: str) -> str:
         return f"{cache_prefix}:series:market.candle.{interval}:{symbol}"
 
@@ -697,7 +793,45 @@ def create_app(*, runtime: MarketDataRuntime | None = None) -> FastAPI:
             if isinstance(decoded, dict):
                 candles.append(decoded)
 
+        fallback_attempted = False
+        if not candles:
+            fallback_candles = await _load_candles_from_storage(
+                query,
+                interval=interval,
+                limit=limit,
+                logger=logger,
+            )
+            fallback_attempted = True
+            if fallback_candles:
+                await _store_candles_in_cache(
+                    redis_client=redis_client,
+                    key=key,
+                    candles=fallback_candles,
+                    limit=limit,
+                    logger=logger,
+                )
+                candles = fallback_candles
+
         candles = _filter_candles_by_duration(candles, duration_minutes)
+
+        if not candles and not fallback_attempted:
+            fallback_candles = await _load_candles_from_storage(
+                query,
+                interval=interval,
+                limit=limit,
+                logger=logger,
+            )
+            fallback_attempted = True
+            if fallback_candles:
+                await _store_candles_in_cache(
+                    redis_client=redis_client,
+                    key=key,
+                    candles=fallback_candles,
+                    limit=limit,
+                    logger=logger,
+                )
+                candles = _filter_candles_by_duration(fallback_candles, duration_minutes)
+
         if not candles:
             if allow_empty:
                 return {
@@ -710,7 +844,10 @@ def create_app(*, runtime: MarketDataRuntime | None = None) -> FastAPI:
                     "exchange": query.exchange,
                 }
             logger.info(
-                "Chart data not found for %s interval=%s duration=%s", query.symbol, interval, duration_minutes
+                "Chart data not found for %s interval=%s duration=%s",
+                query.symbol,
+                interval,
+                duration_minutes,
             )
             raise HTTPException(status_code=404, detail="No chart data available")
 
