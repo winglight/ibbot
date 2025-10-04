@@ -1,5 +1,7 @@
+import asyncio
 import datetime
 import sqlite3
+import time
 from typing import Any
 
 import pytest
@@ -201,3 +203,29 @@ def test_queue_metrics_returns_redis_unavailable(metrics_app: FastAPI, monkeypat
     assert response.json() == {
         "detail": {"error": "redis_unavailable", "message": "Redis 服务不可用"}
     }
+
+
+def test_queue_metrics_returns_timeout_quickly(
+    metrics_app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class SlowRedis:
+        async def hgetall(self, *_: object, **__: object) -> dict[str, Any]:
+            await asyncio.sleep(1)
+            return {}
+
+    async def fake_get_redis_client(*_: object, **__: object) -> SlowRedis:
+        return SlowRedis()
+
+    monkeypatch.setattr(monitoring_module, "get_redis_client", fake_get_redis_client)
+    monkeypatch.setattr(monitoring_module, "MONITORING_REDIS_COMMAND_TIMEOUT", 0.05)
+
+    start = time.perf_counter()
+    with TestClient(metrics_app) as client:
+        response = client.get("/api/monitoring/queues")
+    duration = time.perf_counter() - start
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "detail": {"error": "redis_unavailable", "message": "Redis 服务不可用"}
+    }
+    assert duration < 0.5
