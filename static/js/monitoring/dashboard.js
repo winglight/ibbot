@@ -683,32 +683,9 @@
                 });
             }
 
-            try {
-                const params = new URLSearchParams();
-                params.set('window', windowValue);
-                if (serviceValue) params.set('service', serviceValue);
-                if (metricValue) params.set('metric', metricValue);
-                const data = await this.app.apiCall(`/monitoring/metrics/write-rate?${params.toString()}`, {
-                    useCache: false,
-                    cacheTime: 0,
-                    timeout: manual ? 15000 : 20000,
-                });
-                if (data && data.success === false) {
-                    const message = data.error || '无法加载写入速率';
-                    this.handleDbError(message, { scheduleNext: !immediate });
-                    return data;
-                }
-                this.renderDbMetrics(data || {});
-                this.state.db = REFRESH_STATE.idle;
-            } catch (error) {
-                console.error('Failed to load metrics write rate', error);
-                this.handleDbError(error?.message || '无法加载写入速率', { scheduleNext: !immediate });
-                throw error;
-            } finally {
-                if (!immediate) {
-                    this.scheduleDbRefresh();
-                }
-            }
+            this.handleDbError('写入速率数据暂不可用', { scheduleNext: false });
+            this.state.db = REFRESH_STATE.idle;
+            return;
         }
 
         ensureDbChart() {
