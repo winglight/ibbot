@@ -267,6 +267,7 @@ async def get_historical_data(
     try:
         _clean_expired_cache()
         cache_key = f"{request.symbol}_{request.duration}_{request.bar_size}_{request.exchange}"
+        cache_data_type = "TRADES"
         now = now_local()
 
         if cache_key in historical_data_cache:
@@ -280,6 +281,7 @@ async def get_historical_data(
                     "filename": f"data/{request.symbol}_historical.csv",
                     "rows": len(cached_data),
                     "source": "memory_cache",
+                    "data_type": cache_entry.get("data_type", cache_data_type),
                 }
 
         db_manager = get_db_manager()
@@ -304,6 +306,7 @@ async def get_historical_data(
                 "data": data_dict,
                 "timestamp": now,
                 "expires_at": expires_at,
+                "data_type": cache_data_type,
             }
             filename = f"data/{request.symbol}_historical.csv"
             try:
@@ -319,6 +322,7 @@ async def get_historical_data(
                 "filename": filename,
                 "rows": len(cache_df),
                 "source": "database_cache",
+                "data_type": cache_data_type,
             }
 
         # Unified data layer attempt ----------------------------------
@@ -357,6 +361,7 @@ async def get_historical_data(
                         "data": records,
                         "timestamp": now,
                         "expires_at": now + timedelta(minutes=CACHE_DURATION_MINUTES),
+                        "data_type": cache_data_type,
                     }
                     return {
                         "success": True,
@@ -364,6 +369,7 @@ async def get_historical_data(
                         "filename": None,
                         "rows": len(records),
                         "source": "data_layer",
+                        "data_type": cache_data_type,
                     }
 
         if ib_client is None:
@@ -394,16 +400,23 @@ async def get_historical_data(
                     "data": cache_df.to_dict("records"),
                     "filename": None,
                     "rows": len(cache_df),
+                    "data_type": cache_data_type,
                 }
             raise HTTPException(status_code=404, detail="No data found")
 
-        db_manager.save_historical_data(request.symbol, df, bar_size=request.bar_size)
+        db_manager.save_historical_data(
+            request.symbol,
+            df,
+            bar_size=request.bar_size,
+            data_type=cache_data_type,
+        )
         data_dict = df.to_dict("records")
         expires_at = now + timedelta(minutes=CACHE_DURATION_MINUTES)
         historical_data_cache[cache_key] = {
             "data": data_dict,
             "timestamp": now,
             "expires_at": expires_at,
+            "data_type": cache_data_type,
         }
         logger.debug(
             f"Cached historical data for {request.symbol}, expires at {expires_at}"
@@ -424,6 +437,7 @@ async def get_historical_data(
             "filename": filename,
             "rows": len(df),
             "source": "ibkr_api",
+            "data_type": cache_data_type,
         }
 
     except HTTPException as exc:
