@@ -93,6 +93,9 @@ QUEUE_MONITOR_METRICS_HASH_KEY = os.getenv(
     "QUEUE_MONITOR_METRICS_HASH_KEY", "hash:service:queue-monitor"
 )
 
+_REDIS_COMMAND_TIMEOUT = float(os.getenv("SERVICE_STATUS_REDIS_TIMEOUT", "2.5"))
+_REDIS_UNAVAILABLE_DETAIL = "Redis 不可用或命令超时"
+
 
 @dataclass(slots=True)
 class ServiceStatus:
@@ -246,13 +249,34 @@ def _coerce_metrics_mapping(
 
 async def _load_hash(redis: Any, key: str) -> MutableMapping[str, Any] | None:
     try:
-        values = await redis.hgetall(key)
+        values = await asyncio.wait_for(redis.hgetall(key), timeout=_REDIS_COMMAND_TIMEOUT)
+    except asyncio.TimeoutError as exc:
+        logger.warning("Redis command hgetall(%s) timed out", key)
+        raise RedisUnavailableError(f"Redis 命令超时: hgetall({key})") from exc
     except Exception as exc:  # pragma: no cover - depends on runtime redis availability
         logger.debug("Failed to load health hash %s: %s", key, exc)
-        return None
+        raise RedisUnavailableError(f"Redis 命令失败: hgetall({key})") from exc
     if not values:
         return None
     return dict(values)
+
+
+def _build_redis_unavailable_status(
+    service: str, *, reason: str | None = None, payload: Mapping[str, Any] | None = None
+) -> ServiceStatus:
+    detail = _REDIS_UNAVAILABLE_DETAIL
+    reason_text = (reason or "").strip()
+    if reason_text:
+        detail = f"{detail}（{reason_text}）"
+    payload_mapping: Mapping[str, Any] | None = None
+    if payload is not None:
+        payload_mapping = dict(payload)
+    return ServiceStatus(
+        service=service,
+        status="unhealthy",
+        detail=detail,
+        payload=payload_mapping,
+    )
 
 
 def _build_status_from_payload(
@@ -303,7 +327,10 @@ def _build_status_from_payload(
 
 
 async def _build_ib_command_status(redis: Any) -> ServiceStatus:
-    raw = await _load_hash(redis, IB_COMMAND_HEALTH_KEY) or {}
+    try:
+        raw = await _load_hash(redis, IB_COMMAND_HEALTH_KEY) or {}
+    except RedisUnavailableError as exc:
+        return _build_redis_unavailable_status("ib_command", reason=str(exc))
     payload = build_ib_connection_health_payload(
         raw,
         stale_after=float(IB_COMMAND_HEALTH_STALE_AFTER_SEC or 30),
@@ -337,8 +364,11 @@ async def _build_ib_command_status(redis: Any) -> ServiceStatus:
 
 
 async def _build_queue_monitor_status(redis: Any) -> ServiceStatus:
-    health_payload = await _load_hash(redis, QUEUE_MONITOR_HEALTH_HASH_KEY)
-    snapshot_payload = await _load_hash(redis, QUEUE_MONITOR_METRICS_HASH_KEY)
+    try:
+        health_payload = await _load_hash(redis, QUEUE_MONITOR_HEALTH_HASH_KEY)
+        snapshot_payload = await _load_hash(redis, QUEUE_MONITOR_METRICS_HASH_KEY)
+    except RedisUnavailableError as exc:
+        return _build_redis_unavailable_status("queue_monitor", reason=str(exc))
 
     if not health_payload and not snapshot_payload:
         return ServiceStatus(
@@ -407,7 +437,10 @@ async def _build_dom_service_status(redis: Any | None) -> ServiceStatus:
             detail="未提供 Redis 连接，无法加载 DOM 服务健康状态。",
         )
 
-    payload = await _load_hash(redis, DOM_SERVICE_HEALTH_KEY)
+    try:
+        payload = await _load_hash(redis, DOM_SERVICE_HEALTH_KEY)
+    except RedisUnavailableError as exc:
+        return _build_redis_unavailable_status(DOM_SERVICE_NAME, reason=str(exc))
     if not payload:
         return ServiceStatus(
             service=DOM_SERVICE_NAME,
@@ -484,7 +517,36 @@ async def gather_service_statuses(redis: Any | None = None) -> Sequence[ServiceS
         redis_key = probe.redis_key
         if not redis_key:
             continue
-        payload = await _load_hash(client, redis_key)
+        try:
+            payload = await _load_hash(client, redis_key)
+        except RedisUnavailableError as exc:
+            if probe.ui_service == "account" and account_readiness_payload is not None:
+                status_obj = _build_redis_unavailable_status(
+                    probe.ui_service,
+                    reason=str(exc),
+                    payload={"readiness": account_readiness_payload},
+                )
+                if account_readiness_status and account_readiness_status != "running":
+                    status_obj.status = account_readiness_status
+                    extra_detail = account_readiness_detail or probe.missing_detail
+                    if extra_detail:
+                        if status_obj.detail:
+                            status_obj.detail = f"{status_obj.detail}；{extra_detail}"
+                        else:
+                            status_obj.detail = extra_detail
+                elif account_readiness_detail:
+                    if status_obj.detail:
+                        status_obj.detail = (
+                            f"{status_obj.detail}；{account_readiness_detail}"
+                        )
+                    else:
+                        status_obj.detail = account_readiness_detail
+                statuses.append(status_obj)
+            else:
+                statuses.append(
+                    _build_redis_unavailable_status(probe.ui_service, reason=str(exc))
+                )
+            continue
         if not payload:
             if probe.ui_service == "account" and account_readiness_payload is not None:
                 statuses.append(
