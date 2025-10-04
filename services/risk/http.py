@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 
 from services.risk import RiskRuntime
 from services.risk.runtime import (
@@ -285,10 +285,28 @@ def create_app(
 
     @app.get("/risk/config", status_code=status.HTTP_200_OK)
     @app.get("/risk-config", status_code=status.HTTP_200_OK)
-    async def get_config(redis = Depends(_get_redis), runtime_instance: RiskRuntime = Depends(_get_runtime)) -> dict[str, Any]:  # type: ignore[override]
-        stored = await runtime_instance.load_risk_config()
+    async def get_config(
+        force_refresh: bool = Query(
+            False, description="Fetch the latest config directly from Redis."
+        ),
+        redis = Depends(_get_redis),
+        runtime_instance: RiskRuntime = Depends(_get_runtime),
+    ) -> dict[str, Any]:  # type: ignore[override]
         cached = await _load_json(redis, runtime_instance.config_cache_key)
-        base_config = stored or _strip_metadata(cached) or runtime_instance.get_config_snapshot()
+        base_config = runtime_instance.get_config_snapshot()
+        stored_config: dict[str, Any] | None = None
+
+        if force_refresh or not runtime_instance.has_config_snapshot():
+            stored_config = await runtime_instance.load_risk_config()
+        elif not base_config:
+            stored_config = await runtime_instance.load_risk_config()
+
+        if stored_config:
+            base_config = dict(stored_config)
+        elif not base_config:
+            base_config = _strip_metadata(cached)
+
+        base_config = dict(base_config or {})
         response: dict[str, Any] = {"success": True, "config": dict(base_config)}
         response.update(base_config)
         if cached:
@@ -318,10 +336,25 @@ def create_app(
 
     @app.get("/risk/rules", status_code=status.HTTP_200_OK)
     @app.get("/risk_rules", status_code=status.HTTP_200_OK)
-    async def get_rules(redis = Depends(_get_redis), runtime_instance: RiskRuntime = Depends(_get_runtime)) -> dict[str, Any]:  # type: ignore[override]
+    async def get_rules(
+        force_refresh: bool = Query(
+            False, description="Fetch the latest rules directly from Redis."
+        ),
+        redis = Depends(_get_redis),
+        runtime_instance: RiskRuntime = Depends(_get_runtime),
+    ) -> dict[str, Any]:  # type: ignore[override]
         cached = await _load_json(redis, runtime_instance.rules_cache_key)
-        stored_rules = await runtime_instance.load_risk_rules()
-        rules_payload = stored_rules or {}
+        rules_payload = runtime_instance.get_rules_snapshot()
+        stored_rules: dict[str, dict[str, Any]] | None = None
+
+        if force_refresh or not runtime_instance.has_rules_snapshot():
+            stored_rules = await runtime_instance.load_risk_rules()
+        elif not rules_payload:
+            stored_rules = await runtime_instance.load_risk_rules()
+
+        if stored_rules:
+            rules_payload = dict(stored_rules)
+
         if not rules_payload and cached and isinstance(cached.get("rules"), Mapping):
             normalised_rules: dict[str, dict[str, Any]] = {}
             for symbol, value in cached["rules"].items():
@@ -333,7 +366,7 @@ def create_app(
                 normalised_rules[symbol_norm] = RiskRule.normalise_payload(payload)
             rules_payload = normalised_rules
         if not rules_payload:
-            rules_payload = runtime_instance.get_rules_snapshot()
+            rules_payload = {}
         response: dict[str, Any] = {
             "success": True,
             "rules": rules_payload,

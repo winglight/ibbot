@@ -537,15 +537,18 @@ class RiskServiceClient(ServiceClient):
     env_prefix = "RISK"
     default_base_url = "http://localhost:8030"
 
-    async def list_rules(self) -> Any:
+    async def list_rules(self, *, force_refresh: bool | None = None) -> Any:
         """Return the latest snapshot of configured risk rules."""
 
-        return await self.request("GET", "/risk/rules")
+        params: dict[str, Any] = {}
+        if force_refresh is not None:
+            params["force_refresh"] = "true" if force_refresh else "false"
+        return await self.request("GET", "/risk/rules", params=params or None)
 
-    async def fetch_rules(self) -> Any:
+    async def fetch_rules(self, *, force_refresh: bool | None = None) -> Any:
         """Backward compatible alias for :meth:`list_rules`."""
 
-        return await self.list_rules()
+        return await self.list_rules(force_refresh=force_refresh)
 
     async def create_rule(self, payload: Mapping[str, Any]) -> Any:
         """Create a new risk rule."""
@@ -582,15 +585,18 @@ class RiskServiceClient(ServiceClient):
 
         return await self.request("DELETE", f"/risk/rules/{symbol}")
 
-    async def get_config(self) -> Any:
+    async def get_config(self, *, force_refresh: bool | None = None) -> Any:
         """Retrieve the persisted risk configuration."""
 
-        return await self.request("GET", "/risk/config")
+        params: dict[str, Any] = {}
+        if force_refresh is not None:
+            params["force_refresh"] = "true" if force_refresh else "false"
+        return await self.request("GET", "/risk/config", params=params or None)
 
-    async def fetch_config(self) -> Any:
+    async def fetch_config(self, *, force_refresh: bool | None = None) -> Any:
         """Backward compatible alias for :meth:`get_config`."""
 
-        return await self.get_config()
+        return await self.get_config(force_refresh=force_refresh)
 
     async def update_config(self, payload: Mapping[str, Any]) -> Any:
         """Apply updates to the risk configuration."""

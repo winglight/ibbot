@@ -1328,6 +1328,16 @@ class RiskRuntime:
 
         return {symbol: dict(payload) for symbol, payload in self._rules_snapshot.items()}
 
+    def has_config_snapshot(self) -> bool:
+        """Return ``True`` when a config snapshot has been captured."""
+
+        return bool(self._config_snapshot_timestamp or self._config_snapshot)
+
+    def has_rules_snapshot(self) -> bool:
+        """Return ``True`` when a rules snapshot has been captured."""
+
+        return bool(self._rules_snapshot_timestamp or self._rules_snapshot)
+
     @property
     def pending_background_tasks(self) -> int:
         return sum(1 for task in self._background_tasks if not task.done())
