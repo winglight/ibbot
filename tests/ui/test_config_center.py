@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import subprocess
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
+import time
 
 import fnmatch
 import pytest
@@ -177,6 +179,65 @@ def test_update_module_publishes_history_and_audit(config_app: FastAPI) -> None:
     assert log_entry['action'] == 'update'
     assert log_entry['before'] == {'STOP': '0.10', 'LEGACY': 'keep'}
     assert 'version' in response.json()
+
+
+def test_read_module_timeout_returns_503(
+    config_app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake: FakeRedis = config_app.state.fake_redis  # type: ignore[attr-defined]
+    redis_key = f"{config_module.HASH_PREFIX}:risk"
+    fake.hashes[redis_key] = {'STOP': '0.10'}
+
+    async def slow_hgetall(key: str) -> dict[str, str]:
+        await asyncio.sleep(0.2)
+        return await FakeRedis.hgetall(fake, key)
+
+    monkeypatch.setattr(fake, 'hgetall', slow_hgetall)
+    monkeypatch.setattr(config_module, 'CONFIG_REDIS_COMMAND_TIMEOUT', 0.05)
+
+    with TestClient(config_app) as client:
+        start = time.perf_counter()
+        response = client.get('/api/config/risk')
+        duration = time.perf_counter() - start
+
+    assert response.status_code == 503
+    assert duration < 0.5
+    assert response.json()['detail'] == 'Redis request timed out'
+
+
+def test_update_module_timeout_rolls_back(
+    config_app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake: FakeRedis = config_app.state.fake_redis  # type: ignore[attr-defined]
+    redis_key = f"{config_module.HASH_PREFIX}:risk"
+    fake.hashes[redis_key] = {'STOP': '0.10'}
+
+    async def flaky_hset(key: str, mapping: dict[str, Any]) -> None:
+        call_count = getattr(flaky_hset, 'calls', 0)
+        setattr(flaky_hset, 'calls', call_count + 1)
+        if call_count == 0:
+            raise asyncio.TimeoutError
+        await FakeRedis.hset(fake, key, mapping)
+
+    monkeypatch.setattr(fake, 'hset', flaky_hset)
+    monkeypatch.setattr(config_module, 'CONFIG_REDIS_COMMAND_TIMEOUT', 0.05)
+
+    with TestClient(config_app) as client:
+        start = time.perf_counter()
+        response = client.put(
+            '/api/config/risk',
+            json={'values': {'STOP': 0.25}},
+        )
+        duration = time.perf_counter() - start
+
+    assert response.status_code == 503
+    assert duration < 0.5
+    assert response.json()['detail'] == 'Redis request timed out'
+    # state should be rolled back to original snapshot
+    assert fake.hashes[redis_key] == {'STOP': '0.10'}
+    assert not fake.published
+    history_key = config_module.HISTORY_KEY_TEMPLATE.format(module='risk')
+    assert not fake.lists[history_key]
 
 
 def test_update_rejects_read_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

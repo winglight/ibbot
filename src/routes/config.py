@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import uuid
 from datetime import datetime, timezone
 from functools import partial
@@ -15,6 +16,7 @@ from loguru import logger
 from pydantic import BaseModel, Field
 
 from src.cache import ensure_redis
+from src.ibbot.redis import RedisError
 from .auth import get_current_user
 
 
@@ -27,6 +29,35 @@ MODULE_SET_KEY = "set:config:modules"
 UPDATE_CHANNEL = "pubsub:config:update"
 AUDIT_LOG_PATH = Path("data/config_audit.log")
 MAX_HISTORY_ENTRIES = 50
+DEFAULT_COMMAND_TIMEOUT = 2.0
+COMMAND_TIMEOUT_ENV = "CONFIG_CENTER_REDIS_COMMAND_TIMEOUT"
+
+
+def _load_command_timeout() -> float:
+    raw = os.getenv(COMMAND_TIMEOUT_ENV, "").strip()
+    if not raw:
+        return DEFAULT_COMMAND_TIMEOUT
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning(
+            "Invalid %s value %r; falling back to %.2fs",
+            COMMAND_TIMEOUT_ENV,
+            raw,
+            DEFAULT_COMMAND_TIMEOUT,
+        )
+        return DEFAULT_COMMAND_TIMEOUT
+    if value <= 0:
+        logger.warning(
+            "%s must be positive; falling back to %.2fs",
+            COMMAND_TIMEOUT_ENV,
+            DEFAULT_COMMAND_TIMEOUT,
+        )
+        return DEFAULT_COMMAND_TIMEOUT
+    return value
+
+
+CONFIG_REDIS_COMMAND_TIMEOUT = _load_command_timeout()
 
 
 class ConfigUpdatePayload(BaseModel):
@@ -126,6 +157,99 @@ async def _ensure_modules_entry(redis: Any, module: str) -> None:
         logger.warning("Failed to register config module", module=module, error=str(exc))
 
 
+async def _await_redis(
+    awaitable: Any,
+    *,
+    action: str,
+    module: str | None = None,
+    suppress: bool = False,
+) -> Any:
+    timeout = CONFIG_REDIS_COMMAND_TIMEOUT
+    detail_timeout = "Redis request timed out"
+    detail_unavailable = "Redis is unavailable"
+    try:
+        return await asyncio.wait_for(awaitable, timeout=timeout)
+    except asyncio.TimeoutError as exc:
+        if suppress:
+            logger.warning(
+                "Redis command timed out", action=action, module=module, timeout=timeout
+            )
+            return None
+        logger.error(
+            "Redis command timed out", action=action, module=module, timeout=timeout
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=detail_timeout,
+        ) from exc
+    except TimeoutError as exc:  # pragma: no cover - defensive for other libraries
+        if suppress:
+            logger.warning(
+                "Redis command timed out (native)",
+                action=action,
+                module=module,
+                timeout=timeout,
+            )
+            return None
+        logger.error(
+            "Redis command timed out (native)",
+            action=action,
+            module=module,
+            timeout=timeout,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=detail_timeout,
+        ) from exc
+    except RedisError as exc:
+        if suppress:
+            logger.warning(
+                "Redis command failed", action=action, module=module, error=str(exc)
+            )
+            return None
+        logger.error(
+            "Redis command failed", action=action, module=module, error=str(exc)
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=detail_unavailable,
+        ) from exc
+
+
+async def _restore_previous_state(redis: Any, key: str, before: Mapping[str, Any], module: str) -> None:
+    if before:
+        await _await_redis(
+            redis.hset(key, mapping=dict(before)),
+            action="restore_hset",
+            module=module,
+            suppress=True,
+        )
+    else:
+        await _await_redis(
+            redis.delete(key),
+            action="restore_delete",
+            module=module,
+            suppress=True,
+        )
+
+
+async def _scan_config_modules(redis: Any, pattern: str) -> list[str]:
+    iterator = redis.scan_iter(match=pattern)  # type: ignore[attr-defined]
+    modules: list[str] = []
+    while True:
+        try:
+            key = await _await_redis(iterator.__anext__(), action="scan_iter")
+        except StopAsyncIteration:
+            break
+        if key is None:
+            continue
+        text = str(key)
+        module = text.split(":", 2)[-1]
+        if module:
+            modules.append(module)
+    return modules
+
+
 # Backwards compatibility routes for legacy frontends that call the configuration
 # API without the `/api` prefix. Keeping these aliases avoids client timeouts
 # while the canonical paths remain under `/api`.
@@ -137,24 +261,16 @@ async def list_modules(user: str | None = Depends(get_current_user)) -> dict[str
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Redis is unavailable")
 
     modules: set[str] = set()
-    try:
-        members = await redis.smembers(MODULE_SET_KEY)
-        if members:
-            modules.update(str(item) for item in members)
-    except Exception as exc:
-        logger.warning("Failed to read config module registry", error=str(exc))
+    members = await _await_redis(redis.smembers(MODULE_SET_KEY), action="smembers")
+    if members:
+        modules.update(str(item) for item in members)
 
     pattern = f"{HASH_PREFIX}:*"
     try:
-        async for key in redis.scan_iter(match=pattern):  # type: ignore[attr-defined]
-            text = str(key)
-            module = text.split(":", 2)[-1]
-            if module:
-                modules.add(module)
+        discovered = await _scan_config_modules(redis, pattern)
+        modules.update(discovered)
     except AttributeError:
         logger.debug("Redis client does not support scan_iter; skipping hash discovery")
-    except Exception as exc:
-        logger.warning("Failed to scan config hashes", error=str(exc))
 
     return {"modules": sorted(modules)}
 
@@ -172,10 +288,12 @@ async def read_module(module: str, user: str | None = Depends(get_current_user))
 
     key = f"{HASH_PREFIX}:{module}"
     try:
-        values = await redis.hgetall(key)
+        values = await _await_redis(redis.hgetall(key), action="hgetall", module=module)
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.error("Failed to load configuration", module=module, error=str(exc))
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Failed to load configuration")
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Failed to load configuration") from exc
 
     return {"module": module, "values": _serialise_mapping(values or {})}
 
@@ -215,22 +333,33 @@ async def update_module(
 
     key = f"{HASH_PREFIX}:{module}"
     try:
-        before = await redis.hgetall(key)
+        before = await _await_redis(redis.hgetall(key), action="hgetall", module=module)
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.error("Failed to load configuration before update", module=module, error=str(exc))
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Failed to load configuration")
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Failed to load configuration") from exc
 
     to_set, to_remove = _normalise_values(payload.values)
 
+    changed = False
     try:
         if to_set:
-            await redis.hset(key, mapping=to_set)
+            await _await_redis(redis.hset(key, mapping=to_set), action="hset", module=module)
+            changed = True
         if to_remove:
-            await redis.hdel(key, *to_remove)
-        current = await redis.hgetall(key)
+            await _await_redis(redis.hdel(key, *to_remove), action="hdel", module=module)
+            changed = True
+        current = await _await_redis(redis.hgetall(key), action="hgetall", module=module)
+    except HTTPException:
+        if changed:
+            await _restore_previous_state(redis, key, before or {}, module)
+        raise
     except Exception as exc:
         logger.error("Failed to persist configuration", module=module, error=str(exc))
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Failed to persist configuration")
+        if changed:
+            await _restore_previous_state(redis, key, before or {}, module)
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Failed to persist configuration") from exc
 
     timestamp = datetime.now(timezone.utc).isoformat()
     version = str(uuid.uuid4())
@@ -300,27 +429,39 @@ async def rollback_module(
 
     key = f"{HASH_PREFIX}:{module}"
     try:
-        before = await redis.hgetall(key)
+        before = await _await_redis(redis.hgetall(key), action="hgetall", module=module)
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.error("Failed to load configuration before rollback", module=module, error=str(exc))
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Failed to load configuration")
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Failed to load configuration") from exc
 
     to_set = {str(field): _stringify(value) for field, value in desired_values.items()}
-    current_keys = set(before.keys())
+    current_keys = set((before or {}).keys())
     target_keys = set(to_set.keys())
     to_remove = list(current_keys - target_keys)
 
+    changed = False
     try:
         if to_set:
-            await redis.hset(key, mapping=to_set)
+            await _await_redis(redis.hset(key, mapping=to_set), action="hset", module=module)
+            changed = True
         else:
-            await redis.delete(key)
+            await _await_redis(redis.delete(key), action="delete", module=module)
+            changed = True
         if to_remove:
-            await redis.hdel(key, *to_remove)
-        current = await redis.hgetall(key)
+            await _await_redis(redis.hdel(key, *to_remove), action="hdel", module=module)
+            changed = True
+        current = await _await_redis(redis.hgetall(key), action="hgetall", module=module)
+    except HTTPException:
+        if changed:
+            await _restore_previous_state(redis, key, before or {}, module)
+        raise
     except Exception as exc:
         logger.error("Failed to apply rollback", module=module, error=str(exc))
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Failed to persist configuration")
+        if changed:
+            await _restore_previous_state(redis, key, before or {}, module)
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Failed to persist configuration") from exc
 
     timestamp = datetime.now(timezone.utc).isoformat()
     new_version = str(uuid.uuid4())
