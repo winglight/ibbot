@@ -12,7 +12,7 @@ from pathlib import Path
 from threading import RLock
 from dataclasses import dataclass, asdict
 from datetime import datetime
-from typing import List, Dict, Any, Optional, Sequence, Union
+from typing import List, Dict, Any, Optional, Sequence, Union, Set
 
 import pandas as pd
 from loguru import logger
@@ -118,6 +118,7 @@ class DatabaseManager:
         self._conn.execute("PRAGMA busy_timeout = 10000")
 
         self._async_executor = async_executor or get_async_executor()
+        self._historical_data_columns: Optional[Set[str]] = None
         self._db_executor = self._coerce_executor(self._async_executor)
 
         self._init_database()
@@ -941,9 +942,22 @@ class DatabaseManager:
                 f"Deleted {deleted} orders for strategy: {strategy_name} (source={source_desc})"
             )
             return int(deleted)
-    
+
+    def _get_historical_data_columns(self) -> Set[str]:
+        if self._historical_data_columns is None:
+            with self._cursor() as cursor:
+                cursor.execute("PRAGMA table_info('historical_data')")
+                self._historical_data_columns = {row[1] for row in cursor.fetchall()}
+        return self._historical_data_columns
+
     # 历史数据相关方法
-    def save_historical_data(self, symbol: str, data: pd.DataFrame, bar_size: str = "1 day"):
+    def save_historical_data(
+        self,
+        symbol: str,
+        data: pd.DataFrame,
+        bar_size: str = "1 day",
+        data_type: Optional[str] = None,
+    ):
         """保存历史数据"""
         with self._connection() as conn:
             # 重置索引确保存在 date/time 或 timestamp
@@ -965,7 +979,7 @@ class DatabaseManager:
             
             # 规范列：将 bar_size 映射为 interval（如 '1 day' -> '1d'，'1 min' -> '1m' 等）
             interval = self._normalize_interval(bar_size)
-            
+
             # 确保date字段只包含日期，time字段只包含时间
             if 'date' in data.columns:
                 try:
@@ -984,6 +998,10 @@ class DatabaseManager:
             data['interval'] = interval
             if 'adj_close' not in data.columns:
                 data['adj_close'] = data.get('close')
+
+            if data_type is not None:
+                data = data.copy()
+                data['data_type'] = str(data_type)
 
             # 兼容来源列名
             rename_map = {}
@@ -1006,6 +1024,8 @@ class DatabaseManager:
                 data['time'] = None
 
             required_columns = ['symbol', 'date', 'time', 'open', 'high', 'low', 'close', 'volume', 'interval', 'adj_close']
+            if data_type is not None:
+                required_columns.append('data_type')
             for col in required_columns:
                 if col not in data.columns:
                     data[col] = None
@@ -1022,24 +1042,48 @@ class DatabaseManager:
                         coltype = 'TEXT' if c in ['symbol','date','time','interval'] else 'REAL'
                         if c in ['volume']:
                             coltype = 'INTEGER'
+                        if c == 'data_type':
+                            coltype = 'TEXT'
                         cur.execute(f"ALTER TABLE historical_data ADD COLUMN {c} {coltype}")
+                    # invalidate cached schema so future reads can include the new column
+                    if hasattr(self, '_historical_data_columns'):
+                        self._historical_data_columns = None
 
                 # 使用插入或忽略的方式写入，利用UNIQUE(symbol,date,time,interval)
+                placeholders = ",".join(["?"] * len(cols))
                 insert_sql = (
                     "INSERT OR IGNORE INTO historical_data "
-                    "(symbol, date, time, open, high, low, close, volume, interval, adj_close) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                    f"({', '.join(cols)}) VALUES ({placeholders})"
                 )
-                rows = [(
-                    row['symbol'], str(row['date']), (None if pd.isna(row['time']) else str(row['time'])),
-                    float(row['open']) if pd.notna(row['open']) else None,
-                    float(row['high']) if pd.notna(row['high']) else None,
-                    float(row['low']) if pd.notna(row['low']) else None,
-                    float(row['close']) if pd.notna(row['close']) else None,
-                    int(row['volume']) if pd.notna(row['volume']) else 0,
-                    row['interval'],
-                    float(row['adj_close']) if pd.notna(row['adj_close']) else None
-                ) for _, row in data.iterrows()]
+                rows = []
+                for _, row in data.iterrows():
+                    values: List[Any] = []
+                    for col in cols:
+                        if col == 'symbol':
+                            values.append(row['symbol'])
+                        elif col == 'date':
+                            values.append(str(row['date']))
+                        elif col == 'time':
+                            values.append(None if pd.isna(row['time']) else str(row['time']))
+                        elif col == 'open':
+                            values.append(float(row['open']) if pd.notna(row['open']) else None)
+                        elif col == 'high':
+                            values.append(float(row['high']) if pd.notna(row['high']) else None)
+                        elif col == 'low':
+                            values.append(float(row['low']) if pd.notna(row['low']) else None)
+                        elif col == 'close':
+                            values.append(float(row['close']) if pd.notna(row['close']) else None)
+                        elif col == 'volume':
+                            values.append(int(row['volume']) if pd.notna(row['volume']) else 0)
+                        elif col == 'interval':
+                            values.append(row['interval'])
+                        elif col == 'adj_close':
+                            values.append(float(row['adj_close']) if pd.notna(row['adj_close']) else None)
+                        elif col == 'data_type':
+                            values.append(str(row['data_type']) if pd.notna(row['data_type']) else None)
+                        else:
+                            values.append(row.get(col))
+                    rows.append(tuple(values))
                 cur.executemany(insert_sql, rows)
             finally:
                 cur.close()
@@ -1065,6 +1109,8 @@ class DatabaseManager:
     def query_historical_cache(self, symbol: str, interval: str, start_dt: Optional[str] = None, end_dt: Optional[str] = None) -> pd.DataFrame:
         """按interval查询缓存。interval: '1d'或'1m'等。start_dt/end_dt为ISO字符串。"""
         with self._connection() as conn:
+            available_columns = self._get_historical_data_columns()
+            include_data_type = 'data_type' in available_columns
             where = ["symbol = ?", "interval = ?"]
             params: list = [symbol, interval]
             if interval.endswith('d'):
@@ -1076,6 +1122,8 @@ class DatabaseManager:
                     params.append(end_dt[:10])
                 order_by = "date"
                 select_cols = "date, open, high, low, close, volume, adj_close"
+                if include_data_type:
+                    select_cols += ", data_type"
             else:
                 # 分钟级，使用date+time
                 if start_dt:
@@ -1086,6 +1134,8 @@ class DatabaseManager:
                     params.append(end_dt[:19])
                 order_by = "date, time"
                 select_cols = "date, time, open, high, low, close, volume, adj_close"
+                if include_data_type:
+                    select_cols += ", data_type"
             query = f"SELECT {select_cols} FROM historical_data WHERE {' AND '.join(where)} ORDER BY {order_by}"
             df = pd.read_sql_query(query, conn, params=params)
             return df
@@ -1122,6 +1172,8 @@ class DatabaseManager:
 
         interval = self._normalize_interval(bar_size)
         with self._connection() as conn:
+            available_columns = self._get_historical_data_columns()
+            include_data_type = 'data_type' in available_columns
             if interval.endswith("d"):
                 query = (
                     "SELECT date, open, high, low, close, volume, adj_close "
@@ -1129,6 +1181,12 @@ class DatabaseManager:
                     "WHERE symbol = ? AND interval = ? "
                     "ORDER BY date"
                 )
+                if include_data_type:
+                    query = query.replace(
+                        "adj_close ",
+                        "adj_close, data_type ",
+                        1,
+                    )
             else:
                 query = (
                     "SELECT date, time, open, high, low, close, volume, adj_close "
@@ -1136,6 +1194,12 @@ class DatabaseManager:
                     "WHERE symbol = ? AND interval = ? "
                     "ORDER BY date, time"
                 )
+                if include_data_type:
+                    query = query.replace(
+                        "adj_close ",
+                        "adj_close, data_type ",
+                        1,
+                    )
 
             df = pd.read_sql_query(query, conn, params=(symbol, interval))
 

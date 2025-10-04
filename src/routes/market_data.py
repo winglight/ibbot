@@ -57,6 +57,8 @@ _BAR_SIZE_TO_INTERVAL = {
     "5 minutes": "5m",
 }
 
+_DEFAULT_WHAT_TO_SHOW_SEQUENCE: List[str] = ["TRADES", "MIDPOINT", "BID_ASK"]
+
 
 def _get_data_layer_manager():
     global _data_layer_manager
@@ -75,6 +77,27 @@ def _map_bar_size_to_interval(bar_size: str) -> Optional[str]:
         return None
     key = bar_size.strip().lower()
     return _BAR_SIZE_TO_INTERVAL.get(key)
+
+
+def _normalize_data_type(value: Optional[str]) -> str:
+    if not value:
+        return "TRADES"
+    cleaned = str(value).strip().upper().replace(" ", "_").replace("-", "_")
+    if cleaned == "BIDASK":
+        cleaned = "BID_ASK"
+    if cleaned == "MID_POINT":
+        cleaned = "MIDPOINT"
+    return cleaned or "TRADES"
+
+
+def _what_to_show_candidates(primary: Optional[str]) -> List[str]:
+    normalized = _normalize_data_type(primary)
+    sequence: List[str] = []
+    for candidate in [normalized, *_DEFAULT_WHAT_TO_SHOW_SEQUENCE]:
+        normalized_candidate = _normalize_data_type(candidate)
+        if normalized_candidate not in sequence:
+            sequence.append(normalized_candidate)
+    return sequence
 
 
 def _filter_candles_by_duration(
@@ -185,6 +208,7 @@ async def _fetch_ib_historical(
     bar_size: str,
     exchange: str,
     timeout: float,
+    what_to_show: str,
 ):
     """Call IB client's historical data API with coroutine/sync compatibility."""
 
@@ -199,6 +223,7 @@ async def _fetch_ib_historical(
                 duration=duration,
                 bar_size=bar_size,
                 exchange=exchange,
+                what_to_show=what_to_show,
             ),
             timeout=timeout,
         )
@@ -212,6 +237,7 @@ async def _fetch_ib_historical(
                 duration=duration,
                 bar_size=bar_size,
                 exchange=exchange,
+                what_to_show=what_to_show,
             ),
         ),
         timeout=timeout,
@@ -351,6 +377,7 @@ async def get_historical_data(
                 bar_size=request.bar_size,
                 exchange=request.exchange,
                 timeout=30.0,
+                what_to_show="TRADES",
             )
         except asyncio.TimeoutError:
             logger.error(
@@ -435,7 +462,11 @@ async def get_chart_data(
         use_cache = True if (getattr(request, "use_cache", True) is not False) else False
         force_refresh = True if (getattr(request, "force_refresh", False) is True) else False
 
-        cache_key_base = f"{request.symbol}_{request.duration}_{request.bar_size}_{request.exchange}"
+        normalized_data_type = _normalize_data_type(getattr(request, "data_type", None))
+        cache_key_base = (
+            f"{request.symbol}_{request.duration}_{request.bar_size}_"
+            f"{request.exchange}_{normalized_data_type}"
+        )
         cache_key = f"chart::{cache_key_base}"
 
         # 1) 内存缓存命中（仅当使用缓存且不强制刷新）
@@ -444,12 +475,14 @@ async def get_chart_data(
             if cache_entry.get("expires_at", now) > now:
                 logger.debug(f"Using chart memory cache for {request.symbol}")
                 cached_data = cache_entry.get("data", [])
+                cached_data_type = cache_entry.get("data_type", normalized_data_type)
                 return {
                     "success": True,
                     "data": cached_data,
                     "symbol": request.symbol,
                     "duration": request.duration,
                     "bar_size": request.bar_size,
+                    "data_type": cached_data_type,
                 }
 
         # 2) 数据库缓存（覆盖请求范围且不强制刷新时）
@@ -470,8 +503,13 @@ async def get_chart_data(
         ):
             logger.debug(f"Using chart database cache for {request.symbol}")
             chart_data = []
+            db_data_type = normalized_data_type
             try:
                 records = cache_df.to_dict("records")
+                if "data_type" in cache_df.columns:
+                    non_null = cache_df["data_type"].dropna()
+                    if not non_null.empty:
+                        db_data_type = _normalize_data_type(non_null.iloc[0])
                 for row in records:
                     raw_time = row.get("date") or row.get("time")
                     t = to_local_time(raw_time)
@@ -494,6 +532,7 @@ async def get_chart_data(
                     "data": chart_data,
                     "timestamp": now,
                     "expires_at": expires_at,
+                    "data_type": db_data_type,
                 }
                 return {
                     "success": True,
@@ -501,6 +540,7 @@ async def get_chart_data(
                     "symbol": request.symbol,
                     "duration": request.duration,
                     "bar_size": request.bar_size,
+                    "data_type": db_data_type,
                 }
 
         # 3) 需要拉取新数据（强制刷新或缓存不足）
@@ -557,6 +597,7 @@ async def get_chart_data(
                 "data": unified_chart,
                 "timestamp": now,
                 "expires_at": expires_at,
+                "data_type": normalized_data_type,
             }
             return {
                 "success": True,
@@ -564,6 +605,7 @@ async def get_chart_data(
                 "symbol": request.symbol,
                 "duration": request.duration,
                 "bar_size": request.bar_size,
+                "data_type": normalized_data_type,
             }
 
         if not connection_manager.is_connected():
@@ -573,26 +615,60 @@ async def get_chart_data(
         if ib_client is None:
             raise HTTPException(status_code=400, detail="IBKR client unavailable")
 
-        try:
-            df = await _fetch_ib_historical(
-                ib_client,
-                symbol=request.symbol,
-                duration=request.duration,
-                bar_size=request.bar_size,
-                exchange=request.exchange,
-                timeout=30.0,
-            )
-        except asyncio.TimeoutError:
-            logger.warning(
-                f"Chart data historical fetch timed out for {request.symbol}"
-            )
-            df = None
+        df = None
+        selected_data_type = normalized_data_type
+        last_error: Optional[str] = None
+        for candidate in _what_to_show_candidates(normalized_data_type):
+            try:
+                candidate_df = await _fetch_ib_historical(
+                    ib_client,
+                    symbol=request.symbol,
+                    duration=request.duration,
+                    bar_size=request.bar_size,
+                    exchange=request.exchange,
+                    timeout=30.0,
+                    what_to_show=candidate,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Chart data historical fetch timed out for {} ({})",
+                    request.symbol,
+                    candidate,
+                )
+                last_error = f"timeout requesting {candidate}"
+                df = None
+                break
+            except Exception as exc:
+                logger.warning(
+                    "Chart data fetch error for {} ({}): {}",
+                    request.symbol,
+                    candidate,
+                    exc,
+                )
+                last_error = str(exc) if str(exc) else repr(exc)
+                continue
+
+            if candidate_df is None or getattr(candidate_df, "empty", False):
+                logger.debug(
+                    "No chart data returned for {} using {}",
+                    request.symbol,
+                    candidate,
+                )
+                last_error = f"no data for {candidate}"
+                continue
+
+            df = candidate_df
+            selected_data_type = candidate
+            break
 
         # 4) 成功获取数据
         if df is not None and not df.empty:
             try:
                 db_manager.save_historical_data(
-                    request.symbol, df, bar_size=request.bar_size
+                    request.symbol,
+                    df,
+                    bar_size=request.bar_size,
+                    data_type=selected_data_type,
                 )
             except Exception as e:
                 logger.warning(f"Failed to save chart data: {e}")
@@ -619,6 +695,7 @@ async def get_chart_data(
                 "data": chart_data,
                 "timestamp": now,
                 "expires_at": expires_at,
+                "data_type": selected_data_type,
             }
 
             return {
@@ -627,6 +704,7 @@ async def get_chart_data(
                 "symbol": request.symbol,
                 "duration": request.duration,
                 "bar_size": request.bar_size,
+                "data_type": selected_data_type,
             }
 
         # 5) API返回空，回退数据库load_historical_data
@@ -639,7 +717,12 @@ async def get_chart_data(
             fallback_df = None
         if fallback_df is not None and not fallback_df.empty:
             chart_data = []
+            fallback_type = selected_data_type
             try:
+                if "data_type" in fallback_df.columns:
+                    non_null = fallback_df["data_type"].dropna()
+                    if not non_null.empty:
+                        fallback_type = _normalize_data_type(non_null.iloc[0])
                 for ts, row in fallback_df.iterrows():
                     t = to_local_time(ts)
                     chart_data.append(
@@ -661,6 +744,7 @@ async def get_chart_data(
                     "symbol": request.symbol,
                     "duration": request.duration,
                     "bar_size": request.bar_size,
+                    "data_type": fallback_type,
                 }
 
         reason = None
@@ -668,10 +752,13 @@ async def get_chart_data(
             reason = connection_manager.get_last_connect_error()
         except Exception:
             reason = None
+        detail_msg = "No chart data found"
+        if last_error:
+            detail_msg = f"{detail_msg} (last error: {last_error})"
         raise HTTPException(
             status_code=404,
             detail=(
-                "No chart data found"
+                detail_msg
                 + (f". Possible cause: {reason}" if reason else "")
             ),
         )
