@@ -27,6 +27,26 @@ class StubRedis:
         return dict(value)
 
 
+class HangingRedis(StubRedis):
+    def __init__(
+        self,
+        mapping: dict[str, dict[str, str] | None],
+        *,
+        hang_keys: set[str],
+    ) -> None:
+        super().__init__(mapping)
+        self._hang_keys = set(hang_keys)
+        self.closed = False
+
+    async def hgetall(self, key: str):  # type: ignore[override]
+        if key in self._hang_keys:
+            await asyncio.sleep(3600)
+        return await super().hgetall(key)
+
+    def close(self) -> None:
+        self.closed = True
+
+
 @pytest.fixture()
 def service_status_app(monkeypatch: pytest.MonkeyPatch) -> FastAPI:
     app = FastAPI()
@@ -188,3 +208,54 @@ def test_service_status_endpoint_returns_redis_unavailable(monkeypatch: pytest.M
     assert response.json() == {
         "detail": {"error": "redis_unavailable", "message": "Redis 服务不可用"}
     }
+
+
+def test_service_status_endpoint_degrades_when_redis_hangs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = FastAPI()
+
+    now = datetime.now(timezone.utc).isoformat()
+    redis_data: dict[str, dict[str, str] | None] = {
+        "hash:service:health:ib-command": {"last_seen": now, "queue_depth": "0"},
+        "hash:service:health:account-service": {"status": "running", "last_seen": now},
+        "hash:service:health:market-data": {"status": "running", "last_seen": now},
+        "hash:service:health:queue": {
+            "status": "running",
+            "last_seen": now,
+            "total_queue_length": "1",
+        },
+        "hash:service:queue-monitor": {"timestamp": now},
+    }
+
+    hanging_redis = HangingRedis(
+        redis_data,
+        hang_keys={"hash:service:health:market-data"},
+    )
+
+    async def fake_get_client(*_: object, **__: object):
+        return hanging_redis
+
+    async def fake_readiness(**_: object) -> AccountServiceReadiness:
+        return AccountServiceReadiness(ready=True, checked_at=datetime.now(timezone.utc), error=None)
+
+    monkeypatch.setattr(service_status_module, "get_redis_client", fake_get_client)
+    monkeypatch.setattr(service_status_module, "refresh_account_service_status", fake_readiness)
+    monkeypatch.setattr(service_status_module, "_REDIS_COMMAND_TIMEOUT", 0.01)
+
+    app.include_router(service_module.router)
+
+    with TestClient(app) as client:
+        response = client.get("/api/services/status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    services = payload.get("services") or []
+    market_entry = next(
+        (item for item in services if item.get("service") == "market_data"),
+        None,
+    )
+    assert market_entry is not None
+    assert market_entry.get("status") == "unhealthy"
+    detail = market_entry.get("detail") or ""
+    assert "Redis" in detail
