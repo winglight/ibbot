@@ -46,6 +46,7 @@ class RedisConfig:
     ssl: bool = False
     connect_timeout: Optional[float] = None
     ping_timeout: Optional[float] = None
+    socket_timeout: Optional[float] = None
 
 
 _client: Optional[Redis] = None
@@ -97,6 +98,12 @@ def _load_config() -> RedisConfig:
         ("REDIS_CONNECT_TIMEOUT_MS", 0.001),
         default=1.0,
     )
+    socket_timeout = _parse_timeout_setting(
+        ("REDIS_SOCKET_TIMEOUT", 1.0),
+        ("REDIS_SOCKET_TIMEOUT_MS", 0.001),
+    )
+    if socket_timeout is _UNSET:
+        socket_timeout = connect_timeout if isinstance(connect_timeout, (int, float)) else None
     ping_timeout = _parse_timeout_setting(
         ("REDIS_PING_TIMEOUT", 1.0),
         ("REDIS_PING_TIMEOUT_MS", 0.001),
@@ -116,6 +123,7 @@ def _load_config() -> RedisConfig:
             url=url,
             connect_timeout=connect_timeout if isinstance(connect_timeout, (int, float)) else None,
             ping_timeout=ping_timeout if isinstance(ping_timeout, (int, float)) else None,
+            socket_timeout=socket_timeout if isinstance(socket_timeout, (int, float)) else None,
         )
 
     host = os.getenv("REDIS_HOST", "localhost")
@@ -142,6 +150,7 @@ def _load_config() -> RedisConfig:
         ssl=ssl_enabled,
         connect_timeout=connect_timeout if isinstance(connect_timeout, (int, float)) else None,
         ping_timeout=ping_timeout if isinstance(ping_timeout, (int, float)) else None,
+        socket_timeout=socket_timeout if isinstance(socket_timeout, (int, float)) else None,
     )
 
 
@@ -169,6 +178,8 @@ async def init_redis(force: bool = False) -> Optional[Redis]:
             }
             if isinstance(config.connect_timeout, (int, float)):
                 common_kwargs["socket_connect_timeout"] = config.connect_timeout
+            if isinstance(config.socket_timeout, (int, float)):
+                common_kwargs["socket_timeout"] = config.socket_timeout
 
             if config.url:
                 client = Redis.from_url(
@@ -218,6 +229,7 @@ async def init_redis(force: bool = False) -> Optional[Redis]:
         log_context: Dict[str, Any] = {
             "connect_timeout": config.connect_timeout,
             "ping_timeout": config.ping_timeout,
+            "socket_timeout": config.socket_timeout,
         }
         if config.url:
             log_context["url"] = config.url
