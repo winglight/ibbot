@@ -361,6 +361,10 @@ async def _module_service_health_probe(
         if close_client and redis_client is not None:
             try:
                 await redis_client.close()  # type: ignore[attr-defined]
+            except RuntimeError as exc:
+                # Handle the case where event loop is already closed
+                if "Event loop is closed" not in str(exc):
+                    context.logger.debug("Failed to close Redis client: %s", exc)
             except Exception:  # pragma: no cover - close semantics vary
                 pass
 

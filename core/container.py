@@ -140,6 +140,14 @@ async def shutdown() -> None:
     if container is None:
         return
 
+    # Close Redis connection first to ensure proper cleanup
+    if container.redis_client is not None:
+        try:
+            from src.cache import close_redis
+            await close_redis()
+        except Exception as exc:  # pragma: no cover - defensive guard
+            logger.warning("Error while closing Redis client: {}", exc)
+
     if container.config_provider is not None:
         try:
             await container.config_provider.close()

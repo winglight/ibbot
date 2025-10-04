@@ -211,6 +211,110 @@
                 </div>
             </div>
 
+            <div class="card config-card mb-3" id="marketDataBackfillCard">
+                <div class="card-header d-flex flex-wrap gap-2 align-items-center justify-content-between">
+                    <h6 class="mb-0"><i class="fas fa-database me-2"></i> Market Data Backfill</h6>
+                    <div class="d-flex gap-2">
+                        <button class="btn btn-outline-light btn-sm" type="button" id="marketDataBackfillRefreshBtn" title="刷新缓存概览">
+                            <i class="fas fa-rotate-right"></i>
+                        </button>
+                        <button class="btn btn-outline-light btn-sm" type="button" id="marketDataBackfillRunBtn">
+                            <i class="fas fa-download"></i> 回补
+                        </button>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <div class="row g-3 align-items-end">
+                        <div class="col-12 col-sm-3">
+                            <label class="form-label" for="marketDataBackfillSymbol">Symbol</label>
+                            <input type="text" class="form-control form-control-sm text-uppercase" id="marketDataBackfillSymbol" placeholder="例如：AAPL" maxlength="32">
+                        </div>
+                        <div class="col-6 col-sm-3">
+                            <label class="form-label" for="marketDataBackfillDuration">Duration</label>
+                            <select class="form-select form-select-sm" id="marketDataBackfillDuration">
+                                <option value="1 D">1 D</option>
+                                <option value="5 D">5 D</option>
+                                <option value="1 W">1 W</option>
+                                <option value="1 M">1 M</option>
+                                <option value="3 M">3 M</option>
+                                <option value="6 M">6 M</option>
+                                <option value="1 Y">1 Y</option>
+                            </select>
+                        </div>
+                        <div class="col-6 col-sm-3">
+                            <label class="form-label" for="marketDataBackfillBarSize">Bar Size</label>
+                            <select class="form-select form-select-sm" id="marketDataBackfillBarSize">
+                                <option value="1 sec">1 sec</option>
+                                <option value="5 sec">5 sec</option>
+                                <option value="1 min" selected>1 min</option>
+                                <option value="5 min">5 min</option>
+                                <option value="15 min">15 min</option>
+                                <option value="30 min">30 min</option>
+                                <option value="1 hour">1 hour</option>
+                                <option value="1 day">1 day</option>
+                            </select>
+                        </div>
+                        <div class="col-12 col-sm-3">
+                            <label class="form-label" for="marketDataBackfillExchange">Exchange</label>
+                            <input type="text" class="form-control form-control-sm text-uppercase" id="marketDataBackfillExchange" value="SMART" maxlength="16">
+                        </div>
+                        <div class="col-12">
+                            <label class="form-label d-flex align-items-center gap-2 mb-1">聚合额外周期 <small class="text-muted">(可选)</small></label>
+                            <div class="d-flex flex-wrap gap-3" id="marketDataBackfillExtraContainer">
+                                <div class="form-check form-check-inline">
+                                    <input class="form-check-input" type="checkbox" value="5 min" id="marketDataExtra5m">
+                                    <label class="form-check-label" for="marketDataExtra5m">5 min</label>
+                                </div>
+                                <div class="form-check form-check-inline">
+                                    <input class="form-check-input" type="checkbox" value="15 min" id="marketDataExtra15m">
+                                    <label class="form-check-label" for="marketDataExtra15m">15 min</label>
+                                </div>
+                                <div class="form-check form-check-inline">
+                                    <input class="form-check-input" type="checkbox" value="30 min" id="marketDataExtra30m">
+                                    <label class="form-check-label" for="marketDataExtra30m">30 min</label>
+                                </div>
+                                <div class="form-check form-check-inline">
+                                    <input class="form-check-input" type="checkbox" value="1 hour" id="marketDataExtra1h">
+                                    <label class="form-check-label" for="marketDataExtra1h">1 hour</label>
+                                </div>
+                                <div class="form-check form-check-inline">
+                                    <input class="form-check-input" type="checkbox" value="1 day" id="marketDataExtra1d">
+                                    <label class="form-check-label" for="marketDataExtra1d">1 day</label>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="mt-3">
+                        <div class="d-flex align-items-center gap-2 mb-2">
+                            <h6 class="mb-0"><i class="fas fa-chart-area me-2"></i> 缓存概览</h6>
+                            <div class="spinner-border spinner-border-sm text-secondary d-none" role="status" id="marketDataBackfillSpinner">
+                                <span class="visually-hidden">Loading...</span>
+                            </div>
+                        </div>
+                        <div class="table-responsive">
+                            <table class="table table-sm table-striped align-middle mb-2" id="marketDataBackfillTable">
+                                <thead>
+                                    <tr>
+                                        <th>Interval</th>
+                                        <th>Redis 条数</th>
+                                        <th>最早</th>
+                                        <th>最新</th>
+                                        <th>Parquet</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="marketDataBackfillTableBody">
+                                    <tr>
+                                        <td colspan="5" class="text-muted small">请输入 Symbol 并点击刷新</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                        <div id="marketDataBackfillStatus" class="small text-muted"></div>
+                    </div>
+                </div>
+            </div>
+
             <div class="card config-card mb-3" id="domSettingsCard">
                 <div class="card-header">
                     <h6 class="mb-0"><i class="fas fa-sliders-h me-2"></i> Monitor Settings</h6>

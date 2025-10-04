@@ -274,6 +274,12 @@ async def close_redis() -> None:
         return
     try:
         await client.close()
+    except RuntimeError as exc:
+        # Handle the case where event loop is already closed
+        if "Event loop is closed" in str(exc):
+            logger.debug("Redis client close skipped: event loop already closed")
+        else:
+            logger.debug("Failed to close Redis client", exc_info=True)
     except Exception:  # pragma: no cover - depends on redis implementation
         logger.debug("Failed to close Redis client", exc_info=True)
 

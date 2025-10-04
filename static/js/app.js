@@ -222,6 +222,9 @@ class TradingApp {
         this.logsManagerInitialized = false;
         this.notificationsManagerInitialized = false;
         this.authenticatedModulesInitialized = false;
+        this.marketDataBackfillInitialized = false;
+        this.marketDataBackfillLoading = false;
+        this.marketDataBackfillElements = null;
         this.uiController = typeof UIControllerClass === 'function'
             ? new UIControllerClass(this)
             : null;
@@ -910,6 +913,7 @@ class TradingApp {
         this.initSidePanels();
         this.initHolidayDataPushToggle();
         this.initConfigCenter();
+        this.initMarketDataBackfillCard();
 
         this.monitorDomHistoryList = document.getElementById('monitorDomHistoryList');
         this.monitorDomHistoryMeta = document.getElementById('monitorDomHistoryMeta');
@@ -1805,6 +1809,8 @@ class TradingApp {
                 console.error('Failed to update config center read-only state', error);
             }
         }
+
+        this.updateBackfillReadOnlyState();
 
         const holidayToggle = document.getElementById('holidayDataPushSwitch');
         if (holidayToggle) {
@@ -4770,6 +4776,295 @@ class TradingApp {
             if (this.isReadOnly) {
                 manager.setReadOnly(true);
             }
+        }
+    }
+
+    initMarketDataBackfillCard() {
+        if (this.marketDataBackfillInitialized) {
+            return;
+        }
+
+        const card = document.getElementById('marketDataBackfillCard');
+        if (!card) {
+            return;
+        }
+
+        const elements = {
+            card,
+            symbol: document.getElementById('marketDataBackfillSymbol'),
+            duration: document.getElementById('marketDataBackfillDuration'),
+            barSize: document.getElementById('marketDataBackfillBarSize'),
+            exchange: document.getElementById('marketDataBackfillExchange'),
+            refresh: document.getElementById('marketDataBackfillRefreshBtn'),
+            run: document.getElementById('marketDataBackfillRunBtn'),
+            spinner: document.getElementById('marketDataBackfillSpinner'),
+            tableBody: document.getElementById('marketDataBackfillTableBody'),
+            status: document.getElementById('marketDataBackfillStatus'),
+            extraContainer: document.getElementById('marketDataBackfillExtraContainer'),
+        };
+
+        this.marketDataBackfillElements = elements;
+        this.marketDataBackfillInitialized = true;
+
+        if (elements.symbol) {
+            elements.symbol.addEventListener('blur', () => {
+                elements.symbol.value = (elements.symbol.value || '').trim().toUpperCase();
+            });
+            elements.symbol.addEventListener('keyup', (event) => {
+                if (event.key === 'Enter') {
+                    this.loadMarketDataStorage({ showWarnings: true }).catch(() => {});
+                }
+            });
+        }
+        if (elements.exchange) {
+            elements.exchange.addEventListener('blur', () => {
+                elements.exchange.value = (elements.exchange.value || '').trim().toUpperCase();
+            });
+        }
+        if (elements.refresh) {
+            elements.refresh.addEventListener('click', () => {
+                this.loadMarketDataStorage({ showWarnings: true }).catch(() => {});
+            });
+        }
+        if (elements.run) {
+            elements.run.addEventListener('click', () => {
+                this.runMarketDataBackfill().catch(() => {});
+            });
+        }
+
+        this.updateBackfillReadOnlyState();
+    }
+
+    setBackfillLoading(loading) {
+        this.marketDataBackfillLoading = !!loading;
+        const elements = this.marketDataBackfillElements;
+        if (!elements) {
+            return;
+        }
+        if (elements.spinner) {
+            elements.spinner.classList.toggle('d-none', !loading);
+        }
+        if (elements.refresh) {
+            elements.refresh.disabled = !!loading;
+        }
+        if (elements.run) {
+            elements.run.disabled = !!loading || this.isReadOnly;
+        }
+    }
+
+    updateBackfillReadOnlyState() {
+        const elements = this.marketDataBackfillElements;
+        if (!elements || !elements.run) {
+            return;
+        }
+        const disabled = this.isReadOnly || this.marketDataBackfillLoading;
+        elements.run.disabled = disabled;
+        elements.run.classList.toggle('btn-outline-secondary', this.isReadOnly);
+        elements.run.classList.toggle('btn-outline-light', !this.isReadOnly);
+        elements.run.title = this.isReadOnly ? '访客模式无法回补数据' : '';
+    }
+
+    getBackfillSymbol() {
+        const symbolInput = this.marketDataBackfillElements?.symbol;
+        const text = symbolInput?.value || '';
+        return text.trim().toUpperCase();
+    }
+
+    formatIsoDatetime(value, fallback = '-') {
+        if (!value) {
+            return fallback;
+        }
+        try {
+            const date = new Date(value);
+            if (Number.isNaN(date.getTime())) {
+                return typeof value === 'string' ? value : fallback;
+            }
+            return date.toLocaleString();
+        } catch (error) {
+            return typeof value === 'string' ? value : fallback;
+        }
+    }
+
+    async loadMarketDataStorage(options = {}) {
+        const elements = this.marketDataBackfillElements;
+        if (!elements) {
+            return;
+        }
+
+        const skipLoading = options.skipLoadingState === true;
+        const symbol = (options.symbol || this.getBackfillSymbol()).trim().toUpperCase();
+        if (!symbol) {
+            if (options.showWarnings) {
+                this.showAlert('warning', '请输入 Symbol');
+            }
+            return;
+        }
+
+        if (elements.symbol) {
+            elements.symbol.value = symbol;
+        }
+
+        if (!skipLoading) {
+            this.setBackfillLoading(true);
+        }
+
+        try {
+            const payload = await this.apiCall(
+                `/market/storage?symbol=${encodeURIComponent(symbol)}`,
+                { allowReadOnly: true, cache: 'no-store' }
+            );
+            this.renderMarketDataStorageSummary(payload);
+            if (options.showSuccess) {
+                this.showAlert('success', '缓存概览已更新');
+            }
+        } catch (error) {
+            console.error('Failed to load market data storage summary:', error);
+            if (elements.tableBody) {
+                const message = this.escapeHtml(error?.message || '加载缓存概览失败');
+                elements.tableBody.innerHTML = `<tr><td colspan="5" class="text-danger small">${message}</td></tr>`;
+            }
+            if (!options.silent) {
+                this.showAlert('danger', error?.message || '加载缓存概览失败');
+            }
+        } finally {
+            if (!skipLoading) {
+                this.setBackfillLoading(false);
+            }
+        }
+    }
+
+    renderMarketDataStorageSummary(payload = {}) {
+        const elements = this.marketDataBackfillElements;
+        if (!elements?.tableBody) {
+            return;
+        }
+
+        const intervals = payload?.intervals;
+        if (!intervals || typeof intervals !== 'object' || !Object.keys(intervals).length) {
+            elements.tableBody.innerHTML = '<tr><td colspan="5" class="text-muted small">暂无数据</td></tr>';
+            if (elements.status) {
+                elements.status.textContent = '';
+            }
+            return;
+        }
+
+        const rows = [];
+        Object.entries(intervals).forEach(([intervalKey, info]) => {
+            if (!info || typeof info !== 'object') {
+                return;
+            }
+            const redis = info.redis || {};
+            const barSizes = Array.isArray(info.bar_sizes) ? info.bar_sizes : [];
+            const intervalLabel = this.escapeHtml(intervalKey);
+            const barSizeText = barSizes.length
+                ? `<div class="text-muted small">${this.escapeHtml(barSizes.join(', '))}</div>`
+                : '';
+            const redisCount = Number.isFinite(redis.count) ? redis.count : 0;
+            const oldest = redis?.oldest ? this.escapeHtml(this.formatIsoDatetime(redis.oldest)) : null;
+            const newest = redis?.newest ? this.escapeHtml(this.formatIsoDatetime(redis.newest)) : null;
+
+            const parquetSegments = Array.isArray(info.parquet) ? info.parquet : [];
+            let parquetCell = '<span class="text-muted">-</span>';
+            if (parquetSegments.length) {
+                const firstSegment = parquetSegments[0] || {};
+                const lastSegment = parquetSegments[parquetSegments.length - 1] || {};
+                const startText = firstSegment.start || firstSegment.modified;
+                const endText = lastSegment.end || lastSegment.modified;
+                const parts = [`${parquetSegments.length} 文件`];
+                if (startText || endText) {
+                    parts.push(
+                        `${this.formatIsoDatetime(startText)} ~ ${this.formatIsoDatetime(endText)}`
+                    );
+                }
+                parquetCell = this.escapeHtml(parts[0]);
+                if (parts[1]) {
+                    parquetCell += `<br><span class="text-muted">${this.escapeHtml(parts[1])}</span>`;
+                }
+            }
+
+            rows.push(
+                `<tr>
+                    <td>${intervalLabel}${barSizeText}</td>
+                    <td>${this.escapeHtml(String(redisCount))}</td>
+                    <td class="small">${oldest || '<span class="text-muted">-</span>'}</td>
+                    <td class="small">${newest || '<span class="text-muted">-</span>'}</td>
+                    <td class="small">${parquetCell}</td>
+                </tr>`
+            );
+        });
+
+        elements.tableBody.innerHTML = rows.join('');
+
+        if (elements.status) {
+            const symbol = payload?.symbol || this.getBackfillSymbol() || '';
+            const pieces = [];
+            if (symbol) {
+                pieces.push(`Symbol ${this.escapeHtml(symbol)}`);
+            }
+            pieces.push(`更新时间 ${this.escapeHtml(new Date().toLocaleString())}`);
+            elements.status.innerHTML = pieces.join(' · ');
+        }
+    }
+
+    async runMarketDataBackfill() {
+        if (this.isReadOnly) {
+            this.showAlert('warning', '访客模式无法回补数据');
+            return;
+        }
+
+        const elements = this.marketDataBackfillElements;
+        if (!elements) {
+            return;
+        }
+
+        const symbol = this.getBackfillSymbol();
+        if (!symbol) {
+            this.showAlert('warning', '请输入 Symbol');
+            return;
+        }
+
+        const duration = (elements.duration?.value || '1 D').trim() || '1 D';
+        const barSize = (elements.barSize?.value || '1 min').trim() || '1 min';
+        const exchangeInput = elements.exchange;
+        const exchange = (exchangeInput?.value || 'SMART').trim().toUpperCase() || 'SMART';
+        if (exchangeInput) {
+            exchangeInput.value = exchange;
+        }
+
+        const extras = [];
+        if (elements.extraContainer) {
+            const checked = elements.extraContainer.querySelectorAll('input[type="checkbox"]:checked');
+            checked.forEach((input) => {
+                if (typeof input.value === 'string' && input.value.trim()) {
+                    extras.push(input.value.trim());
+                }
+            });
+        }
+
+        const payload = {
+            symbol,
+            duration,
+            barSize,
+            exchange,
+        };
+        if (extras.length) {
+            payload.extraBarSizes = extras;
+        }
+
+        this.setBackfillLoading(true);
+        try {
+            const result = await this.apiCall('/market/backfill', {
+                method: 'POST',
+                body: JSON.stringify(payload),
+            });
+            const message = result?.message || '回补完成';
+            this.showAlert(result?.success ? 'success' : 'warning', message);
+            await this.loadMarketDataStorage({ symbol, silent: true, skipLoadingState: true });
+        } catch (error) {
+            console.error('Failed to run market data backfill:', error);
+            this.showAlert('danger', error?.message || '回补失败，请稍后再试');
+        } finally {
+            this.setBackfillLoading(false);
         }
     }
 

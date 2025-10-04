@@ -22,7 +22,7 @@
             "request": "launch",
             "module": "uvicorn",
             "args": [
-                "services.orders.main:app",  
+                "services.market_data.main:app",  
                 "--port", "8020",
                 "--reload"                   
             ],

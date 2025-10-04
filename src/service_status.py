@@ -160,6 +160,15 @@ async def _close_redis(redis: Any) -> None:
     if asyncio.iscoroutine(result):
         try:
             await result
+        except RuntimeError as exc:
+            # Handle the case where event loop is already closed
+            if "Event loop is closed" in str(exc):
+                logger.debug("Event loop already closed during Redis cleanup")
+            else:
+                logger.debug(
+                    "Ignoring redis.close() error during service status cleanup",
+                    exc_info=True,
+                )
         except Exception:  # pragma: no cover - defensive cleanup
             logger.debug(
                 "Ignoring redis.close() error during service status cleanup",

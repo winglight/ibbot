@@ -9,6 +9,7 @@ import json
 import math
 import os
 from collections import defaultdict
+from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Dict, Mapping, Sequence
@@ -92,6 +93,25 @@ _INTERVAL_TO_SECONDS = {
 MAX_RETURNED_CANDLES = 1000
 _MAX_SOURCE_FETCH = 120_000
 
+_INTERVAL_TO_BAR_SIZES: dict[str, list[str]] = {}
+for _bar_size, _interval_name in _BAR_SIZE_TO_INTERVAL.items():
+    _INTERVAL_TO_BAR_SIZES.setdefault(_interval_name, []).append(_bar_size)
+
+
+def _env_flag(name: str, default: bool = True) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in {"0", "false", "no", "off", "disabled"}
+
+
+IB_FALLBACK_ENABLED = _env_flag("MARKET_DATA_ENABLE_IB_FALLBACK", True)
+_IB_CLIENT_LOCK = asyncio.Lock()
+_IB_CLIENT: Any | None = None
+_IB_CLIENT_UNAVAILABLE = object()
+_IB_FETCH_LOCKS: dict[tuple[str, str, str], asyncio.Lock] = {}
+_IB_FETCH_LOCK_GUARD = asyncio.Lock()
+
 
 class ChartDataQuery(BaseModel):
     """Request payload accepted by the chart data endpoint."""
@@ -149,6 +169,19 @@ def _parse_duration_to_minutes(duration: str) -> int:
     if unit in {"m", "min", "mins", "minute", "minutes"}:
         return int(number)
     return int(number)
+
+
+class BackfillRequest(ChartDataQuery):
+    extra_bar_sizes: list[str] | None = Field(
+        default=None,
+        alias="extraBarSizes",
+        description="Additional bar sizes to aggregate after fetching",
+    )
+    extra_intervals: list[str] | None = Field(
+        default=None,
+        alias="extraIntervals",
+        description="Explicit intervals to aggregate after fetching",
+    )
 
 
 def _coerce_int(value: Any) -> int | None:
@@ -325,6 +358,429 @@ def _estimate_source_limit(
         duration_needed = math.ceil((duration_minutes * 60) / source_seconds)
         limit = max(limit, duration_needed)
     return min(max(limit, target_rows), _MAX_SOURCE_FETCH)
+
+
+def _coerce_datetime_any(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(float(value), tz=NY_TZ)
+        except Exception:
+            return None
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            dt = datetime.fromisoformat(text)
+        except ValueError:
+            for pattern in ("%Y%m%d %H:%M:%S", "%Y%m%d %H:%M", "%Y-%m-%d %H:%M:%S"):
+                try:
+                    candidate = datetime.strptime(text, pattern)
+                except ValueError:
+                    continue
+                dt = candidate.replace(tzinfo=NY_TZ)
+                break
+            else:
+                return None
+    else:
+        return None
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=NY_TZ)
+    else:
+        dt = dt.astimezone(NY_TZ)
+    return dt
+
+
+def _bar_timestamp(bar: Mapping[str, Any]) -> datetime | None:
+    for key in ("timestamp", "time", "date", "datetime"):
+        candidate = bar.get(key)
+        dt = _coerce_datetime_any(candidate)
+        if dt is not None:
+            return dt
+    return None
+
+
+def _bars_to_candles(
+    bars: Sequence[Mapping[str, Any]],
+    *,
+    symbol: str,
+    interval: str,
+) -> list[dict[str, Any]]:
+    seconds = _INTERVAL_TO_SECONDS.get(interval)
+    if not seconds:
+        return []
+    period_ns = seconds * 1_000_000_000
+    candles: list[dict[str, Any]] = []
+    for bar in bars:
+        if not isinstance(bar, Mapping):
+            continue
+        dt = _bar_timestamp(bar)
+        if dt is None:
+            continue
+        end_ns = int(dt.timestamp() * 1_000_000_000)
+        start_ns = end_ns - period_ns
+
+        open_price = _coerce_float(bar.get("open"))
+        high_price = _coerce_float(bar.get("high"))
+        low_price = _coerce_float(bar.get("low"))
+        close_price = _coerce_float(bar.get("close"))
+        volume_value = _coerce_float(bar.get("volume"))
+        count_value = _coerce_int(bar.get("count"))
+
+        if open_price is None and close_price is not None:
+            open_price = close_price
+        if close_price is None and open_price is not None:
+            close_price = open_price
+        if high_price is None:
+            high_price = max(
+                [price for price in (open_price, close_price) if price is not None],
+                default=open_price,
+            )
+        if low_price is None:
+            low_price = min(
+                [price for price in (open_price, close_price) if price is not None],
+                default=open_price,
+            )
+
+        candle = {
+            "symbol": symbol.upper(),
+            "interval": interval,
+            "interval_start_ns": start_ns,
+            "interval_end_ns": end_ns,
+            "open": open_price if open_price is not None else 0.0,
+            "high": high_price if high_price is not None else (open_price or 0.0),
+            "low": low_price if low_price is not None else (open_price or 0.0),
+            "close": close_price if close_price is not None else (open_price or 0.0),
+            "volume": volume_value if volume_value is not None else 0.0,
+        }
+        if count_value is not None:
+            candle["count"] = count_value
+        candles.append(candle)
+
+    candles.sort(key=lambda item: item.get("interval_end_ns", 0))
+    return candles
+
+
+def _ns_to_iso(ns: int | None) -> str | None:
+    if ns is None:
+        return None
+    try:
+        dt = datetime.fromtimestamp(ns / 1_000_000_000, tz=NY_TZ)
+    except Exception:
+        return None
+    return dt.isoformat()
+
+
+def _candle_ns(
+    candle: Mapping[str, Any] | None,
+    *,
+    prefer_end: bool = True,
+) -> int | None:
+    if not candle:
+        return None
+
+    ordered_fields = ["interval_end_ns", "interval_start_ns", "timestamp_ns"]
+    if not prefer_end:
+        ordered_fields = ["interval_start_ns", "interval_end_ns", "timestamp_ns"]
+
+    for field in ordered_fields:
+        candidate = _coerce_int(candle.get(field))
+        if candidate is not None:
+            return candidate
+
+    timestamp_value = candle.get("timestamp")
+    dt = _coerce_datetime_any(timestamp_value)
+    if dt is not None:
+        try:
+            return int(dt.timestamp() * 1_000_000_000)
+        except Exception:
+            return None
+    return None
+
+
+def _decode_redis_candle(entry: Any) -> dict[str, Any] | None:
+    if entry is None:
+        return None
+    if isinstance(entry, bytes):
+        entry = entry.decode("utf-8", "ignore")
+    if isinstance(entry, str):
+        text = entry.strip()
+        if not text:
+            return None
+        try:
+            decoded = json.loads(text)
+        except json.JSONDecodeError:
+            return None
+    elif isinstance(entry, Mapping):
+        decoded = dict(entry)
+    else:
+        return None
+    return decoded if isinstance(decoded, dict) else None
+
+
+async def _summarise_redis_series(redis_client: Any, key: str) -> dict[str, Any]:
+    summary: dict[str, Any] = {"count": 0, "oldest": None, "newest": None}
+    try:
+        count = await redis_client.llen(key)
+    except Exception:
+        return summary
+
+    summary["count"] = int(count or 0)
+    if summary["count"] <= 0:
+        return summary
+
+    try:
+        oldest_raw, newest_raw = await asyncio.gather(
+            redis_client.lindex(key, 0),
+            redis_client.lindex(key, -1),
+        )
+    except Exception:
+        return summary
+
+    oldest_candle = _decode_redis_candle(oldest_raw)
+    newest_candle = _decode_redis_candle(newest_raw)
+    summary["oldest"] = _ns_to_iso(_candle_ns(oldest_candle, prefer_end=False))
+    summary["newest"] = _ns_to_iso(_candle_ns(newest_candle, prefer_end=True))
+    return summary
+
+
+def _list_parquet_segments(
+    writer: MarketDataParquetWriter | None,
+    *,
+    symbol: str,
+    interval: str,
+) -> list[dict[str, Any]]:
+    segments: list[dict[str, Any]] = []
+    if writer is None:
+        return segments
+
+    base_dir = getattr(writer, "base_dir", None)
+    if not base_dir:
+        return segments
+
+    directory = Path(base_dir) / "candles" / interval / symbol.upper()
+    if not directory.exists():
+        return segments
+
+    try:
+        from pyarrow import parquet as _parquet  # type: ignore
+    except Exception:  # pragma: no cover - optional dependency
+        _parquet = None
+
+    for file_path in sorted(directory.glob("*.parquet")):
+        entry: dict[str, Any] = {
+            "file": file_path.name,
+            "size": file_path.stat().st_size,
+            "path": str(file_path),
+        }
+        if _parquet is not None:
+            try:
+                table = _parquet.read_table(
+                    file_path,
+                    columns=["interval_start_ns", "interval_end_ns"],
+                )
+                entry["rows"] = table.num_rows
+                if table.num_rows:
+                    start_value = table.column("interval_start_ns")[0].as_py()
+                    end_value = table.column("interval_end_ns")[table.num_rows - 1].as_py()
+                    entry["start"] = _ns_to_iso(_coerce_int(start_value))
+                    entry["end"] = _ns_to_iso(_coerce_int(end_value))
+            except Exception:
+                entry.setdefault("rows", None)
+        entry["modified"] = _ns_to_iso(int(file_path.stat().st_mtime * 1_000_000_000))
+        segments.append(entry)
+
+    return segments
+
+
+async def _ensure_ib_client(logger: Any) -> Any | None:
+    global _IB_CLIENT
+    if _IB_CLIENT is _IB_CLIENT_UNAVAILABLE:
+        return None
+    if _IB_CLIENT is not None:
+        return _IB_CLIENT
+    async with _IB_CLIENT_LOCK:
+        if _IB_CLIENT is None:
+            try:
+                from src.ibkr_client import IBKRClient  # type: ignore
+            except Exception:
+                if logger:
+                    logger.warning(
+                        "IBKR client unavailable; disabling fallback",
+                        exc_info=True,
+                    )
+                _IB_CLIENT = _IB_CLIENT_UNAVAILABLE
+                return None
+            _IB_CLIENT = IBKRClient()
+    return None if _IB_CLIENT is _IB_CLIENT_UNAVAILABLE else _IB_CLIENT
+
+
+async def _ensure_ib_connected(client: Any, logger: Any) -> bool:
+    try:
+        if getattr(client, "connected", False):
+            return True
+    except Exception:
+        pass
+
+    connect_fn = getattr(client, "connect", None)
+    if not callable(connect_fn):
+        if logger:
+            logger.warning("IBKR client missing connect() method; cannot establish connection")
+        return False
+
+    try:
+        result = await asyncio.to_thread(connect_fn)
+    except Exception:
+        if logger:
+            logger.warning("IBKR connect() call failed", exc_info=True)
+        return False
+
+    if not result:
+        if logger:
+            logger.warning("IBKR connect() returned False")
+        return False
+    return True
+
+
+@asynccontextmanager
+async def _exclusive_ib_fetch(key: tuple[str, str, str]):
+    async with _IB_FETCH_LOCK_GUARD:
+        lock = _IB_FETCH_LOCKS.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            _IB_FETCH_LOCKS[key] = lock
+    await lock.acquire()
+    try:
+        yield
+    finally:
+        lock.release()
+        async with _IB_FETCH_LOCK_GUARD:
+            stored = _IB_FETCH_LOCKS.get(key)
+            if stored is lock and not lock.locked():
+                _IB_FETCH_LOCKS.pop(key, None)
+
+
+async def _fetch_candles_from_ib(
+    query: ChartDataQuery,
+    *,
+    interval: str,
+    persist: Callable[[Sequence[Mapping[str, Any]]], Awaitable[None]],
+    logger: Any,
+) -> list[dict[str, Any]]:
+    if not IB_FALLBACK_ENABLED:
+        return []
+
+    client = await _ensure_ib_client(logger)
+    if client is None:
+        if logger:
+            logger.info(
+                "IB fallback disabled; IBKR client unavailable for %s interval=%s",
+                query.symbol,
+                interval,
+            )
+        return []
+
+    lock_key = (query.symbol.upper(), interval, query.duration)
+    async with _exclusive_ib_fetch(lock_key):
+        try:
+            if getattr(client, "connected", False):
+                connected = True
+            else:
+                connected = await _ensure_ib_connected(client, logger)
+        except Exception:
+            connected = await _ensure_ib_connected(client, logger)
+
+        if not connected:
+            if logger:
+                logger.warning(
+                    "IB fallback skipped; IBKR client not connected for %s interval=%s",
+                    query.symbol,
+                    interval,
+                )
+            return []
+
+        try:
+            data_frame = await client.get_historical_data(
+                query.symbol,
+                duration=query.duration,
+                bar_size=query.bar_size,
+                exchange=query.exchange,
+            )
+        except Exception:
+            if logger:
+                logger.warning(
+                    "IBKR historical request failed for %s interval=%s",
+                    query.symbol,
+                    interval,
+                    exc_info=True,
+                )
+            return []
+
+        if data_frame is None:
+            if logger:
+                logger.warning(
+                    "IB fallback returned no dataframe for %s interval=%s",
+                    query.symbol,
+                    interval,
+                )
+            return []
+
+        try:
+            records = data_frame.to_dict("records")
+        except Exception:
+            if logger:
+                logger.warning(
+                    "Failed to serialise IBKR historical data for %s",
+                    query.symbol,
+                    exc_info=True,
+                )
+            return []
+
+        if not records:
+            if logger:
+                logger.info(
+                    "IB fallback returned empty records for %s interval=%s",
+                    query.symbol,
+                    interval,
+                )
+            return []
+
+        candles = _bars_to_candles(records, symbol=query.symbol, interval=interval)
+        if not candles:
+            if logger:
+                logger.info(
+                    "IB fallback produced no candles for %s interval=%s",
+                    query.symbol,
+                    interval,
+                )
+            return []
+
+        try:
+            await persist(candles)
+        except Exception:
+            if logger:
+                logger.warning(
+                    "Failed to persist IBKR fallback candles for %s interval=%s",
+                    query.symbol,
+                    interval,
+                    exc_info=True,
+                )
+            return []
+
+        if logger:
+            logger.info(
+                "IB fallback stored %s candles for %s interval=%s",
+                len(candles),
+                query.symbol,
+                interval,
+            )
+
+        return list(candles)
 
 
 def _filter_candles_by_duration(candles: list[dict[str, Any]], duration_minutes: int) -> list[dict[str, Any]]:
@@ -1006,6 +1462,157 @@ def create_app(*, runtime: MarketDataRuntime | None = None) -> FastAPI:
         runtime._redis = redis_client
         return redis_client
 
+    @app.get("/market/storage")
+    async def market_storage(
+        symbol: str = Query(..., description="Ticker symbol"),
+        include_parquet: bool = Query(True, alias="includeParquet"),
+    ) -> JSONResponse:
+        resolved_symbol = (symbol or "").strip().upper()
+        if not resolved_symbol:
+            raise HTTPException(status_code=400, detail="symbol is required")
+
+        logger = _get_logger()
+        redis_client = await _ensure_redis(logger)
+        writer = _ensure_parquet_writer(logger) if include_parquet else None
+
+        intervals_payload: dict[str, Any] = {}
+        for interval_name in sorted(
+            _INTERVAL_TO_SECONDS.keys(), key=lambda key: _INTERVAL_TO_SECONDS[key]
+        ):
+            key = _series_key(resolved_symbol, interval_name)
+            redis_summary = await _summarise_redis_series(redis_client, key)
+            interval_payload: dict[str, Any] = {
+                "redis": redis_summary,
+                "bar_sizes": _INTERVAL_TO_BAR_SIZES.get(interval_name, []),
+            }
+            if include_parquet:
+                interval_payload["parquet"] = _list_parquet_segments(
+                    writer,
+                    symbol=resolved_symbol,
+                    interval=interval_name,
+                )
+            intervals_payload[interval_name] = interval_payload
+
+        response_payload = {
+            "success": True,
+            "symbol": resolved_symbol,
+            "intervals": intervals_payload,
+        }
+        return JSONResponse(response_payload)
+
+    @app.post("/market/backfill")
+    async def market_backfill(request: BackfillRequest) -> JSONResponse:
+        logger = _get_logger()
+        if not IB_FALLBACK_ENABLED:
+            raise HTTPException(status_code=503, detail="IB fallback disabled")
+
+        bar_key = request.bar_size.strip().lower()
+        interval = _BAR_SIZE_TO_INTERVAL.get(bar_key)
+        if not interval:
+            raise HTTPException(status_code=400, detail="Unsupported bar_size")
+
+        query = ChartDataQuery(
+            symbol=request.symbol,
+            duration=request.duration,
+            bar_size=request.bar_size,
+            exchange=request.exchange,
+        )
+
+        redis_client = await _ensure_redis(logger)
+
+        extra_inputs: list[str] = []
+        if request.extra_bar_sizes:
+            extra_inputs.extend(request.extra_bar_sizes)
+        if request.extra_intervals:
+            extra_inputs.extend(request.extra_intervals)
+
+        extra_intervals: list[str] = []
+        source_seconds = _INTERVAL_TO_SECONDS.get(interval, 0)
+        for raw_value in extra_inputs:
+            if not isinstance(raw_value, str):
+                continue
+            candidate = raw_value.strip().lower()
+            if not candidate:
+                continue
+            mapped = _BAR_SIZE_TO_INTERVAL.get(candidate, candidate)
+            seconds = _INTERVAL_TO_SECONDS.get(mapped)
+            if seconds is None or mapped == interval:
+                continue
+            if source_seconds <= 0 or seconds % source_seconds != 0:
+                continue
+            if mapped not in extra_intervals:
+                extra_intervals.append(mapped)
+
+        persist_summary: dict[str, int] = {}
+
+        async def _persist_ib_candles(candles: Sequence[Mapping[str, Any]]) -> None:
+            if not candles:
+                return
+            cache_limit = min(
+                _MAX_SOURCE_FETCH,
+                max(len(candles) * 2, MAX_RETURNED_CANDLES),
+            )
+            stored_primary = await _persist_candles_for_interval(
+                symbol=query.symbol,
+                interval=interval,
+                candles=candles,
+                redis_client=redis_client,
+                logger=logger,
+                cache_limit=cache_limit,
+            )
+            persist_summary[interval] = len(stored_primary)
+            if extra_intervals and stored_primary:
+                for extra_interval in extra_intervals:
+                    aggregated = _aggregate_candles(
+                        stored_primary,
+                        target_interval=extra_interval,
+                        source_interval=interval,
+                    )
+                    if not aggregated:
+                        continue
+                    stored_extra = await _persist_candles_for_interval(
+                        symbol=query.symbol,
+                        interval=extra_interval,
+                        candles=aggregated,
+                        redis_client=redis_client,
+                        logger=logger,
+                    )
+                    persist_summary[extra_interval] = len(stored_extra)
+
+        candles = await _fetch_candles_from_ib(
+            query,
+            interval=interval,
+            persist=_persist_ib_candles,
+            logger=logger,
+        )
+
+        success = bool(candles)
+        response_payload: dict[str, Any] = {
+            "success": success,
+            "symbol": query.symbol,
+            "interval": interval,
+            "rows": len(candles),
+            "stored": persist_summary,
+            "intervals": [interval, *extra_intervals],
+        }
+
+        redis_summary = await _summarise_redis_series(
+            redis_client, _series_key(query.symbol, interval)
+        )
+        response_payload["redis"] = {interval: redis_summary}
+        for extra_interval in extra_intervals:
+            response_payload["redis"][extra_interval] = await _summarise_redis_series(
+                redis_client,
+                _series_key(query.symbol, extra_interval),
+            )
+
+        if success:
+            response_payload["message"] = f"Fetched {len(candles)} candles from IBKR"
+        else:
+            response_payload["message"] = "No historical data returned by IBKR"
+
+        return JSONResponse(response_payload)
+
     async def _load_series(query: ChartDataQuery, *, allow_empty: bool) -> dict[str, Any]:
         logger = _get_logger()
         bar_key = query.bar_size.strip().lower()
@@ -1064,6 +1671,41 @@ def create_app(*, runtime: MarketDataRuntime | None = None) -> FastAPI:
             result_candles = _filter_candles_by_duration(result_candles, duration_minutes)
             if len(result_candles) >= desired_rows:
                 break
+
+        if not result_candles and IB_FALLBACK_ENABLED:
+            if logger:
+                logger.info(
+                    "Attempting IB fallback for %s interval=%s duration=%s",
+                    query.symbol,
+                    interval,
+                    query.duration,
+                )
+            async def _persist_ib_candles(candles: Sequence[Mapping[str, Any]]) -> None:
+                cache_limit = min(_MAX_SOURCE_FETCH, max(len(candles) * 2, MAX_RETURNED_CANDLES))
+                await _persist_candles_for_interval(
+                    symbol=query.symbol,
+                    interval=interval,
+                    candles=candles,
+                    redis_client=redis_client,
+                    logger=logger,
+                    cache_limit=cache_limit,
+                )
+
+            ib_candles = await _fetch_candles_from_ib(
+                query,
+                interval=interval,
+                persist=_persist_ib_candles,
+                logger=logger,
+            )
+            if ib_candles:
+                result_candles = _combine_candle_sets(result_candles, ib_candles)
+                result_candles = _filter_candles_by_duration(result_candles, duration_minutes)
+            elif logger:
+                logger.warning(
+                    "IB fallback returned no candles for %s interval=%s",
+                    query.symbol,
+                    interval,
+                )
 
         result_candles = _normalise_candles(result_candles)
         if desired_rows > 0 and len(result_candles) > desired_rows:
