@@ -11,6 +11,7 @@ from src.account_service_readiness import AccountServiceReadiness
 from src.routes import service as service_module
 from src.routes.service_registry import SERVICE_REGISTRY
 from src import service_status as service_status_module
+from src.ibbot.redis import RedisConnectionError
 from src.startup_checks import record_sqlite_handle_check, reset_startup_checks
 
 
@@ -164,3 +165,26 @@ def test_service_status_endpoint_returns_registry_order(service_status_app: Fast
     assert queue_entry.get("default_health_key") == "hash:service:health:queue"
     assert queue_entry.get("health_key") == "hash:service:health:queue"
     assert queue_entry.get("status") == "running"
+
+
+def test_service_status_endpoint_returns_redis_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    app = FastAPI()
+
+    async def fake_refresh(**_: object) -> None:
+        return None
+
+    async def fake_get_client(*_: object, **__: object):
+        raise RedisConnectionError("unreachable")
+
+    monkeypatch.setattr(service_module, "refresh_account_service_status", fake_refresh)
+    monkeypatch.setattr(service_status_module, "get_redis_client", fake_get_client)
+
+    app.include_router(service_module.router)
+
+    with TestClient(app) as client:
+        response = client.get("/api/services/status")
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "detail": {"error": "redis_unavailable", "message": "Redis 服务不可用"}
+    }

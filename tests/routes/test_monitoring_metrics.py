@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from src.db import set_engine
 from src.routes import monitoring as monitoring_module
+from src.ibbot.redis import RedisConnectionError
 
 
 @pytest.fixture()
@@ -185,3 +186,18 @@ def test_metrics_route_rejects_invalid_window(metrics_app: FastAPI) -> None:
 
     connection.close()
     assert response.status_code == 400
+
+
+def test_queue_metrics_returns_redis_unavailable(metrics_app: FastAPI, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_get_redis_client(*_: object, **__: object):
+        raise RedisConnectionError("unreachable")
+
+    monkeypatch.setattr(monitoring_module, "get_redis_client", fake_get_redis_client)
+
+    with TestClient(metrics_app) as client:
+        response = client.get("/api/monitoring/queues")
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "detail": {"error": "redis_unavailable", "message": "Redis 服务不可用"}
+    }

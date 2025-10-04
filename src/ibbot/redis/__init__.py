@@ -73,6 +73,17 @@ _pool_lock = asyncio.Lock()
 _pool: ConnectionPool | None = None
 _client_lock = asyncio.Lock()
 _client: Redis | None = None
+_timeout_lock = asyncio.Lock()
+
+
+@dataclass(slots=True)
+class _RedisTimeouts:
+    socket_connect_timeout: float | None
+    socket_timeout: float | None
+    ping_timeout: float | None
+
+
+_timeouts: _RedisTimeouts | None = None
 
 Callback = Callable[[str, str], Optional[Awaitable[None]]]
 
@@ -83,6 +94,87 @@ if sys.version_info < (3, 10):
         return dataclass(*args, **kwargs)
 else:
     _compat_dataclass = dataclass
+
+
+_TIMEOUT_UNSET = object()
+
+
+def _read_timeout_setting(env_name: str, *, multiplier: float = 1.0):
+    raw = os.getenv(env_name, "").strip()
+    if not raw:
+        return _TIMEOUT_UNSET
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning("Invalid %s value %r; ignoring", env_name, raw)
+        return _TIMEOUT_UNSET
+    value *= multiplier
+    if value <= 0:
+        logger.warning("%s must be positive; disabling timeout", env_name)
+        return None
+    return value
+
+
+def _parse_timeout_setting(*entries: tuple[str, float], default: Any = _TIMEOUT_UNSET):
+    for env_name, multiplier in entries:
+        value = _read_timeout_setting(env_name, multiplier=multiplier)
+        if value is _TIMEOUT_UNSET:
+            continue
+        return value
+    return default
+
+
+def _coerce_timeout(value: Any, *, default: float | None = None) -> float | None:
+    if value is _TIMEOUT_UNSET:
+        return default
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
+def _resolve_timeouts() -> _RedisTimeouts:
+    connect_timeout = _coerce_timeout(
+        _parse_timeout_setting(
+            ("REDIS_CONNECT_TIMEOUT", 1.0),
+            ("REDIS_CONNECT_TIMEOUT_MS", 0.001),
+            default=_TIMEOUT_UNSET,
+        ),
+        default=1.0,
+    )
+
+    socket_timeout = _coerce_timeout(
+        _parse_timeout_setting(
+            ("REDIS_SOCKET_TIMEOUT", 1.0),
+            ("REDIS_SOCKET_TIMEOUT_MS", 0.001),
+            default=_TIMEOUT_UNSET,
+        ),
+        default=connect_timeout,
+    )
+
+    ping_default = max(connect_timeout or 0.0, 3.0)
+    ping_timeout = _coerce_timeout(
+        _parse_timeout_setting(
+            ("REDIS_PING_TIMEOUT", 1.0),
+            ("REDIS_PING_TIMEOUT_MS", 0.001),
+            default=_TIMEOUT_UNSET,
+        ),
+        default=ping_default,
+    )
+
+    return _RedisTimeouts(
+        socket_connect_timeout=connect_timeout,
+        socket_timeout=socket_timeout,
+        ping_timeout=ping_timeout,
+    )
+
+
+async def _get_timeouts() -> _RedisTimeouts:
+    global _timeouts
+    if _timeouts is None:
+        async with _timeout_lock:
+            if _timeouts is None:
+                _timeouts = _resolve_timeouts()
+    return _timeouts
 
 
 @_compat_dataclass(slots=True)
@@ -114,11 +206,20 @@ async def get_redis_pool(redis_url: str | None = None, **kwargs: Any) -> Connect
     if _pool is None:
         async with _pool_lock:
             if _pool is None:
+                timeouts = await _get_timeouts()
+                pool_kwargs = dict(kwargs)
+                if (
+                    timeouts.socket_connect_timeout is not None
+                    and "socket_connect_timeout" not in pool_kwargs
+                ):
+                    pool_kwargs["socket_connect_timeout"] = timeouts.socket_connect_timeout
+                if timeouts.socket_timeout is not None and "socket_timeout" not in pool_kwargs:
+                    pool_kwargs["socket_timeout"] = timeouts.socket_timeout
                 _pool = ConnectionPool.from_url(
                     url,
                     encoding="utf-8",
                     decode_responses=True,
-                    **kwargs,
+                    **pool_kwargs,
                 )
     return _pool
 
@@ -131,19 +232,42 @@ async def get_redis_client(redis_url: str | None = None) -> Redis:
     if _client is None:
         async with _client_lock:
             if _client is None:
+                timeouts = await _get_timeouts()
                 pool = await get_redis_pool(redis_url)
-                _client = Redis(connection_pool=pool)
+                client = Redis(connection_pool=pool)
+                try:
+                    ping_timeout = timeouts.ping_timeout
+                    if isinstance(ping_timeout, (int, float)):
+                        await asyncio.wait_for(client.ping(), timeout=ping_timeout)
+                    else:
+                        await client.ping()
+                except asyncio.TimeoutError as exc:
+                    await client.close()
+                    timeout_value = (
+                        f"{float(timeouts.ping_timeout):.2f}s"
+                        if isinstance(timeouts.ping_timeout, (int, float))
+                        else ""
+                    )
+                    message = "Redis ping timed out"
+                    if timeout_value:
+                        message = f"{message} after {timeout_value}"
+                    raise RedisConnectionError(message) from exc
+                except Exception:
+                    await client.close()
+                    raise
+                _client = client
     return _client
 
 
 async def close_global_client() -> None:
     """Close the cached Redis client and underlying pool (mainly for tests)."""
 
-    global _client, _pool
+    global _client, _pool, _timeouts
     client = _client
     _client = None
     pool = _pool
     _pool = None
+    _timeouts = None
     if client is not None:
         try:
             await client.close()
