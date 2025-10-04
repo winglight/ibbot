@@ -104,7 +104,9 @@ def _load_config() -> RedisConfig:
         ("REDIS_SOCKET_TIMEOUT_MS", 0.001),
     )
     if socket_timeout is _UNSET:
-        socket_timeout = connect_timeout if isinstance(connect_timeout, (int, float)) else None
+        # Default to no socket timeout so long-poll Redis commands (e.g. XREAD) can block
+        # until data arrives without triggering client-side disconnects.
+        socket_timeout = None
     ping_timeout = _parse_timeout_setting(
         ("REDIS_PING_TIMEOUT", 1.0),
         ("REDIS_PING_TIMEOUT_MS", 0.001),
