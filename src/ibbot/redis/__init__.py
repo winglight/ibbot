@@ -142,13 +142,14 @@ def _resolve_timeouts() -> _RedisTimeouts:
         default=1.0,
     )
 
+    socket_default = 5.0 if connect_timeout is None else max(connect_timeout, 5.0)
     socket_timeout = _coerce_timeout(
         _parse_timeout_setting(
             ("REDIS_SOCKET_TIMEOUT", 1.0),
             ("REDIS_SOCKET_TIMEOUT_MS", 0.001),
             default=_TIMEOUT_UNSET,
         ),
-        default=connect_timeout,
+        default=socket_default,
     )
 
     ping_default = max(connect_timeout or 0.0, 3.0)
