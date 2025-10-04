@@ -22,6 +22,7 @@ from src.ibbot.redis import (
     DEFAULT_COMMAND_QUEUE,
     DEFAULT_MARKET_STREAM,
     DEFAULT_STREAM_GROUP,
+    RedisError,
     get_queue_length,
     get_redis_client,
     get_stream_metrics,
@@ -32,6 +33,7 @@ logger = logging.getLogger(__name__)
 
 
 QUEUE_MONITOR_HASH_KEY = "hash:service:queue-monitor"
+_REDIS_UNAVAILABLE_DETAIL = {"error": "redis_unavailable", "message": "Redis 服务不可用"}
 
 
 @dataclass(slots=True)
@@ -379,24 +381,29 @@ async def get_queue_metrics(
 ) -> Mapping[str, Any]:
     """Return queue and stream metrics for dashboard consumption."""
 
-    redis = await get_redis_client()
+    try:
+        redis = await get_redis_client()
+        snapshot = await _load_snapshot_from_redis(redis)
+        data_fields = await _collect_data_fields(redis)
+        queue_targets = _normalise_queue_targets(queues)
+        stream_targets = _normalise_stream_targets(streams)
 
-    snapshot = await _load_snapshot_from_redis(redis)
-    data_fields = await _collect_data_fields(redis)
-    queue_targets = _normalise_queue_targets(queues)
-    stream_targets = _normalise_stream_targets(streams)
+        if snapshot:
+            payload = dict(snapshot)
+            payload["requested_queues"] = [target.queue_key for target in queue_targets]
+            payload["requested_streams"] = [
+                {"stream_key": target.stream_key, "group": target.group}
+                for target in stream_targets
+            ]
+            payload["data_fields"] = data_fields
+            return payload
 
-    if snapshot:
-        payload = dict(snapshot)
-        payload["requested_queues"] = [target.queue_key for target in queue_targets]
-        payload["requested_streams"] = [
-            {"stream_key": target.stream_key, "group": target.group} for target in stream_targets
-        ]
-        payload["data_fields"] = data_fields
-        return payload
+        metrics_queues = await _build_queue_metrics(redis, queue_targets)
+        metrics_streams = await _build_stream_metrics(redis, stream_targets)
+    except (RedisError, ConnectionError, asyncio.TimeoutError) as exc:
+        logger.warning("Redis unavailable for monitoring queues", exc_info=True)
+        raise HTTPException(status_code=503, detail=dict(_REDIS_UNAVAILABLE_DETAIL)) from exc
 
-    metrics_queues = await _build_queue_metrics(redis, queue_targets)
-    metrics_streams = await _build_stream_metrics(redis, stream_targets)
     return {
         "timestamp": datetime.utcnow().isoformat(),
         "queues": metrics_queues,

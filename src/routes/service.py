@@ -7,7 +7,7 @@ from loguru import logger
 from pydantic import BaseModel, Field
 
 from src.account_service_readiness import refresh_account_service_status
-from src.service_status import build_service_status_payload
+from src.service_status import RedisUnavailableError, build_service_status_payload
 
 from .auth import audit_log_failure, audit_log_success, get_current_user, require_roles
 from src.service_restart import (
@@ -20,6 +20,7 @@ from src.service_restart import (
 
 
 router = APIRouter()
+_REDIS_UNAVAILABLE_DETAIL = {"error": "redis_unavailable", "message": "Redis 服务不可用"}
 
 
 @router.on_event("startup")
@@ -36,7 +37,14 @@ async def _warm_account_service_status() -> None:
 async def get_service_status() -> dict[str, object]:
     """Return the latest known status for core and auxiliary services."""
 
-    payload = await build_service_status_payload()
+    try:
+        payload = await build_service_status_payload()
+    except RedisUnavailableError as exc:
+        logger.warning("Redis unavailable for service status endpoint", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=dict(_REDIS_UNAVAILABLE_DETAIL),
+        ) from exc
     return dict(payload)
 
 

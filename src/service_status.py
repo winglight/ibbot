@@ -16,7 +16,7 @@ from src.ib_command_health import (
     IB_COMMAND_HEALTH_STALE_AFTER_SEC,
     build_ib_connection_health_payload,
 )
-from src.ibbot.redis import get_redis_client
+from src.ibbot.redis import RedisError, get_redis_client
 from src.routes.service_registry import SERVICE_REGISTRY
 from src.service_restart import RestartMode, get_service_restart_manager
 from src.startup_checks import get_startup_checks
@@ -28,6 +28,7 @@ __all__ = [
     "ServiceStatus",
     "gather_service_statuses",
     "build_service_status_payload",
+    "RedisUnavailableError",
 ]
 
 
@@ -417,13 +418,21 @@ async def _build_dom_service_status(redis: Any | None) -> ServiceStatus:
     return _build_status_from_payload(DOM_SERVICE_NAME, payload)
 
 
+class RedisUnavailableError(RuntimeError):
+    """Raised when Redis cannot be reached for service status aggregation."""
+
+
 async def gather_service_statuses(redis: Any | None = None) -> Sequence[ServiceStatus]:
     """Collect service statuses using Redis health hashes."""
 
     close_client = False
     client = redis
     if client is None:
-        client = await get_redis_client()
+        try:
+            client = await get_redis_client()
+        except (RedisError, ConnectionError, asyncio.TimeoutError) as exc:
+            logger.warning("Redis unavailable for service status collection", exc_info=True)
+            raise RedisUnavailableError("Redis unavailable") from exc
         close_client = True
 
     statuses: list[ServiceStatus] = [
