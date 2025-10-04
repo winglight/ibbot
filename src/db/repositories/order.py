@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import uuid
 from typing import Any, Mapping
 
 from src.db.async_support import run_in_thread
@@ -100,6 +101,12 @@ def _normalise_raw(value: Any) -> Any:
     return str(value)
 
 
+def _generate_order_id(symbol: Any) -> str:
+    base = _coerce_str(symbol) or "order"
+    safe = "".join(ch.lower() for ch in base if ch.isalnum()) or "order"
+    return f"auto-{safe}-{uuid.uuid4().hex}"
+
+
 def _normalise_order_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     request = _coerce_mapping(payload.get("request")) or {}
     response = _coerce_mapping(payload.get("response")) or {}
@@ -125,13 +132,39 @@ def _normalise_order_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         return None
 
     order_identifier = _first_nonempty(
-        _lookup("order_id", "ib_order_id", "permid", "permId"),
+        _lookup("order_id", "orderId", "ib_order_id", "ibOrderId", "permid", "permId"),
         payload.get("id"),
         payload.get("command_id"),
     )
+
     symbol_value = _first_nonempty(_lookup("symbol", "ticker"))
-    if not order_identifier or not symbol_value:
+
+    contract_mapping = _coerce_mapping(_lookup("contract"))
+    if contract_mapping is not None:
+        symbol_value = _first_nonempty(
+            symbol_value,
+            contract_mapping.get("symbol"),
+            contract_mapping.get("localSymbol"),
+            contract_mapping.get("ticker"),
+        )
+
+    instrument_mapping = _coerce_mapping(_lookup("instrument"))
+    if instrument_mapping is not None:
+        symbol_value = _first_nonempty(
+            symbol_value,
+            instrument_mapping.get("symbol"),
+            instrument_mapping.get("ticker"),
+        )
+
+    symbol_text = _coerce_str(symbol_value)
+    if not symbol_text:
         raise RepositoryValidationError("Order payload is missing identifying fields")
+
+    if not order_identifier:
+        order_identifier = _generate_order_id(symbol_text)
+
+    order_identifier = str(order_identifier)
+    symbol_value = symbol_text
 
     side_value = _first_nonempty(_lookup("action", "side"))
     side = str(side_value).upper() if side_value is not None else "UNKNOWN"

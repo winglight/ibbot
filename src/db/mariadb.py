@@ -60,16 +60,25 @@ def _connect_mysql(url: str) -> Any:
     charset = query_params.get("charset", ["utf8mb4"])[0]
     database = parsed.path.lstrip("/") or None
 
-    return pymysql.connect(  # pragma: no cover - depends on optional driver
-        host=parsed.hostname or "localhost",
-        port=parsed.port or 3306,
-        user=parsed.username or "",
-        password=parsed.password or "",
-        database=database,
-        charset=charset,
-        cursorclass=pymysql.cursors.DictCursor,
-        autocommit=True,
-    )
+    host = parsed.hostname or "localhost"
+    port = parsed.port or 3306
+
+    try:
+        return pymysql.connect(  # pragma: no cover - depends on optional driver
+            host=host,
+            port=port,
+            user=parsed.username or "",
+            password=parsed.password or "",
+            database=database,
+            charset=charset,
+            cursorclass=pymysql.cursors.DictCursor,
+            autocommit=True,
+        )
+    except pymysql.err.MySQLError as exc:  # pragma: no cover - connection failures depend on env
+        message = exc.args[1] if len(exc.args) > 1 else str(exc)
+        raise MariaDBConfigurationError(
+            f"Unable to connect to MariaDB at {host}:{port}: {message}"
+        ) from exc
 
 
 def set_engine(engine: Any | Callable[[], Any] | None, *, close: bool | None = None) -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -73,6 +74,26 @@ class RiskSnapshotRepository:
 
     def __init__(self, *, logger_name: str = "db.risk") -> None:
         self._logger = get_logger(logger_name)
+        self._disabled_reason: str | None = None
+
+    def _is_disabled(self) -> bool:
+        if self._disabled_reason is None:
+            return False
+        if self._logger.isEnabledFor(logging.DEBUG):
+            self._logger.debug(
+                "Skipping risk snapshot persistence; disabled: %s",
+                self._disabled_reason,
+            )
+        return True
+
+    def _disable(self, reason: str) -> None:
+        if self._disabled_reason is not None:
+            return
+        self._disabled_reason = reason or "MariaDB configuration error"
+        self._logger.warning(
+            "Disabling risk snapshot persistence: %s",
+            self._disabled_reason,
+        )
 
     async def save_config_snapshot(
         self,
@@ -90,10 +111,13 @@ class RiskSnapshotRepository:
             "updated_at_text": str(updated_at) if updated_at is not None else None,
             "captured_at": _parse_datetime(captured_at) or _utc_now(),
         }
+        if self._is_disabled():
+            return
         try:
             await run_in_thread(self._write_config_snapshot, row)
         except MariaDBConfigurationError as exc:
-            raise RiskSnapshotRepositoryError(str(exc)) from exc
+            self._disable(str(exc))
+            return
         except Exception as exc:  # pragma: no cover - log and wrap
             self._logger.exception(
                 "Failed to persist risk config snapshot for service %s",
@@ -144,12 +168,15 @@ class RiskSnapshotRepository:
         if not rows:
             return
 
+        if self._is_disabled():
+            return
         try:
             await run_in_thread(self._write_rule_snapshots, rows)
         except RepositoryValidationError:
             raise
         except MariaDBConfigurationError as exc:
-            raise RiskSnapshotRepositoryError(str(exc)) from exc
+            self._disable(str(exc))
+            return
         except Exception as exc:  # pragma: no cover - log and wrap
             self._logger.exception(
                 "Failed to persist risk rule snapshots for service %s",
@@ -194,10 +221,13 @@ class RiskSnapshotRepository:
         if not rows:
             return
 
+        if self._is_disabled():
+            return
         try:
             await run_in_thread(self._bulk_upsert_rules, service, rows, symbols)
         except MariaDBConfigurationError as exc:
-            raise RiskSnapshotRepositoryError(str(exc)) from exc
+            self._disable(str(exc))
+            return
         except Exception as exc:  # pragma: no cover - log and wrap
             self._logger.exception(
                 "Failed to upsert risk rule snapshots for service %s (count=%d)",
