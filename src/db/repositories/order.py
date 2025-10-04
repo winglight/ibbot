@@ -156,9 +156,7 @@ def _normalise_order_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
             instrument_mapping.get("ticker"),
         )
 
-    symbol_text = _coerce_str(symbol_value)
-    if not symbol_text:
-        raise RepositoryValidationError("Order payload is missing identifying fields")
+    symbol_text = _coerce_str(symbol_value) or "UNKNOWN"
 
     if not order_identifier:
         order_identifier = _generate_order_id(symbol_text)

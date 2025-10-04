@@ -2,7 +2,7 @@ name: ibbot-stack
 
 x-app-env: &app-environment
   env_file:
-    - ./.env
+    - ../.env
   environment:
     REDIS_HOST: redis
     REDIS_PORT: 6379

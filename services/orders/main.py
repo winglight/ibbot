@@ -228,6 +228,13 @@ _REQUEST_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
 
 
 _RESULT_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
+    "symbol": (
+        "symbol",
+        "contract.symbol",
+        "contract.localSymbol",
+        "contract.ticker",
+        "instrument.ticker",
+    ),
     "order_id": ("order_id", "ib_order_id", "permid", "permId", "id"),
     "status": ("order_status", "status", "orderStatus"),
     "filled_quantity": ("filled", "filled_quantity", "filledQuantity"),
