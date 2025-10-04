@@ -562,34 +562,6 @@
             </div>
         </div>
 
-        <div class="row mb-4">
-            <div class="col-12">
-                <div class="card" id="websocketRunbookCard">
-                    <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
-                        <div class="d-flex align-items-center gap-2 flex-wrap">
-                            <h5 class="mb-0 d-flex align-items-center gap-2">
-                                <i class="fas fa-wrench"></i>
-                                <span>WebSocket 数据修复任务</span>
-                            </h5>
-                            <span class="badge bg-secondary" id="websocketRunbookStatusBadge">未初始化</span>
-                        </div>
-                        <button type="button" class="btn btn-primary btn-sm" id="startWebsocketRunbookBtn">
-                            <i class="fas fa-play me-1"></i>开始任务
-                        </button>
-                    </div>
-                    <div class="card-body">
-                        <p class="text-muted mb-2" id="websocketRunbookSummary">
-                            根据 WebSocket 数据流检查清单执行自动化环境核对与提醒。
-                        </p>
-                        <div class="small text-muted mb-3" id="websocketRunbookMeta"></div>
-                        <ul class="list-group" id="websocketRunbookTasks">
-                            <li class="list-group-item text-muted">加载任务中...</li>
-                        </ul>
-                    </div>
-                </div>
-            </div>
-        </div>
-
         <!-- Trading Panel removed: DOM monitor moved into monitor modal -->
 
         <!-- Data Tables -->
@@ -2143,46 +2115,27 @@
             </div>
         </div>
         <div class="col-lg-6 mb-3">
-            <div class="card" id="dbWriteRateCard">
-                <div class="card-header d-flex justify-content-between align-items-center">
-                    <h5 class="mb-0"><i class="fas fa-wave-square me-2"></i>指标写入速率</h5>
-                    <div class="d-flex align-items-center gap-2">
-                        <select class="form-select form-select-sm" id="dbWindowSelect">
-                            <option value="30m">30 分钟</option>
-                            <option value="1h" selected>1 小时</option>
-                            <option value="6h">6 小时</option>
-                            <option value="12h">12 小时</option>
-                            <option value="24h">24 小时</option>
-                        </select>
-                        <button class="btn btn-sm btn-outline-light" id="refreshDbMetricsBtn" title="Refresh">
-                            <i class="fas fa-sync-alt"></i>
-                        </button>
+            <div class="card h-100" id="websocketRunbookCard">
+                <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
+                    <div class="d-flex align-items-center gap-2 flex-wrap">
+                        <h5 class="mb-0 d-flex align-items-center gap-2">
+                            <i class="fas fa-wrench"></i>
+                            <span>WebSocket 数据修复任务</span>
+                        </h5>
+                        <span class="badge bg-secondary" id="websocketRunbookStatusBadge">未初始化</span>
                     </div>
+                    <button type="button" class="btn btn-primary btn-sm" id="startWebsocketRunbookBtn">
+                        <i class="fas fa-play me-1"></i>开始任务
+                    </button>
                 </div>
                 <div class="card-body">
-                    <div class="row g-2 align-items-center mb-2 small">
-                        <div class="col-auto">
-                            <label for="dbServiceSelect" class="col-form-label">服务</label>
-                        </div>
-                        <div class="col-auto">
-                            <select class="form-select form-select-sm" id="dbServiceSelect">
-                                <option value="">全部</option>
-                                <option value="queue-monitor">queue-monitor</option>
-                                <option value="market-data">market-data</option>
-                                <option value="ib-command">ib-command</option>
-                            </select>
-                        </div>
-                        <div class="col-auto">
-                            <label for="dbMetricInput" class="col-form-label">Metric</label>
-                        </div>
-                        <div class="col-auto">
-                            <input type="text" class="form-control form-control-sm" id="dbMetricInput" placeholder="可选关键词">
-                        </div>
-                    </div>
-                    <div class="ratio ratio-16x9">
-                        <canvas id="dbWriteRateChart"></canvas>
-                    </div>
-                    <div class="small text-muted mt-2" id="dbSummaryText">-</div>
+                    <p class="text-muted mb-2" id="websocketRunbookSummary">
+                        根据 WebSocket 数据流检查清单执行自动化环境核对与提醒。
+                    </p>
+                    <div class="small text-muted mb-3" id="websocketRunbookMeta"></div>
+                    <ul class="list-group" id="websocketRunbookTasks">
+                        <li class="list-group-item text-muted">加载任务中...</li>
+                    </ul>
                 </div>
             </div>
         </div>
