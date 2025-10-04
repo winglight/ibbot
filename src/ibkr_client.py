@@ -972,8 +972,14 @@ class IBKRClient:
         else:
             return self.get_stock_contract(symbol, exchange, currency)
     
-    async def get_historical_data(self, symbol: str, duration: str = '1 Y',
-                                bar_size: str = '1 day', exchange: str = 'SMART') -> pd.DataFrame:
+    async def get_historical_data(
+        self,
+        symbol: str,
+        duration: str = '1 Y',
+        bar_size: str = '1 day',
+        exchange: str = 'SMART',
+        what_to_show: str = 'TRADES',
+    ) -> pd.DataFrame:
         """获取历史数据（在连接线程事件循环中执行，避免事件循环错误）"""
         try:
             # 获取IB实例
@@ -995,8 +1001,12 @@ class IBKRClient:
             qc = qualified[0]
             # 使用异步版本请求历史数据
             bars = await ib.reqHistoricalDataAsync(
-                contract=contract, endDateTime='', durationStr=duration,
-                barSizeSetting=bar_size, whatToShow='TRADES', useRTH=False
+                contract=contract,
+                endDateTime='',
+                durationStr=duration,
+                barSizeSetting=bar_size,
+                whatToShow=what_to_show,
+                useRTH=False,
             )
             if not bars:
                 ibkr_logger.warning(f"No historical data returned for {symbol}")

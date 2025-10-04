@@ -89,6 +89,13 @@ uvicorn main:app --reload
 4. 在订单面板或 `/api/place_order` 下单，并使用队列/日志面板观察执行情况。
 5. 通过风险、策略、DOM 面板调整配置；所有操作均有对应 API。
 
+### 📈 历史/图表数据的数据源选择
+
+- `/api/chart_data` 请求体新增 `data_type` 字段（默认 `TRADES`），用于控制 IBKR `whatToShow` 参数。
+- 若指定的数据源为空，系统会自动按 `TRADES → MIDPOINT → BID_ASK` 的顺序回退，直至获取到有效蜡烛数据。
+- 命中回退后，返回结果会在响应体与内存/数据库缓存中标记最终使用的数据源，便于后续请求复用。
+- 旧数据在缓存中仍可读取，若需要强制刷新请设置 `force_refresh=true` 或禁用缓存。
+
 ## 📡 WebSocket 与通知
 
 - `/ws`：推送订单、账户、策略、队列等事件。
