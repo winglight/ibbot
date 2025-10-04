@@ -709,6 +709,27 @@ async def get_metrics_write_rate(
         window=window, service=service, metric=metric, aggregate=aggregate
     )
 
+@router.get("/api/monitoring/influx/write-rate", include_in_schema=False)
+@router.get("/monitoring/influx/write-rate", include_in_schema=False)
+async def get_metrics_write_rate_legacy(
+    window: str = Query(default="1h"),
+    service: str | None = Query(default=None),
+    metric: str | None = Query(default=None),
+    aggregate: str = Query(default="sum"),
+) -> Mapping[str, Any]:
+    """Backward compatible alias for legacy influx write-rate endpoint."""
+
+    payload = build_metric_series_payload(
+        window=window, service=service, metric=metric, aggregate=aggregate
+    )
+    if isinstance(payload, dict):
+        payload = dict(payload)
+        payload.setdefault("legacy", True)
+        payload.setdefault("source", payload.get("source") or "legacy-route")
+        return payload
+    return payload
+
+
 
 __all__ = [
     "router",

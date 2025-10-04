@@ -109,6 +109,30 @@ def test_metrics_route_returns_series(metrics_app: FastAPI) -> None:
     assert pytest.approx(summary["queue-length"]["average"], rel=1e-6) == 5.0
 
 
+def test_metrics_legacy_influx_route_alias(metrics_app: FastAPI) -> None:
+    connection = sqlite3.connect(":memory:", check_same_thread=False)
+    connection.row_factory = sqlite3.Row
+    set_engine(connection)
+    _prepare_metrics_table(connection)
+
+    with TestClient(metrics_app) as client:
+        response = client.get("/api/monitoring/influx/write-rate", params={"window": "1h"})
+        secondary = client.get("/monitoring/influx/write-rate", params={"window": "1h"})
+
+    connection.close()
+    assert response.status_code == 200
+    assert secondary.status_code == 200
+
+    payload = response.json()
+    legacy = secondary.json()
+    assert payload["success"] is True
+    assert payload.get("legacy") is True
+    assert payload["query"]["window"] == "1h"
+    assert legacy.get("legacy") is True
+    assert legacy["query"]["window"] == "1h"
+    assert payload["series"] == legacy["series"]
+
+
 def test_metrics_route_filters_by_service(metrics_app: FastAPI) -> None:
     connection = sqlite3.connect(":memory:", check_same_thread=False)
     connection.row_factory = sqlite3.Row
