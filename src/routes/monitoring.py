@@ -2,16 +2,14 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
-from dataclasses import dataclass
-from datetime import datetime
-import json
-from typing import Any, Callable, Iterable, Mapping, Sequence
-
 import asyncio
+import json
+import logging
 import re
 from collections import defaultdict
 from datetime import datetime, timedelta
+from dataclasses import dataclass
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from fastapi import APIRouter, HTTPException, Query
 
@@ -30,6 +28,7 @@ from src.ibbot.redis import (
 )
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 QUEUE_MONITOR_HASH_KEY = "hash:service:queue-monitor"
@@ -405,6 +404,25 @@ async def get_queue_metrics(
         "source": "live",
         "data_fields": data_fields,
     }
+
+
+@router.post("/api/monitoring/queues/clear-cache")
+async def clear_monitoring_redis_cache() -> Mapping[str, Any]:
+    """Flush all keys in the configured Redis database."""
+
+    try:
+        redis = await get_redis_client()
+    except Exception as exc:  # pragma: no cover - depends on redis availability
+        logger.exception("Redis client unavailable for cache clear")
+        raise HTTPException(status_code=503, detail="Redis 客户端不可用") from exc
+
+    try:
+        await redis.flushdb()
+    except Exception as exc:  # pragma: no cover - defensive guard
+        logger.exception("Failed to flush Redis cache")
+        raise HTTPException(status_code=500, detail="清理 Redis 缓存失败") from exc
+
+    return {"success": True, "message": "Redis 缓存已清理"}
 
 
 _WINDOW_PATTERN = re.compile(r"^(?P<value>\d+)(?P<unit>[smhd])$", re.IGNORECASE)

@@ -37,6 +37,7 @@
                 queue: REFRESH_STATE.idle,
                 db: REFRESH_STATE.idle,
             };
+            this.clearingRedisCache = false;
 
             this.elements = {
                 queueSourceBadge: document.getElementById('queueMetricsSource'),
@@ -50,6 +51,7 @@
                 dbWindow: document.getElementById('dbWindowSelect'),
                 dbService: document.getElementById('dbServiceSelect'),
                 dbMetric: document.getElementById('dbMetricInput'),
+                queueClearBtn: document.getElementById('clearRedisCacheBtn'),
                 queueRefreshBtn: document.getElementById('refreshQueueMetricsBtn'),
                 dbRefreshBtn: document.getElementById('refreshDbMetricsBtn'),
             };
@@ -76,6 +78,11 @@
             if (this.elements.queueRefreshBtn) {
                 this.elements.queueRefreshBtn.addEventListener('click', () => {
                     this.refreshQueueMetrics({ manual: true }).catch(() => {});
+                });
+            }
+            if (this.elements.queueClearBtn) {
+                this.elements.queueClearBtn.addEventListener('click', () => {
+                    this.clearRedisCache().catch(() => {});
                 });
             }
             if (this.elements.dbRefreshBtn) {
@@ -111,6 +118,42 @@
                     this.refreshDbMetrics().catch(() => {});
                 }
             });
+        }
+
+        async clearRedisCache() {
+            if (this.clearingRedisCache) {
+                return;
+            }
+
+            this.clearingRedisCache = true;
+            const button = this.elements.queueClearBtn;
+            const originalHtml = button ? button.innerHTML : null;
+
+            if (button) {
+                button.disabled = true;
+                button.innerHTML = '<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>清理中';
+            }
+
+            try {
+                await this.app.apiCall('/monitoring/queues/clear-cache', {
+                    method: 'POST',
+                    body: JSON.stringify({}),
+                    timeout: 20000,
+                });
+                this.app?.showAlert?.('success', 'Redis 缓存已清理');
+                await this.refreshQueueMetrics({ manual: true });
+            } catch (error) {
+                console.error('Failed to clear Redis cache', error);
+                const isReadOnly = error?.code === 'READ_ONLY' || error?.isReadOnly;
+                const message = isReadOnly ? '访客模式无法执行清理操作' : (error?.message || '清理 Redis 缓存失败');
+                this.app?.showAlert?.('danger', message);
+            } finally {
+                if (button) {
+                    button.disabled = false;
+                    button.innerHTML = originalHtml;
+                }
+                this.clearingRedisCache = false;
+            }
         }
 
         destroy() {
