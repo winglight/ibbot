@@ -5,11 +5,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 from collections import defaultdict
 from datetime import datetime, timedelta
 from dataclasses import dataclass
-from typing import Any, Callable, Iterable, Mapping, Sequence
+from typing import Any, Awaitable, Callable, Iterable, Mapping, Sequence
 
 from fastapi import APIRouter, HTTPException, Query
 
@@ -34,6 +35,46 @@ logger = logging.getLogger(__name__)
 
 QUEUE_MONITOR_HASH_KEY = "hash:service:queue-monitor"
 _REDIS_UNAVAILABLE_DETAIL = {"error": "redis_unavailable", "message": "Redis 服务不可用"}
+DEFAULT_MONITORING_REDIS_COMMAND_TIMEOUT = 2.0
+
+
+def _load_monitoring_command_timeout() -> float:
+    raw = os.getenv("MONITORING_REDIS_COMMAND_TIMEOUT", "").strip()
+    if not raw:
+        return DEFAULT_MONITORING_REDIS_COMMAND_TIMEOUT
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning(
+            "Invalid MONITORING_REDIS_COMMAND_TIMEOUT value", extra={"value": raw}
+        )
+        return DEFAULT_MONITORING_REDIS_COMMAND_TIMEOUT
+    if value <= 0:
+        logger.warning(
+            "MONITORING_REDIS_COMMAND_TIMEOUT must be positive", extra={"value": value}
+        )
+        return DEFAULT_MONITORING_REDIS_COMMAND_TIMEOUT
+    return value
+
+
+MONITORING_REDIS_COMMAND_TIMEOUT = _load_monitoring_command_timeout()
+
+
+async def _await_redis_command(awaitable: Awaitable[Any], *, action: str | None = None) -> Any:
+    """Await a Redis command with a timeout and uniform error handling."""
+
+    timeout = MONITORING_REDIS_COMMAND_TIMEOUT
+    try:
+        return await asyncio.wait_for(awaitable, timeout=timeout)
+    except asyncio.TimeoutError as exc:
+        logger.warning("Redis command timed out", extra={"action": action, "timeout": timeout})
+        raise HTTPException(status_code=503, detail=dict(_REDIS_UNAVAILABLE_DETAIL)) from exc
+    except TimeoutError as exc:  # pragma: no cover - defensive for synchronous APIs
+        logger.warning("Redis command timed out (native)", extra={"action": action, "timeout": timeout})
+        raise HTTPException(status_code=503, detail=dict(_REDIS_UNAVAILABLE_DETAIL)) from exc
+    except (RedisError, ConnectionError) as exc:
+        logger.warning("Redis command failed", extra={"action": action, "error": str(exc)})
+        raise HTTPException(status_code=503, detail=dict(_REDIS_UNAVAILABLE_DETAIL)) from exc
 
 
 @dataclass(slots=True)
@@ -124,7 +165,9 @@ async def _sample_hash_fields(redis, key: str, *, limit: int = 3) -> tuple[list[
         if callable(hscan):
             cursor: int | str = 0
             while True:
-                cursor, data = await hscan(key, cursor=cursor, count=max(limit * 2, 10))
+                cursor, data = await _await_redis_command(
+                    hscan(key, cursor=cursor, count=max(limit * 2, 10)), action="hscan"
+                )
                 mapping: Mapping[Any, Any]
                 if isinstance(data, Mapping):
                     mapping = data
@@ -145,7 +188,7 @@ async def _sample_hash_fields(redis, key: str, *, limit: int = 3) -> tuple[list[
         else:
             hgetall = getattr(redis, "hgetall", None)
             if callable(hgetall):
-                data = await hgetall(key)
+                data = await _await_redis_command(hgetall(key), action="hgetall")
                 if isinstance(data, Mapping):
                     items = list(data.items())
                     has_more = len(items) > limit
@@ -158,7 +201,13 @@ async def _sample_hash_fields(redis, key: str, *, limit: int = 3) -> tuple[list[
                         )
             else:
                 error = "Redis client does not support hash scanning"
+    except HTTPException:
+        entries.clear()
+        has_more = False
+        raise
     except Exception as exc:  # pragma: no cover - depends on redis client implementation
+        entries.clear()
+        has_more = False
         error = str(exc)
     return entries[:limit], has_more, error
 
@@ -170,7 +219,12 @@ async def _collect_scan_keys(redis, *, pattern: str, limit: int = 5) -> tuple[li
     scan_iter = getattr(redis, "scan_iter", None)
     try:
         if callable(scan_iter):
-            async for raw in scan_iter(match=pattern, count=max(limit * 5, 20)):
+            iterator = scan_iter(match=pattern, count=max(limit * 5, 20))
+            while True:
+                try:
+                    raw = await _await_redis_command(iterator.__anext__(), action="scan_iter")
+                except StopAsyncIteration:
+                    break
                 key = _to_str(raw)
                 if key:
                     keys.append(key)
@@ -182,7 +236,10 @@ async def _collect_scan_keys(redis, *, pattern: str, limit: int = 5) -> tuple[li
             if callable(scan):
                 cursor: int | str = 0
                 while True:
-                    cursor, batch = await scan(cursor=cursor, match=pattern, count=max(limit * 5, 20))
+                    cursor, batch = await _await_redis_command(
+                        scan(cursor=cursor, match=pattern, count=max(limit * 5, 20)),
+                        action="scan",
+                    )
                     for raw in batch or []:
                         key = _to_str(raw)
                         if key:
@@ -194,7 +251,13 @@ async def _collect_scan_keys(redis, *, pattern: str, limit: int = 5) -> tuple[li
                         break
             else:
                 error = "Redis client does not support key scanning"
+    except HTTPException:
+        keys.clear()
+        has_more = False
+        raise
     except Exception as exc:  # pragma: no cover - depends on redis client implementation
+        keys.clear()
+        has_more = False
         error = str(exc)
     return keys[:limit], has_more, error
 
@@ -287,6 +350,8 @@ async def _collect_data_fields(redis) -> dict[str, Any]:
 
     keys = ("configs", "orders", "subscriptions")
     for key, result in zip(keys, results):
+        if isinstance(result, HTTPException):
+            raise result
         if isinstance(result, Exception):  # pragma: no cover - defensive guard
             summary[key]["error"] = str(result)
             continue
@@ -296,9 +361,13 @@ async def _collect_data_fields(redis) -> dict[str, Any]:
 
 async def _load_snapshot_from_redis(redis) -> dict[str, Any] | None:
     try:
-        payload = await redis.hgetall(QUEUE_MONITOR_HASH_KEY)
+        payload = await _await_redis_command(
+            redis.hgetall(QUEUE_MONITOR_HASH_KEY), action="hgetall_queue_monitor"
+        )
+    except HTTPException:
+        raise
     except Exception as exc:  # pragma: no cover - redis connection issues
-        raise HTTPException(status_code=503, detail=f"Redis error: {exc}") from exc
+        raise HTTPException(status_code=503, detail=dict(_REDIS_UNAVAILABLE_DETAIL)) from exc
 
     if not payload:
         return None
@@ -330,9 +399,16 @@ async def _build_queue_metrics(
     results: list[dict[str, Any]] = []
     for target in queues:
         try:
-            length = await get_queue_length(queue_key=target.queue_key, redis=redis)
+            length = await _await_redis_command(
+                get_queue_length(queue_key=target.queue_key, redis=redis),
+                action="queue_length",
+            )
+        except HTTPException:
+            results.clear()
+            raise
         except Exception as exc:  # pragma: no cover - redis connection issues
-            raise HTTPException(status_code=503, detail=f"Redis error: {exc}") from exc
+            results.clear()
+            raise HTTPException(status_code=503, detail=dict(_REDIS_UNAVAILABLE_DETAIL)) from exc
         results.append(
             {
                 "name": target.name or target.queue_key,
@@ -352,13 +428,20 @@ async def _build_stream_metrics(
     results: list[dict[str, Any]] = []
     for target in streams:
         try:
-            metrics = await get_stream_metrics(
-                stream_key=target.stream_key,
-                group=target.group,
-                redis=redis,
+            metrics = await _await_redis_command(
+                get_stream_metrics(
+                    stream_key=target.stream_key,
+                    group=target.group,
+                    redis=redis,
+                ),
+                action="stream_metrics",
             )
+        except HTTPException:
+            results.clear()
+            raise
         except Exception as exc:  # pragma: no cover - redis connection issues
-            raise HTTPException(status_code=503, detail=f"Redis error: {exc}") from exc
+            results.clear()
+            raise HTTPException(status_code=503, detail=dict(_REDIS_UNAVAILABLE_DETAIL)) from exc
         pending = int(metrics.get("pending", 0) or 0)
         stale_seconds = float(metrics.get("stale_ms", 0) or 0) / 1000.0
         results.append(
