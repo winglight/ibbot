@@ -301,6 +301,31 @@ async def test_risk_service_history_queries(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 @pytest.mark.anyio("asyncio")
+async def test_risk_service_force_refresh_toggles(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("RISK_SERVICE_URL", raising=False)
+
+    captured: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append({
+            "path": request.url.path,
+            "params": dict(request.url.params),
+        })
+        return httpx.Response(200, json={"success": True})
+
+    client = RiskServiceClient(transport=httpx.MockTransport(handler), base_url="http://risk")
+
+    await client.list_rules(force_refresh=True)
+    await client.get_config(force_refresh=False)
+
+    assert captured[0]["path"] == "/risk/rules"
+    assert captured[0]["params"].get("force_refresh") == "true"
+    assert captured[1]["path"] == "/risk/config"
+    # Explicit False should still send the parameter for clarity
+    assert captured[1]["params"].get("force_refresh") == "false"
+
+
+@pytest.mark.anyio("asyncio")
 async def test_read_hash_normalises_bytes() -> None:
     class DummyRedis:
         def __init__(self) -> None:

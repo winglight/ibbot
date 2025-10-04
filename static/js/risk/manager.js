@@ -43,7 +43,7 @@
                         return result;
                     }
                 }
-                return await this._fetchViaHttp();
+                return await this._fetchViaHttp(options);
             } catch (error) {
                 console.error('Failed to load risk rules:', error);
                 if (this.app && typeof this.app.setPanelLoading === 'function') {
@@ -53,12 +53,15 @@
             }
         }
 
-        async _fetchViaHttp() {
+        async _fetchViaHttp(options = {}) {
             try {
                 if (this.app && typeof this.app.setPanelLoading === 'function') {
                     this.app.setPanelLoading('risk-rules', true);
                 }
-                const riskData = await this.app.apiCall('/risk_rules');
+                const forceRefresh = Boolean(options.force);
+                // Administrators can set options.force to true to bypass the in-memory snapshot.
+                const path = forceRefresh ? '/risk_rules?force_refresh=true' : '/risk_rules';
+                const riskData = await this.app.apiCall(path);
                 this.applySnapshot({ type: 'risk_rules', success: riskData?.success !== false, rules: riskData?.rules || {}, source: 'http' });
                 return 'http';
             } catch (error) {
@@ -68,6 +71,13 @@
                 }
                 throw error;
             }
+        }
+
+        async fetchRiskConfig(options = {}) {
+            // Pass { force: true } to bypass the runtime snapshot and pull directly from Redis.
+            const forceRefresh = Boolean(options.force);
+            const path = forceRefresh ? '/risk-config?force_refresh=true' : '/risk-config';
+            return this.app.apiCall(path);
         }
 
         applySnapshot(payload) {
@@ -637,7 +647,7 @@
 
         async editPositionRiskRule(symbol, currentPrice, avgCost, position = 0, presetStopLoss = '', presetTakeProfit = '') {
             try {
-                const config = await this.app.apiCall('/risk-config');
+                const config = await this.fetchRiskConfig();
 
                 const stopLossRatio = config.stop_loss_ratio || 0.025;
                 const takeProfitRatio = config.take_profit_ratio || 0.025;
@@ -705,7 +715,7 @@
                     let takeProfitRatio = 0.025;
 
                     try {
-                        const config = await this.app.apiCall('/risk-config');
+                        const config = await this.fetchRiskConfig();
                         const leverageMap = (config && config.leverage) ? config.leverage : {};
                         const lev = leverageMap[symbol] || leverageMap[symbol?.toUpperCase?.()] || (symbol === 'MNQ' ? (leverageMap['MNQ'] || 20) : null);
                         if (lev && !isNaN(lev) && lev > 0) {

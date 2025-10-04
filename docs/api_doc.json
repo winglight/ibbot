@@ -415,7 +415,12 @@
         "path": "/api/risk_rules",
         "summary": "Get Risk Rules",
         "requires_auth": false,
-        "query_params": null,
+        "query_params": [
+          {
+            "name": "force_refresh",
+            "required": false
+          }
+        ],
         "headers": null,
         "request_body": null,
         "response_codes": [
@@ -487,7 +492,12 @@
         "path": "/api/risk-config",
         "summary": "Get Risk Config",
         "requires_auth": false,
-        "query_params": null,
+        "query_params": [
+          {
+            "name": "force_refresh",
+            "required": false
+          }
+        ],
         "headers": null,
         "request_body": null,
         "response_codes": [

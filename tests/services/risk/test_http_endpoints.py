@@ -74,6 +74,10 @@ class StubRuntime:
         self.started = False
         self.last_position_ts: datetime | None = None
         self.reload_calls = 0
+        self.config_load_calls = 0
+        self.rules_load_calls = 0
+        self._config_timestamp: str | None = None
+        self._rules_timestamp: str | None = None
 
     async def update_config(self, config: Mapping[str, Any]) -> None:
         self.update_calls += 1
@@ -82,6 +86,7 @@ class StubRuntime:
         timestamp = datetime.now(timezone.utc).isoformat()
         self._config = {str(k): v for k, v in config_map.items()}
         self._config["updated_at"] = timestamp
+        self._config_timestamp = timestamp
 
         config_snapshot = dict(self._config)
         config_snapshot["updated_at"] = timestamp
@@ -104,6 +109,7 @@ class StubRuntime:
             data.setdefault("updated_at", timestamp)
             rules_map[symbol] = RiskRule.normalise_payload(data)
         self._rules = rules_map
+        self._rules_timestamp = timestamp
         await self._redis.set(
             self.rules_cache_key,
             json.dumps(
@@ -131,6 +137,7 @@ class StubRuntime:
         )
 
     async def load_risk_config(self) -> dict[str, Any]:
+        self.config_load_calls += 1
         return dict(self._config)
 
     async def save_risk_config(self, updates: Mapping[str, Any]) -> dict[str, Any]:
@@ -144,9 +151,11 @@ class StubRuntime:
             else:
                 self._config[key_str] = value
         self._config["updated_at"] = timestamp
+        self._config_timestamp = timestamp
         return dict(self._config)
 
     async def load_risk_rules(self) -> dict[str, dict[str, Any]]:
+        self.rules_load_calls += 1
         return {k: dict(v) for k, v in self._rules.items()}
 
     async def save_risk_rule(self, symbol: str, updates: Mapping[str, Any]) -> dict[str, Any]:
@@ -170,6 +179,7 @@ class StubRuntime:
         normalised["symbol"] = symbol_str
         normalised["updated_at"] = timestamp
         self._rules[symbol_str] = dict(normalised)
+        self._rules_timestamp = timestamp
         self._rules_history.append(
             {
                 "event": "upsert",
@@ -185,6 +195,7 @@ class StubRuntime:
         if symbol_str in self._rules:
             self._rules.pop(symbol_str, None)
             timestamp = datetime.now(timezone.utc).isoformat()
+            self._rules_timestamp = timestamp
             self._rules_history.append(
                 {
                     "event": "delete",
@@ -258,6 +269,12 @@ class StubRuntime:
 
     def get_rules_snapshot(self) -> dict[str, dict[str, Any]]:
         return {k: dict(v) for k, v in self._rules.items()}
+
+    def has_config_snapshot(self) -> bool:
+        return bool(self._config_timestamp)
+
+    def has_rules_snapshot(self) -> bool:
+        return bool(self._rules_timestamp)
 
     def health_snapshot(self) -> dict[str, Any]:
         metrics = {
@@ -336,6 +353,38 @@ def test_config_endpoints_update_snapshots_and_health() -> None:
     assert any("pending_tasks" in mapping for _, mapping in redis.hset_calls)
 
 
+def test_get_risk_config_prefers_snapshot_and_supports_force_refresh() -> None:
+    redis = _FakeRedis()
+    runtime = StubRuntime(redis)
+    runtime._config = {"risk_per_trade_r": 0.25, "updated_at": "2024-01-01T00:00:00"}
+    runtime._config_timestamp = "2024-01-01T00:00:00"
+    client = _build_app(runtime)
+
+    with client:
+        baseline = runtime.config_load_calls
+        response = client.get("/risk/config")
+        assert response.status_code == 200
+        assert runtime.config_load_calls == baseline
+        payload = response.json()
+        assert pytest.approx(payload["risk_per_trade_r"]) == 0.25
+
+        force_response = client.get("/risk/config", params={"force_refresh": "true"})
+        assert force_response.status_code == 200
+        assert runtime.config_load_calls == baseline + 1
+
+
+def test_get_risk_config_refreshes_when_snapshot_empty() -> None:
+    redis = _FakeRedis()
+    runtime = StubRuntime(redis)
+    client = _build_app(runtime)
+
+    with client:
+        baseline = runtime.config_load_calls
+        response = client.get("/risk/config")
+        assert response.status_code == 200
+        assert runtime.config_load_calls == baseline + 1
+
+
 def test_rule_crud_operations() -> None:
     redis = _FakeRedis()
     runtime = StubRuntime(redis)
@@ -379,6 +428,40 @@ def test_rule_crud_operations() -> None:
         assert "ES" not in response.json()["rules"]
 
     assert runtime.reload_calls == 0
+
+
+def test_get_risk_rules_prefers_snapshot_and_supports_force_refresh() -> None:
+    redis = _FakeRedis()
+    runtime = StubRuntime(redis)
+    runtime._rules = {
+        "ES": {"symbol": "ES", "stop_loss_price": 10.0, "updated_at": "2024-01-01T00:00:00"}
+    }
+    runtime._rules_timestamp = "2024-01-01T00:00:00"
+    client = _build_app(runtime)
+
+    with client:
+        baseline = runtime.rules_load_calls
+        response = client.get("/risk/rules")
+        assert response.status_code == 200
+        assert runtime.rules_load_calls == baseline
+        payload = response.json()
+        assert payload["rules"]["ES"]["stop_loss_price"] == pytest.approx(10.0)
+
+        force_response = client.get("/risk/rules", params={"force_refresh": "true"})
+        assert force_response.status_code == 200
+        assert runtime.rules_load_calls == baseline + 1
+
+
+def test_get_risk_rules_refreshes_when_snapshot_empty() -> None:
+    redis = _FakeRedis()
+    runtime = StubRuntime(redis)
+    client = _build_app(runtime)
+
+    with client:
+        baseline = runtime.rules_load_calls
+        response = client.get("/risk/rules")
+        assert response.status_code == 200
+        assert runtime.rules_load_calls == baseline + 1
 
 
 def test_create_rule_updates_cache_and_publishes_event() -> None:
