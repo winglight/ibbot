@@ -73,6 +73,7 @@ class StubRuntime:
         self.stop_calls = 0
         self.started = False
         self.last_position_ts: datetime | None = None
+        self.reload_calls = 0
 
     async def update_config(self, config: Mapping[str, Any]) -> None:
         self.update_calls += 1
@@ -195,10 +196,15 @@ class StubRuntime:
         return False
 
     async def reload_from_storage(self) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+        self.reload_calls += 1
         payload = {k: v for k, v in self._config.items() if k != "updated_at"}
         payload["rules"] = list(self._rules.values())
         await self.update_config(payload)
         return self.get_config_snapshot(), self.get_rules_snapshot()
+
+    @property
+    def pending_background_tasks(self) -> int:
+        return 0
 
     async def append_sizing_history(self, payload: Mapping[str, Any]) -> None:
         self._sizing_history.append(dict(payload))
@@ -372,6 +378,8 @@ def test_rule_crud_operations() -> None:
         response = client.get("/risk/rules")
         assert "ES" not in response.json()["rules"]
 
+    assert runtime.reload_calls == 0
+
 
 def test_create_rule_updates_cache_and_publishes_event() -> None:
     redis = _FakeRedis()
@@ -395,6 +403,7 @@ def test_create_rule_updates_cache_and_publishes_event() -> None:
     assert payload["type"] == "risk_rules"
     assert payload["rules"]["CL"]["stop_loss_price"] == 12.5
     assert payload["count"] == len(cached_rules["rules"])
+    assert runtime.reload_calls == 0
 
 
 def test_position_sizing_uses_config_defaults() -> None:
