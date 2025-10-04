@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import inspect
 import json
+import math
 import os
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -88,6 +89,9 @@ _INTERVAL_TO_SECONDS = {
     "1d": 86400,
 }
 
+MAX_RETURNED_CANDLES = 1000
+_MAX_SOURCE_FETCH = 120_000
+
 
 class ChartDataQuery(BaseModel):
     """Request payload accepted by the chart data endpoint."""
@@ -147,10 +151,187 @@ def _parse_duration_to_minutes(duration: str) -> int:
     return int(number)
 
 
+def _coerce_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return None
+
+
+def _coerce_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _candle_sort_key(candle: Mapping[str, Any]) -> int:
+    start_ns = _coerce_int(candle.get("interval_start_ns"))
+    if start_ns is not None:
+        return start_ns
+    end_ns = _coerce_int(candle.get("interval_end_ns"))
+    if end_ns is not None:
+        return end_ns
+    timestamp = candle.get("timestamp")
+    coerced = _coerce_int(timestamp)
+    if coerced is not None:
+        return coerced
+    return 0
+
+
+def _normalise_candles(candles: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    seen: dict[int, dict[str, Any]] = {}
+    without_keys: list[dict[str, Any]] = []
+    for candle in candles:
+        record = dict(candle)
+        key = _candle_sort_key(record)
+        if key:
+            # keep the latest observation for each interval key
+            seen[key] = record
+        else:
+            without_keys.append(record)
+    ordered = sorted(seen.items(), key=lambda item: item[0])
+    return [entry for _, entry in ordered] + without_keys
+
+
+def _combine_candle_sets(*candle_sets: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    combined: list[dict[str, Any]] = []
+    for candles in candle_sets:
+        if not candles:
+            continue
+        combined.extend(dict(c) for c in candles)
+    return _normalise_candles(combined)
+
+
+def _candidate_source_intervals(target_interval: str) -> list[str]:
+    if target_interval not in _INTERVAL_TO_SECONDS:
+        return [target_interval]
+    target_seconds = _INTERVAL_TO_SECONDS[target_interval]
+    divisors = [
+        interval
+        for interval, seconds in _INTERVAL_TO_SECONDS.items()
+        if seconds < target_seconds and target_seconds % seconds == 0
+    ]
+    divisors.sort(key=lambda key: _INTERVAL_TO_SECONDS[key], reverse=True)
+    return [target_interval, *divisors]
+
+
+def _aggregate_candles(
+    candles: Sequence[Mapping[str, Any]],
+    *,
+    target_interval: str,
+    source_interval: str,
+) -> list[dict[str, Any]]:
+    if target_interval == source_interval:
+        return [dict(candle) for candle in candles]
+
+    target_seconds = _INTERVAL_TO_SECONDS.get(target_interval)
+    source_seconds = _INTERVAL_TO_SECONDS.get(source_interval)
+    if not target_seconds or not source_seconds:
+        return []
+    if target_seconds % source_seconds != 0:
+        return []
+
+    sorted_candles = _normalise_candles(candles)
+    if not sorted_candles:
+        return []
+
+    bucket_size_ns = target_seconds * 1_000_000_000
+    source_duration_ns = source_seconds * 1_000_000_000
+    aggregated: list[dict[str, Any]] = []
+    current_bucket: dict[str, Any] | None = None
+
+    for candle in sorted_candles:
+        start_ns = _coerce_int(candle.get("interval_start_ns"))
+        end_ns = _coerce_int(candle.get("interval_end_ns"))
+        if start_ns is None and end_ns is None:
+            continue
+        if start_ns is None and end_ns is not None:
+            start_ns = end_ns - source_duration_ns
+        if end_ns is None and start_ns is not None:
+            end_ns = start_ns + source_duration_ns
+        if start_ns is None or end_ns is None:
+            continue
+
+        bucket_start_ns = (start_ns // bucket_size_ns) * bucket_size_ns
+        bucket_end_ns = bucket_start_ns + bucket_size_ns
+
+        open_price = _coerce_float(candle.get("open"))
+        high_price = _coerce_float(candle.get("high"))
+        low_price = _coerce_float(candle.get("low"))
+        close_price = _coerce_float(candle.get("close"))
+        volume = _coerce_int(candle.get("volume")) or 0
+
+        if current_bucket is None or current_bucket["interval_start_ns"] != bucket_start_ns:
+            if current_bucket is not None:
+                aggregated.append(current_bucket)
+            current_bucket = {
+                "interval_start_ns": bucket_start_ns,
+                "interval_end_ns": bucket_end_ns,
+                "open": open_price if open_price is not None else close_price,
+                "high": high_price if high_price is not None else open_price,
+                "low": low_price if low_price is not None else open_price,
+                "close": close_price if close_price is not None else open_price,
+                "volume": volume,
+            }
+            continue
+
+        if high_price is not None:
+            current_bucket_high = _coerce_float(current_bucket.get("high"))
+            if current_bucket_high is None or high_price > current_bucket_high:
+                current_bucket["high"] = high_price
+        if low_price is not None:
+            current_bucket_low = _coerce_float(current_bucket.get("low"))
+            if current_bucket_low is None or low_price < current_bucket_low:
+                current_bucket["low"] = low_price
+        if close_price is not None:
+            current_bucket["close"] = close_price
+            if current_bucket.get("open") is None:
+                current_bucket["open"] = close_price
+        current_bucket["volume"] = (current_bucket.get("volume") or 0) + volume
+
+    if current_bucket is not None:
+        aggregated.append(current_bucket)
+
+    return aggregated
+
+
+def _estimate_result_rows(duration_minutes: int, target_seconds: int) -> int:
+    if duration_minutes <= 0 or target_seconds <= 0:
+        return MAX_RETURNED_CANDLES
+    estimated = math.ceil((duration_minutes * 60) / target_seconds)
+    return max(1, min(estimated, MAX_RETURNED_CANDLES))
+
+
+def _estimate_source_limit(
+    *,
+    duration_minutes: int,
+    target_seconds: int,
+    source_seconds: int,
+    target_rows: int,
+) -> int:
+    if source_seconds <= 0:
+        return target_rows
+    ratio = math.ceil(target_seconds / source_seconds)
+    limit = max(target_rows * max(ratio, 1), target_rows)
+    if duration_minutes > 0:
+        duration_needed = math.ceil((duration_minutes * 60) / source_seconds)
+        limit = max(limit, duration_needed)
+    return min(max(limit, target_rows), _MAX_SOURCE_FETCH)
+
+
 def _filter_candles_by_duration(candles: list[dict[str, Any]], duration_minutes: int) -> list[dict[str, Any]]:
     if duration_minutes <= 0:
         return list(candles)
-    cutoff = now_local() - timedelta(minutes=duration_minutes)
+    # Filter relative to the market (NY) clock so comparisons with candle timestamps stay consistent
+    cutoff = datetime.now(NY_TZ) - timedelta(minutes=duration_minutes)
     filtered: list[dict[str, Any]] = []
     for candle in candles:
         ts_ns = candle.get("interval_end_ns") or candle.get("interval_start_ns")
@@ -703,6 +884,85 @@ def create_app(*, runtime: MarketDataRuntime | None = None) -> FastAPI:
                     exc_info=True,
                 )
 
+    async def _fetch_cached_candles(
+        *,
+        redis_client: Any,
+        key: str,
+        limit: int | None,
+        logger: Any,
+    ) -> list[dict[str, Any]]:
+        try:
+            if limit and limit > 0:
+                raw_entries = await redis_client.lrange(key, -int(limit), -1)
+            else:
+                raw_entries = await redis_client.lrange(key, 0, -1)
+        except Exception as exc:
+            logger.exception(
+                "Failed to query chart data from Redis for %s",
+                key,
+                exc_info=True,
+            )
+            raise HTTPException(status_code=503, detail="Market data cache unavailable") from exc
+
+        candles: list[dict[str, Any]] = []
+        for entry in raw_entries or []:
+            if not entry:
+                continue
+            try:
+                decoded = json.loads(entry)
+            except (TypeError, ValueError):
+                logger.warning("Skipping invalid candle payload: %s", entry)
+                continue
+            if isinstance(decoded, Mapping):
+                candles.append(dict(decoded))
+        return candles
+
+    async def _load_candles_with_fallback(
+        *,
+        query: ChartDataQuery,
+        interval: str,
+        limit: int | None,
+        redis_client: Any,
+        logger: Any,
+    ) -> list[dict[str, Any]]:
+        key = _series_key(query.symbol, interval)
+        candles = await _fetch_cached_candles(
+            redis_client=redis_client,
+            key=key,
+            limit=limit,
+            logger=logger,
+        )
+
+        desired = limit or MAX_RETURNED_CANDLES
+        if desired <= 0:
+            desired = MAX_RETURNED_CANDLES
+
+        if len(candles) >= desired:
+            return _normalise_candles(candles)[-desired:]
+
+        fallback_limit = max(desired, MAX_RETURNED_CANDLES)
+        fallback_limit = min(fallback_limit, _MAX_SOURCE_FETCH)
+        fallback_candles = await _load_candles_from_storage(
+            query,
+            interval=interval,
+            limit=fallback_limit,
+            logger=logger,
+        )
+        if fallback_candles:
+            await _store_candles_in_cache(
+                redis_client=redis_client,
+                key=key,
+                candles=fallback_candles,
+                limit=fallback_limit,
+                logger=logger,
+            )
+            candles = _combine_candle_sets(candles, fallback_candles)
+
+        if not candles:
+            return []
+
+        return _normalise_candles(candles)[-desired:]
+
     def _series_key(symbol: str, interval: str) -> str:
         return f"{cache_prefix}:series:market.candle.{interval}:{symbol}"
 
@@ -758,81 +1018,60 @@ def create_app(*, runtime: MarketDataRuntime | None = None) -> FastAPI:
 
         redis_client = await _ensure_redis(logger)
 
-        limit: int | None = None
-        if duration_minutes > 0:
-            seconds = _INTERVAL_TO_SECONDS.get(interval)
-            if seconds:
-                estimated = int((duration_minutes * 60) / seconds) + 5
-                if estimated > 0:
-                    limit = min(max(estimated, 1), 10_000)
+        target_seconds = _INTERVAL_TO_SECONDS.get(interval)
+        if not target_seconds:
+            logger.warning("No interval mapping for bar size %s", interval)
+            raise HTTPException(status_code=400, detail="Unsupported bar_size")
 
-        key = _series_key(query.symbol, interval)
-        try:
-            if limit:
-                raw_entries = await redis_client.lrange(key, -limit, -1)
+        desired_rows = _estimate_result_rows(duration_minutes, target_seconds)
+
+        result_candles: list[dict[str, Any]] = []
+        candidate_intervals = _candidate_source_intervals(interval)
+
+        for idx, source_interval in enumerate(candidate_intervals):
+            source_seconds = _INTERVAL_TO_SECONDS.get(source_interval)
+            if not source_seconds:
+                continue
+            source_limit = _estimate_source_limit(
+                duration_minutes=duration_minutes,
+                target_seconds=target_seconds,
+                source_seconds=source_seconds,
+                target_rows=desired_rows,
+            )
+            source_candles = await _load_candles_with_fallback(
+                query=query,
+                interval=source_interval,
+                limit=source_limit,
+                redis_client=redis_client,
+                logger=logger,
+            )
+            if not source_candles:
+                continue
+
+            if source_interval != interval:
+                aggregated = _aggregate_candles(
+                    source_candles,
+                    target_interval=interval,
+                    source_interval=source_interval,
+                )
             else:
-                raw_entries = await redis_client.lrange(key, 0, -1)
-        except Exception as exc:
-            logger.exception(
-                "Failed to query chart data from Redis for %s interval=%s",
-                query.symbol,
-                interval,
-                exc_info=True,
-            )
-            raise HTTPException(status_code=503, detail="Market data cache unavailable") from exc
+                aggregated = _normalise_candles(source_candles)
 
-        candles: list[dict[str, Any]] = []
-        for entry in raw_entries or []:
-            if not entry:
+            if not aggregated:
                 continue
-            try:
-                decoded = json.loads(entry)
-            except (TypeError, ValueError):
-                logger.warning("Skipping invalid candle payload: %s", entry)
-                continue
-            if isinstance(decoded, dict):
-                candles.append(decoded)
 
-        fallback_attempted = False
-        if not candles:
-            fallback_candles = await _load_candles_from_storage(
-                query,
-                interval=interval,
-                limit=limit,
-                logger=logger,
-            )
-            fallback_attempted = True
-            if fallback_candles:
-                await _store_candles_in_cache(
-                    redis_client=redis_client,
-                    key=key,
-                    candles=fallback_candles,
-                    limit=limit,
-                    logger=logger,
-                )
-                candles = fallback_candles
+            result_candles = _combine_candle_sets(result_candles, aggregated)
+            result_candles = _filter_candles_by_duration(result_candles, duration_minutes)
+            if len(result_candles) >= desired_rows:
+                break
 
-        candles = _filter_candles_by_duration(candles, duration_minutes)
+        result_candles = _normalise_candles(result_candles)
+        if desired_rows > 0 and len(result_candles) > desired_rows:
+            result_candles = result_candles[-desired_rows:]
+        if len(result_candles) > MAX_RETURNED_CANDLES:
+            result_candles = result_candles[-MAX_RETURNED_CANDLES:]
 
-        if not candles and not fallback_attempted:
-            fallback_candles = await _load_candles_from_storage(
-                query,
-                interval=interval,
-                limit=limit,
-                logger=logger,
-            )
-            fallback_attempted = True
-            if fallback_candles:
-                await _store_candles_in_cache(
-                    redis_client=redis_client,
-                    key=key,
-                    candles=fallback_candles,
-                    limit=limit,
-                    logger=logger,
-                )
-                candles = _filter_candles_by_duration(fallback_candles, duration_minutes)
-
-        if not candles:
+        if not result_candles:
             if allow_empty:
                 return {
                     "candles": [],
@@ -851,7 +1090,7 @@ def create_app(*, runtime: MarketDataRuntime | None = None) -> FastAPI:
             )
             raise HTTPException(status_code=404, detail="No chart data available")
 
-        payload = _format_candles_for_response(candles)
+        payload = _format_candles_for_response(result_candles)
         if not payload:
             if allow_empty:
                 return {
