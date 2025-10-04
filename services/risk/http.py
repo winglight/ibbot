@@ -102,7 +102,17 @@ async def _publish_health(app: FastAPI, *, healthy: bool = True) -> None:
         return
 
     metrics = runtime.health_snapshot()
-    metrics["pending_tasks"] = getattr(app.state, "pending_tasks", 0)
+    pending: int | None = None
+    try:
+        pending_candidate = getattr(runtime, "pending_background_tasks", None)
+        if isinstance(pending_candidate, int):
+            pending = pending_candidate
+    except Exception:
+        pending = None
+    if pending is None:
+        pending = int(getattr(app.state, "pending_tasks", 0) or 0)
+    metrics["pending_tasks"] = pending
+    app.state.pending_tasks = pending
     metrics["last_processed_at"] = _utc_now().isoformat()
 
     try:
@@ -339,7 +349,7 @@ def create_app(
         runtime_instance: RiskRuntime,
     ) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
         rule_payload = await runtime_instance.save_risk_rule(symbol, updates)
-        _, rules_snapshot = await runtime_instance.reload_from_storage()
+        rules_snapshot = runtime_instance.get_rules_snapshot()
         symbol_normalised = _normalise_symbol(rule_payload.get("symbol"))
         rule_snapshot = rules_snapshot.get(symbol_normalised, dict(rule_payload))
         return dict(rule_snapshot), rules_snapshot
@@ -398,7 +408,7 @@ def create_app(
         removed = await runtime_instance.delete_risk_rule(symbol_normalised)
         if not removed:
             raise HTTPException(status_code=404, detail="risk rule not found")
-        _, updated_rules = await runtime_instance.reload_from_storage()
+        updated_rules = runtime_instance.get_rules_snapshot()
         return {
             "success": True,
             "removed": symbol_normalised,

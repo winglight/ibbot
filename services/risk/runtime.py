@@ -147,6 +147,9 @@ class RiskRuntime:
     _position_last_requested: datetime | None = field(default=None, init=False, repr=False)
     _config_snapshot_timestamp: str | None = field(default=None, init=False, repr=False)
     _rules_snapshot_timestamp: str | None = field(default=None, init=False, repr=False)
+    _background_tasks: set[asyncio.Task[Any]] = field(
+        default_factory=set, init=False, repr=False
+    )
     _sizing_history_length: int = field(default=0, init=False, repr=False)
     _rules_history_length: int = field(default=0, init=False, repr=False)
     _risk_snapshot_repository_close: Callable[[], Awaitable[None]] | None = field(
@@ -312,6 +315,81 @@ class RiskRuntime:
         merged["symbol"] = symbol
         return merged
 
+    def _update_rule_snapshot(
+        self, symbol: str, payload: Mapping[str, Any], timestamp: str
+    ) -> None:
+        symbol_key = self._normalise_symbol(symbol) or symbol
+        self._rules_snapshot[symbol_key] = {str(k): v for k, v in payload.items()}
+        timestamps = [
+            str(value.get("updated_at"))
+            for value in self._rules_snapshot.values()
+            if value.get("updated_at")
+        ]
+        if timestamps:
+            self._rules_snapshot_timestamp = max(timestamps)
+        else:
+            self._rules_snapshot_timestamp = timestamp
+        self._config_snapshot["rules_count"] = len(self._rules_snapshot)
+        if not self._config_snapshot_timestamp:
+            snapshot_updated = self._config_snapshot.get("updated_at")
+            self._config_snapshot_timestamp = str(snapshot_updated or timestamp)
+
+    def _remove_rule_snapshot(self, symbol: str, timestamp: str) -> None:
+        symbol_key = self._normalise_symbol(symbol) or symbol
+        self._rules_snapshot.pop(symbol_key, None)
+        timestamps = [
+            str(value.get("updated_at"))
+            for value in self._rules_snapshot.values()
+            if value.get("updated_at")
+        ]
+        if timestamps:
+            self._rules_snapshot_timestamp = max(timestamps)
+        else:
+            self._rules_snapshot_timestamp = timestamp
+        self._config_snapshot["rules_count"] = len(self._rules_snapshot)
+        if not self._config_snapshot_timestamp:
+            snapshot_updated = self._config_snapshot.get("updated_at")
+            self._config_snapshot_timestamp = str(snapshot_updated or timestamp)
+
+    async def _reload_engine_from_snapshots(self) -> None:
+        async with self._config_lock:
+            payload = dict(self._config_snapshot)
+            payload["rules"] = [dict(rule) for rule in self._rules_snapshot.values()]
+            self._engine.load_config(payload)
+
+    def _spawn_background_task(
+        self, coro: Awaitable[Any], *, name: str | None = None
+    ) -> None:
+        try:
+            task = asyncio.create_task(coro, name=name)
+        except RuntimeError:
+            if inspect.iscoroutine(coro):
+                coro.close()
+            return
+
+        self._background_tasks.add(task)
+
+        def _cleanup(completed: asyncio.Task[Any]) -> None:
+            self._background_tasks.discard(completed)
+            if completed.cancelled():
+                return
+            try:
+                completed.result()
+            except Exception:
+                logger = self._logger or get_logger(self.logger_name)
+                logger.warning(
+                    "Background task %s failed",
+                    getattr(completed, "get_name", lambda: name or "risk-background-task")(),
+                    exc_info=True,
+                )
+
+        task.add_done_callback(_cleanup)
+
+    def _schedule_snapshot_refresh(self) -> None:
+        self._spawn_background_task(
+            self.refresh_snapshots(), name="risk-refresh-snapshots"
+        )
+
     async def save_risk_rule(
         self, symbol: str, updates: Mapping[str, Any]
     ) -> dict[str, Any]:
@@ -351,6 +429,9 @@ class RiskRuntime:
                 )
             except Exception:
                 pass
+        self._update_rule_snapshot(symbol_normalised, normalised, timestamp)
+        await self._reload_engine_from_snapshots()
+        self._schedule_snapshot_refresh()
         return normalised
 
     async def delete_risk_rule(self, symbol: str) -> bool:
@@ -383,6 +464,9 @@ class RiskRuntime:
                     )
                 except Exception:
                     pass
+            self._remove_rule_snapshot(symbol_normalised, timestamp)
+            await self._reload_engine_from_snapshots()
+            self._schedule_snapshot_refresh()
         return removed
 
     async def reload_from_storage(
@@ -653,6 +737,22 @@ class RiskRuntime:
             captured_at=timestamp,
         )
 
+    async def refresh_snapshots(self) -> None:
+        timestamp = (
+            self._rules_snapshot_timestamp
+            or self._config_snapshot_timestamp
+            or _utc_now().isoformat()
+        )
+        config_payload = self.get_config_snapshot()
+        rules_payload = self.get_rules_snapshot()
+        try:
+            await self._persist_repository_snapshot(
+                config_payload, rules_payload, timestamp
+            )
+        except Exception:
+            logger = self._logger or get_logger(self.logger_name)
+            logger.warning("Failed to persist risk snapshots", exc_info=True)
+
     async def _ensure_risk_snapshot_repository(
         self,
     ) -> RiskSnapshotRepositoryProtocol | None:
@@ -833,6 +933,7 @@ class RiskRuntime:
             if self._results_last_processed
             else "",
             "pending_commands": len(self._pending_commands),
+            "pending_tasks": self.pending_background_tasks,
         }
         if self._last_exception_message:
             metrics["last_exception"] = self._last_exception_message
@@ -1085,6 +1186,14 @@ class RiskRuntime:
         )
         self._market_task = None
         self._results_task = None
+        if self._background_tasks:
+            for task in list(self._background_tasks):
+                task.cancel()
+            await asyncio.gather(
+                *(self._await_task(task) for task in list(self._background_tasks)),
+                return_exceptions=True,
+            )
+            self._background_tasks.clear()
         if self._redis is not None:
             await self._update_health(
                 healthy=False,
@@ -1218,6 +1327,10 @@ class RiskRuntime:
         """Return the latest cached rule snapshot keyed by symbol."""
 
         return {symbol: dict(payload) for symbol, payload in self._rules_snapshot.items()}
+
+    @property
+    def pending_background_tasks(self) -> int:
+        return sum(1 for task in self._background_tasks if not task.done())
 
     def health_snapshot(self) -> dict[str, Any]:
         """Expose health metrics collected by the runtime."""

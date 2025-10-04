@@ -4,6 +4,8 @@ from datetime import datetime, timezone
 
 import json
 
+from typing import Any
+
 import pytest
 
 from services.risk.runtime import RiskRuntime
@@ -18,13 +20,27 @@ def anyio_backend() -> str:
     return "asyncio"
 
 
-async def test_rule_lifecycle_persists_and_records_history() -> None:
+async def test_rule_lifecycle_persists_and_records_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     redis = FakeRedis()
 
     async def factory() -> FakeRedis:
         return redis
 
     runtime = RiskRuntime(redis_factory=factory)
+
+    scheduled: list[tuple[str | None, Any]] = []
+
+    def _capture_task(self: RiskRuntime, coro: Any, *, name: str | None = None) -> None:
+        scheduled.append((name, coro))
+
+    monkeypatch.setattr(
+        RiskRuntime,
+        "_spawn_background_task",
+        _capture_task,
+        raising=False,
+    )
 
     await runtime.save_risk_config({"risk_per_trade_r": 0.01})
     await runtime.reload_from_storage()
@@ -46,10 +62,11 @@ async def test_rule_lifecycle_persists_and_records_history() -> None:
     assert created["atr_params"] == {"multiplier_sl": 1.3, "multiplier_tp": 2.1}
     assert "rule_type" not in (created.get("metadata") or {})
 
-    _, rules_snapshot = await runtime.reload_from_storage()
+    rules_snapshot = runtime.get_rules_snapshot()
     assert "ES" in rules_snapshot
     assert rules_snapshot["ES"]["stop_loss"] == 5
     assert rules_snapshot["ES"]["rule_type"] == "trailing"
+
     assert rules_snapshot["ES"]["atr_params"]["multiplier_tp"] == 2.1
 
     updated = await runtime.save_risk_rule("ES", {"take_profit": 8})
@@ -57,10 +74,12 @@ async def test_rule_lifecycle_persists_and_records_history() -> None:
     assert updated["stop_loss"] == 5
     assert updated["rule_type"] == "trailing"
 
+    rules_snapshot = runtime.get_rules_snapshot()
+    assert rules_snapshot["ES"]["take_profit"] == 8
+
     removed = await runtime.delete_risk_rule("ES")
     assert removed is True
-    _, rules_snapshot = await runtime.reload_from_storage()
-    assert "ES" not in rules_snapshot
+    assert "ES" not in runtime.get_rules_snapshot()
 
     history = await runtime.fetch_rules_history()
     assert "history" in history
@@ -70,6 +89,16 @@ async def test_rule_lifecycle_persists_and_records_history() -> None:
 
     metrics = runtime.health_snapshot()
     assert metrics["rules_history_events"] == await redis.xlen(runtime.rules_history_stream)
+    assert metrics["rules_snapshot_at"]
+
+    assert [name for name, _ in scheduled] == [
+        "risk-refresh-snapshots",
+        "risk-refresh-snapshots",
+        "risk-refresh-snapshots",
+    ]
+    for _, coro in scheduled:
+        if hasattr(coro, "close"):
+            coro.close()
 
 
 async def test_load_risk_rules_promotes_cached_metadata() -> None:
