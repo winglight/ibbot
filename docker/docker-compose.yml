@@ -273,7 +273,7 @@ services:
       TWS_PASSWORD: ${TWS_PASSWORD_PAPER}
       TRADING_MODE: ${TRADING_MODE:-paper}
       TWS_SETTINGS_PATH: ${TWS_SETTINGS_PATH:-}
-      TWS_ACCEPT_INCOMING: ${TWS_ACCEPT_INCOMING:-}
+      TWS_ACCEPT_INCOMING: "${TWS_ACCEPT_INCOMING:-127.0.0.1 172.30.0.0/16}"
       READ_ONLY_API: ${READ_ONLY_API:-}
       VNC_SERVER_PASSWORD: ${VNC_SERVER_PASSWORD:-}
       TWOFA_TIMEOUT_ACTION: ${TWOFA_TIMEOUT_ACTION:-exit}
@@ -351,7 +351,12 @@ networks:
   ibbot-network:
     driver: bridge
   stack:
-    external: true
+    name: stack
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/16
+          gateway: 172.30.0.1
 
 volumes:
   ibbot-logs:

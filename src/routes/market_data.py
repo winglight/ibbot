@@ -7,8 +7,10 @@ from typing import Dict, Any, Optional, Mapping
 import httpx
 import websockets
 
-from fastapi import APIRouter, HTTPException, Depends, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, Depends, WebSocket, WebSocketDisconnect, Query
 from loguru import logger
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from .auth import get_current_user
 from src.models import (
@@ -33,6 +35,17 @@ historical_data_cache: Dict[str, Dict[str, Any]] = {}
 CACHE_DURATION_MINUTES = 1  # 缓存1分钟
 
 _MARKET_DATA_SERVICE_CLIENT = MarketDataServiceClient()
+
+
+class MarketBackfillRequest(BaseModel):
+    symbol: str
+    duration: str
+    bar_size: str = Field(..., alias="barSize")
+    exchange: str = "SMART"
+    extra_bar_sizes: list[str] | None = Field(default=None, alias="extraBarSizes")
+    extra_intervals: list[str] | None = Field(default=None, alias="extraIntervals")
+
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
 
 def _get_market_data_service_client() -> MarketDataServiceClient:
     return _MARKET_DATA_SERVICE_CLIENT
@@ -171,41 +184,40 @@ async def get_historical_data(
 
 
 
-@router.post("/api/chart_data")
-async def get_chart_data(
-    request: ChartDataRequest,
-    user: Optional[str] = Depends(get_current_user),
-) -> Dict[str, Any]:
-    """获取图表数据"""
-    try:
-        _clean_expired_cache()
-        now = now_local()
-        use_cache = bool(getattr(request, "use_cache", True))
-        force_refresh = bool(getattr(request, "force_refresh", False))
+async def _fetch_chart_data_payload(request: ChartDataRequest) -> Dict[str, Any]:
+    _clean_expired_cache()
+    now = now_local()
+    use_cache = bool(getattr(request, "use_cache", True))
+    force_refresh = bool(getattr(request, "force_refresh", False))
 
-        cache_key_base = f"{request.symbol}_{request.duration}_{request.bar_size}_{request.exchange}"
-        cache_key = f"chart::{cache_key_base}"
+    cache_key_base = f"{request.symbol}_{request.duration}_{request.bar_size}_{request.exchange}"
+    cache_key = f"chart::{cache_key_base}"
 
-        if use_cache and not force_refresh:
-            cache_entry = historical_data_cache.get(cache_key)
-            if cache_entry and cache_entry.get("expires_at", now) > now:
-                logger.debug(f"Using chart memory cache for {request.symbol}")
-                cached_payload = cache_entry.get("payload")
-                if isinstance(cached_payload, Mapping):
-                    response_payload = dict(cached_payload)
-                    response_payload.setdefault("success", True)
-                    return response_payload
+    if use_cache and not force_refresh:
+        cache_entry = historical_data_cache.get(cache_key)
+        if cache_entry and cache_entry.get("expires_at", now) > now:
+            logger.debug(f"Using chart memory cache for {request.symbol}")
+            cached_payload = cache_entry.get("payload")
+            if isinstance(cached_payload, Mapping):
+                response_payload = dict(cached_payload)
+                response_payload.setdefault("success", True)
+                return response_payload
 
-        client = _get_market_data_service_client()
-        service_payload = request.model_dump(exclude_none=True)
-        alias_payload = request.model_dump(by_alias=True, exclude_none=True)
-        service_payload.update(alias_payload)
+    client = _get_market_data_service_client()
+    service_payload = request.model_dump(exclude_none=True)
+    alias_payload = request.model_dump(by_alias=True, exclude_none=True)
+    service_payload.update(alias_payload)
 
+    force_requested = bool(service_payload.get("force_refresh") or service_payload.get("forceRefresh"))
+
+    async def _request_chart(payload: Dict[str, Any]) -> Mapping[str, Any]:
         try:
-            service_result = await client.request_chart_data(service_payload)
+            return await client.request_chart_data(payload)
         except ServiceUnavailableError as exc:
             raise HTTPException(status_code=503, detail="Market data service unavailable") from exc
         except ServiceResponseError as exc:
+            if exc.status_code == 404:
+                raise HTTPException(status_code=404, detail="No chart data available") from exc
             if 500 <= exc.status_code < 600:
                 raise HTTPException(status_code=502, detail="Market data service error") from exc
             raise HTTPException(
@@ -216,35 +228,128 @@ async def get_chart_data(
             logger.error("Market data chart data request failed for {}: {}", request.symbol, exc)
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-        if not isinstance(service_result, Mapping):
-            raise HTTPException(status_code=502, detail="Unexpected response from market data service")
+    try:
+        service_result = await _request_chart(service_payload)
+    except HTTPException as exc:
+        if exc.status_code == 404 and not force_requested:
+            fallback_payload = dict(service_payload)
+            fallback_payload["use_cache"] = False
+            fallback_payload["useCache"] = False
+            fallback_payload["force_refresh"] = True
+            fallback_payload["forceRefresh"] = True
+            service_result = await _request_chart(fallback_payload)
+        else:
+            raise
 
-        response_payload = dict(service_result)
-        data = response_payload.get("data")
-        if not data:
-            raise HTTPException(status_code=404, detail="No chart data available")
+    if not isinstance(service_result, Mapping):
+        raise HTTPException(status_code=502, detail="Unexpected response from market data service")
 
-        if use_cache:
-            historical_data_cache[cache_key] = {
-                "payload": dict(response_payload),
-                "timestamp": now,
-                "expires_at": now + timedelta(minutes=CACHE_DURATION_MINUTES),
-                "source": response_payload.get("source", "market_data_service"),
-            }
+    response_payload = dict(service_result)
+    data = response_payload.get("data")
+    if not data:
+        raise HTTPException(status_code=404, detail="No chart data available")
 
-        response_payload.setdefault("success", True)
-        response_payload.setdefault("symbol", request.symbol)
-        response_payload.setdefault("duration", request.duration)
-        response_payload.setdefault("bar_size", request.bar_size)
-        response_payload.setdefault("source", "market_data_service")
-        return response_payload
+    if use_cache:
+        historical_data_cache[cache_key] = {
+            "payload": dict(response_payload),
+            "timestamp": now,
+            "expires_at": now + timedelta(minutes=CACHE_DURATION_MINUTES),
+            "source": response_payload.get("source", "market_data_service"),
+        }
 
-    except HTTPException as http_exc:
-        raise http_exc
-    except Exception as exc:
-        logger.error(f"Chart data error: {exc}")
-        detail = str(exc) if str(exc) else "Internal error"
-        raise HTTPException(status_code=500, detail=detail)
+    response_payload.setdefault("success", True)
+    response_payload.setdefault("symbol", request.symbol)
+    response_payload.setdefault("duration", request.duration)
+    response_payload.setdefault("bar_size", request.bar_size)
+    response_payload.setdefault("source", "market_data_service")
+    return response_payload
+
+
+@router.post("/api/chart_data")
+async def get_chart_data(
+    request: ChartDataRequest,
+    user: Optional[str] = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """获取图表数据 (API namespace)."""
+    return await _fetch_chart_data_payload(request)
+
+
+@router.post("/chart_data")
+async def get_chart_data_legacy(
+    request: ChartDataRequest,
+    user: Optional[str] = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """向后兼容的图表数据接口，路径不带 /api 前缀。"""
+    return await _fetch_chart_data_payload(request)
+
+
+@router.post("/market/backfill")
+async def run_market_backfill(
+    request: MarketBackfillRequest,
+    user: Optional[str] = Depends(get_current_user),
+) -> Dict[str, Any]:
+    client = _get_market_data_service_client()
+    service_payload = request.model_dump(by_alias=True, exclude_none=True)
+
+    try:
+        result = await client.request_backfill(service_payload)
+    except ServiceUnavailableError as exc:
+        raise HTTPException(status_code=503, detail="Market data service unavailable") from exc
+    except ServiceResponseError as exc:
+        if exc.status_code == 404:
+            raise HTTPException(status_code=404, detail="No market data available") from exc
+        if 500 <= exc.status_code < 600:
+            raise HTTPException(status_code=502, detail="Market data service error") from exc
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail or "Market data service error") from exc
+    except ServiceClientError as exc:
+        logger.error("Market data backfill request failed for {}: {}", request.symbol, exc)
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    if not isinstance(result, Mapping):
+        return {"success": True, "result": result}
+
+    payload = dict(result)
+    payload.setdefault("success", bool(payload.get("rows")))
+    payload.setdefault("symbol", request.symbol)
+    payload.setdefault("interval", payload.get("interval") or request.bar_size)
+    return payload
+
+
+@router.get("/market/storage")
+async def proxy_market_storage(
+    symbol: str = Query(..., description="Ticker symbol"),
+    include_parquet: bool = Query(True, alias="includeParquet"),
+    user: Optional[str] = Depends(get_current_user),
+) -> Dict[str, Any]:
+    symbol_clean = (symbol or "").strip().upper()
+    if not symbol_clean:
+        raise HTTPException(status_code=400, detail="symbol is required")
+
+    client = _get_market_data_service_client()
+    try:
+        result = await client.request_market_storage(
+            symbol=symbol_clean,
+            include_parquet=include_parquet,
+        )
+    except ServiceUnavailableError as exc:
+        raise HTTPException(status_code=503, detail="Market data service unavailable") from exc
+    except ServiceResponseError as exc:
+        if exc.status_code == 404:
+            raise HTTPException(status_code=404, detail="Symbol not found") from exc
+        if 500 <= exc.status_code < 600:
+            raise HTTPException(status_code=502, detail="Market data service error") from exc
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail or "Market data service error") from exc
+    except ServiceClientError as exc:
+        logger.error("Market data storage request failed for {}: {}", symbol_clean, exc)
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    if isinstance(result, Mapping):
+        payload = dict(result)
+        payload.setdefault("symbol", symbol_clean)
+        return payload
+
+    return {"symbol": symbol_clean, "result": result}
+
 
 @router.get("/api/realtime_data/{symbol}")
 async def get_realtime_data(

@@ -261,6 +261,10 @@ class IBKRClient:
         self._self_restart_timeout = max(self._gateway_restart_timeout + 30.0, self._parse_env_float('IBKR_SELF_RESTART_TIMEOUT', 300.0))
         self._gateway_restart_cmd = os.getenv('IBKR_GATEWAY_RESTART_CMD')
         self._gateway_service_name = os.getenv('IBKR_GATEWAY_SERVICE_NAME', 'ib-gateway')
+        self._wait_existing_connect_seconds = max(
+            0.0,
+            self._parse_env_float('IBKR_WAIT_FOR_EXISTING_CONNECT_SEC', 8.0),
+        )
 
         self._data_farm_wakeup_lock = threading.Lock()
         self._data_farm_wakeup_future: Optional[concurrent.futures.Future] = None
@@ -703,6 +707,27 @@ class IBKRClient:
                 ibkr_logger.debug(f"Cleanup disconnect failed: {exc}")
             finally:
                 self._needs_cleanup = False
+
+        manager = self.connection_manager
+        try:
+            if manager.is_connected():
+                return True
+        except Exception:
+            pass
+
+        try:
+            if manager.is_connecting():
+                waited = await asyncio.to_thread(
+                    manager.wait_for_connection,
+                    self._wait_existing_connect_seconds,
+                )
+                if waited:
+                    return True
+        except Exception as exc:
+            ibkr_logger.debug(
+                "Waiting on existing IBKR connection attempt failed",
+                error=str(exc),
+            )
 
         try:
             result = await asyncio.to_thread(self.connection_manager.connect)

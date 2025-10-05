@@ -8,6 +8,7 @@ import inspect
 import json
 import math
 import os
+import time
 from collections import defaultdict
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -16,7 +17,7 @@ from typing import Any, Awaitable, Callable, Dict, Mapping, Sequence
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -90,12 +91,52 @@ _INTERVAL_TO_SECONDS = {
     "1d": 86400,
 }
 
+_IB_BAR_SIZE_BY_INTERVAL = {
+    "1s": "1 secs",
+    "5s": "5 secs",
+    "15s": "15 secs",
+    "30s": "30 secs",
+    "1m": "1 min",
+    "5m": "5 mins",
+    "15m": "15 mins",
+    "30m": "30 mins",
+    "1h": "1 hour",
+    "1d": "1 day",
+}
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return float(default)
+    try:
+        return float(raw.split("#", 1)[0].strip()) or float(default)
+    except Exception:
+        return float(default)
+
+
+_IB_WAIT_FOR_EXISTING_CONNECT_SEC = max(0.0, _env_float("MARKET_DATA_IB_WAIT_FOR_CONNECT_SEC", 8.0))
+_IB_CONNECT_BACKOFF_SECONDS = max(0.0, _env_float("MARKET_DATA_IB_CONNECT_BACKOFF_SEC", 5.0))
+_IB_CONNECT_BACKOFF_UNTIL = 0.0
+
 MAX_RETURNED_CANDLES = 1000
 _MAX_SOURCE_FETCH = 120_000
 
 _INTERVAL_TO_BAR_SIZES: dict[str, list[str]] = {}
 for _bar_size, _interval_name in _BAR_SIZE_TO_INTERVAL.items():
     _INTERVAL_TO_BAR_SIZES.setdefault(_interval_name, []).append(_bar_size)
+
+
+def _resolve_ib_bar_size(bar_size: str, interval: str) -> str:
+    raw = (bar_size or "").strip().lower()
+    mapped_interval = _BAR_SIZE_TO_INTERVAL.get(raw)
+    if mapped_interval:
+        resolved = _IB_BAR_SIZE_BY_INTERVAL.get(mapped_interval)
+        if resolved:
+            return resolved
+    resolved = _IB_BAR_SIZE_BY_INTERVAL.get(interval)
+    if resolved:
+        return resolved
+    return bar_size
 
 
 def _env_flag(name: str, default: bool = True) -> bool:
@@ -627,6 +668,39 @@ async def _ensure_ib_connected(client: Any, logger: Any) -> bool:
     except Exception:
         pass
 
+    manager = getattr(client, "connection_manager", None)
+    if manager is not None:
+        try:
+            if manager.is_connected():
+                return True
+        except Exception:
+            pass
+
+        try:
+            if manager.is_connecting():
+                waited = await asyncio.to_thread(
+                    manager.wait_for_connection,
+                    _IB_WAIT_FOR_EXISTING_CONNECT_SEC,
+                )
+                if waited:
+                    return True
+        except Exception:
+            if logger:
+                logger.debug(
+                    "Failed while waiting for existing IBKR connection attempt",
+                    exc_info=True,
+                )
+
+    now = time.monotonic()
+    global _IB_CONNECT_BACKOFF_UNTIL
+    if now < _IB_CONNECT_BACKOFF_UNTIL:
+        if logger:
+            logger.debug(
+                "Skipping IBKR fallback connect due to backoff",
+                remaining=round(_IB_CONNECT_BACKOFF_UNTIL - now, 2),
+            )
+        return False
+
     connect_fn = getattr(client, "connect", None)
     if not callable(connect_fn):
         if logger:
@@ -638,12 +712,16 @@ async def _ensure_ib_connected(client: Any, logger: Any) -> bool:
     except Exception:
         if logger:
             logger.warning("IBKR connect() call failed", exc_info=True)
+        _IB_CONNECT_BACKOFF_UNTIL = now + _IB_CONNECT_BACKOFF_SECONDS
         return False
 
     if not result:
         if logger:
             logger.warning("IBKR connect() returned False")
+        _IB_CONNECT_BACKOFF_UNTIL = now + _IB_CONNECT_BACKOFF_SECONDS
         return False
+
+    _IB_CONNECT_BACKOFF_UNTIL = 0.0
     return True
 
 
@@ -704,11 +782,13 @@ async def _fetch_candles_from_ib(
                 )
             return []
 
+        bar_size = _resolve_ib_bar_size(query.bar_size, interval)
+
         try:
             data_frame = await client.get_historical_data(
                 query.symbol,
                 duration=query.duration,
-                bar_size=query.bar_size,
+                bar_size=bar_size,
                 exchange=query.exchange,
             )
         except Exception:
@@ -1340,6 +1420,78 @@ def create_app(*, runtime: MarketDataRuntime | None = None) -> FastAPI:
                     exc_info=True,
                 )
 
+    async def _persist_candles_for_interval(
+        *,
+        symbol: str,
+        interval: str,
+        candles: Sequence[Mapping[str, Any]],
+        redis_client: Any,
+        logger: Any,
+        cache_limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        if not candles:
+            return []
+
+        normalised = _normalise_candles(candles)
+        if not normalised:
+            return []
+
+        writer = _ensure_parquet_writer(logger)
+        if writer is not None:
+            try:
+                for candle in normalised:
+                    writer.append_candle(symbol, interval, candle)
+            except Exception:
+                if logger:
+                    logger.warning(
+                        "Failed to append Parquet candles for %s interval=%s",
+                        symbol,
+                        interval,
+                        exc_info=True,
+                    )
+
+        key = _series_key(symbol, interval)
+        try:
+            existing = await _fetch_cached_candles(
+                redis_client=redis_client,
+                key=key,
+                limit=cache_limit,
+                logger=logger,
+            )
+        except HTTPException:
+            raise
+        except Exception:
+            existing = []
+
+        combined = _combine_candle_sets(existing, normalised)
+        limit = cache_limit or MAX_RETURNED_CANDLES
+        if limit and limit > 0:
+            limit = min(int(limit), _MAX_SOURCE_FETCH)
+            combined = combined[-limit:]
+        else:
+            limit = min(MAX_RETURNED_CANDLES, _MAX_SOURCE_FETCH)
+
+        try:
+            await _store_candles_in_cache(
+                redis_client=redis_client,
+                key=key,
+                candles=combined,
+                limit=limit,
+                logger=logger,
+            )
+        except HTTPException:
+            raise
+        except Exception:
+            if logger:
+                logger.warning(
+                    "Failed to update Redis cache for %s interval=%s",
+                    symbol,
+                    interval,
+                    exc_info=True,
+                )
+
+        return combined
+
     async def _fetch_cached_candles(
         *,
         redis_client: Any,
@@ -1849,6 +2001,55 @@ def create_app(*, runtime: MarketDataRuntime | None = None) -> FastAPI:
             "source": "market_data_service",
         }
         return JSONResponse(response_payload)
+
+    @app.get("/chart_data")
+    async def chart_data_get(
+        request: Request,
+        symbol: str | None = Query(None, description="Ticker symbol"),
+        duration: str | None = Query(None, description="Duration string (e.g. 1 D)"),
+        bar_size: str | None = Query(None, alias="barSize"),
+        exchange: str | None = Query(None),
+    ) -> JSONResponse:
+        resolved_symbol = symbol
+        resolved_duration = duration
+        resolved_bar_size = bar_size
+        resolved_exchange = exchange
+
+        if resolved_symbol is None or resolved_duration is None:
+            try:
+                body = await request.json()
+            except Exception:
+                body = None
+            if isinstance(body, Mapping):
+                resolved_symbol = resolved_symbol or body.get("symbol")
+                resolved_duration = resolved_duration or body.get("duration")
+                resolved_bar_size = (
+                    resolved_bar_size
+                    or body.get("bar_size")
+                    or body.get("barSize")
+                )
+                resolved_exchange = resolved_exchange or body.get("exchange")
+
+        resolved_bar_size = resolved_bar_size or "1 min"
+        resolved_exchange = resolved_exchange or "SMART"
+
+        if not resolved_symbol or not resolved_duration:
+            raise HTTPException(
+                status_code=400,
+                detail="symbol and duration are required as query parameters or JSON body",
+            )
+
+        try:
+            query = ChartDataQuery(
+                symbol=resolved_symbol,
+                duration=resolved_duration,
+                bar_size=resolved_bar_size,
+                exchange=resolved_exchange,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        return await chart_data(query)
 
     @app.get("/market/{symbol}")
     async def get_market(symbol: str) -> JSONResponse:

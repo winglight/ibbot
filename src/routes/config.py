@@ -16,6 +16,7 @@ from loguru import logger
 from pydantic import BaseModel, Field
 
 from src.cache import ensure_redis
+from src.routes.connection import _load_connection_config as _load_ib_connection_config
 from src.ibbot.redis import RedisError
 from .auth import get_current_user
 
@@ -177,6 +178,22 @@ async def _append_history(redis: Any, module: str, entry: Mapping[str, Any]) -> 
 
 def _serialise_mapping(values: Mapping[str, Any]) -> dict[str, str]:
     return {str(key): str(value) for key, value in values.items()}
+
+
+async def _connection_module_fallback(module: str) -> dict[str, Any] | None:
+    if module != "ib-connection":
+        return None
+
+    try:
+        config = await _load_ib_connection_config()
+    except Exception as exc:  # pragma: no cover - defensive guard
+        logger.debug("Failed to load fallback connection config: {}", exc)
+        return None
+
+    if not isinstance(config, Mapping):
+        return None
+
+    return {"module": module, "values": _serialise_mapping(config)}
 
 
 async def _ensure_modules_entry(redis: Any, module: str) -> None:
@@ -351,21 +368,36 @@ async def list_modules(user: str | None = Depends(get_current_user)) -> dict[str
 @router.get("/config/{module}", include_in_schema=False)
 async def read_module(module: str, user: str | None = Depends(get_current_user)) -> dict[str, Any]:
     redis = await ensure_redis()
-    if redis is None:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Redis is unavailable")
 
     module = module.strip()
     if not module:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Module is required")
 
+    if redis is None:
+        fallback = await _connection_module_fallback(module)
+        if fallback is not None:
+            return fallback
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Redis is unavailable")
+
     key = f"{HASH_PREFIX}:{module}"
     try:
         values = await _await_redis(redis.hgetall(key), action="hgetall", module=module)
-    except HTTPException:
-        raise
+    except HTTPException as exc:
+        fallback = await _connection_module_fallback(module)
+        if fallback is not None:
+            return fallback
+        raise exc
     except Exception as exc:
         logger.error("Failed to load configuration", module=module, error=str(exc))
+        fallback = await _connection_module_fallback(module)
+        if fallback is not None:
+            return fallback
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Failed to load configuration") from exc
+
+    if not values:
+        fallback = await _connection_module_fallback(module)
+        if fallback is not None:
+            return fallback
 
     return {"module": module, "values": _serialise_mapping(values or {})}
 

@@ -821,6 +821,25 @@ class MarketDataServiceClient(ServiceClient):
             json=dict(payload),
         )
 
+    async def request_market_storage(
+        self,
+        *,
+        symbol: str,
+        include_parquet: bool = True,
+    ) -> Any:
+        params = {
+            "symbol": symbol,
+            "includeParquet": "true" if include_parquet else "false",
+        }
+        return await self.request("GET", "/market/storage", params=params)
+
+    async def request_backfill(self, payload: Mapping[str, Any]) -> Any:
+        return await self.request(
+            "POST",
+            "/market/backfill",
+            json=dict(payload),
+        )
+
 
 class NotificationServiceClient(ServiceClient):
     service_name = "notification"
@@ -875,4 +894,3 @@ class ConnectionControlClient(ServiceClient):
 
     async def disconnect(self) -> Any:
         return await self.request("POST", "/connection/disconnect")
-

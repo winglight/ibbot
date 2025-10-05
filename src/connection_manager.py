@@ -1318,7 +1318,6 @@ class ConnectionManager:
 
             # client 不存在时视为未连接
             self.connected = False
-            return False
 
         except Exception as e:
             connection_logger.warning(f"Connection check failed: {e}")
@@ -1326,7 +1325,28 @@ class ConnectionManager:
             if self.connected:
                 return True
             self.connected = False
-            return False
+        return False
+
+    def is_connecting(self) -> bool:
+        with self._connect_state_cond:
+            return self._connect_in_progress
+
+    def wait_for_connection(self, timeout: Optional[float] = None) -> bool:
+        """Block until an in-flight connection attempt succeeds or finishes."""
+
+        deadline = time.monotonic() + (timeout if timeout is not None else self._connect_wait_limit_sec)
+        with self._connect_state_cond:
+            while True:
+                if self.connected and self.ib and self.ib.isConnected():
+                    return True
+                if not self._connect_in_progress:
+                    return False
+
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+
+                self._connect_state_cond.wait(timeout=min(1.0, remaining))
 
     def get_last_connect_error(self) -> Optional[str]:
         """获取最近一次连接错误原因，便于对外展示更具体的失败信息"""
