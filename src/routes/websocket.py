@@ -2,7 +2,7 @@ import asyncio
 import json
 import math
 import time
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import (
     Any,
     Dict,
@@ -46,6 +46,10 @@ from src.routes.service_clients import (
 )
 from services.risk.engine import RiskRule
 from src.ibbot.redis import PubSubListener
+from src.utils.strategy_cache import (
+    compute_performance_metrics as _compute_performance_metrics,
+    get_strategy_stats as _get_strategy_stats,
+)
 
 router = APIRouter()
 
@@ -140,6 +144,34 @@ def _merge_metadata(*sources: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
     if "snapshot_updated_at" not in merged and isinstance(merged.get("updated_at"), str):
         merged["snapshot_updated_at"] = merged["updated_at"]
     return merged
+
+
+async def cache_get_strategy_stats(name: str) -> Dict[str, Any]:
+    try:
+        stats = await _get_strategy_stats(name)
+    except Exception as exc:  # pragma: no cover - defensive guard
+        logger.debug("Failed to load cached strategy stats", name=name, error=str(exc))
+        return {}
+    return stats or {}
+
+
+async def cache_compute_performance(
+    name: str,
+    *,
+    range_value: str | None = None,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    try:
+        metrics = await _compute_performance_metrics(
+            name,
+            start_date=start_date,
+            end_date=end_date,
+        )
+    except Exception as exc:  # pragma: no cover - defensive guard
+        logger.debug("Failed to compute cached strategy metrics", name=name, error=str(exc))
+        return {}
+    return metrics or {}
 
 
 def _extract_positions_payload(
@@ -2506,6 +2538,38 @@ async def websocket_endpoint(websocket: WebSocket):
                             },
                         )
                     continue
+
+                if not force:
+                    cache_stats: Dict[str, Any] = {}
+                    try:
+                        cache_stats = await cache_get_strategy_stats(name)
+                    except Exception:
+                        cache_stats = {}
+                    cache_metrics: Dict[str, Any] = {}
+                    if cache_stats and not cache_stats.get("stale"):
+                        try:
+                            cache_metrics = await cache_compute_performance(
+                                name,
+                                range_value=range_value,
+                                start_date=start_date,
+                                end_date=end_date,
+                            )
+                        except Exception:
+                            cache_metrics = {}
+                    if cache_metrics:
+                        payload = {
+                            "type": "strategy_performance",
+                            "success": True,
+                            "name": name,
+                            "range": range_value,
+                            "metrics": cache_metrics,
+                            "source": "cache",
+                        }
+                        if cache_stats:
+                            payload["stats"] = cache_stats
+                        last_responses[key] = payload
+                        await _send_or_disconnect(websocket, payload)
+                        continue
 
                 try:
                     response = await _STRATEGY_CLIENT.get_strategy_performance(

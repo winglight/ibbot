@@ -37,6 +37,7 @@ from src.utils.strategy_cache import (
     get_strategy_orders,
     get_strategy_orders_in_range,
     mark_strategy_cache_stale,
+    schedule_strategy_cache_refresh,
 )
 
 SERVICE_NAME = "strategy"
@@ -439,6 +440,7 @@ class StrategyRuntime:
         if force_refresh:
             try:
                 await mark_strategy_cache_stale(name)
+                schedule_strategy_cache_refresh(name)
             except Exception:
                 self._logger.debug("Failed to mark strategy cache stale for %s", name, exc_info=True)
         try:
@@ -606,6 +608,7 @@ class StrategyRuntime:
         if force_refresh:
             try:
                 await mark_strategy_cache_stale(name)
+                schedule_strategy_cache_refresh(name)
             except Exception:
                 self._logger.debug("Failed to mark strategy cache as stale", exc_info=True)
 
