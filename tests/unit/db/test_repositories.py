@@ -92,3 +92,56 @@ async def test_order_repository_updates_existing_row_with_ib_identifier(
     assert row["status"].lower() == "filled"
     assert row["filled_quantity"] == pytest.approx(5.0)
 
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "exchange_value",
+    [None, "", "   "],
+    ids=["missing", "empty", "whitespace"],
+)
+async def test_order_repository_uses_default_exchange_when_value_missing(
+    sqlite_db, order_repository_factory, exchange_value
+) -> None:
+    repo = await order_repository_factory()
+    payload = {
+        "command_id": f"cmd-exchange-{exchange_value!r}",
+        "symbol": "TSLA",
+        "side": "BUY",
+        "quantity": 1,
+        "status": "submitted",
+    }
+    if exchange_value is not None:
+        payload["exchange"] = exchange_value
+
+    inserted_id = await repo.upsert_order(payload)
+    assert isinstance(inserted_id, int)
+
+    row = sqlite_db.execute(
+        "SELECT exchange FROM orders WHERE id = ?",
+        (inserted_id,),
+    ).fetchone()
+
+    assert row["exchange"] == "SMART"
+
+
+@pytest.mark.asyncio
+async def test_order_repository_persists_exchange_when_present(
+    sqlite_db, order_repository_factory
+) -> None:
+    repo = await order_repository_factory()
+    payload = {
+        "command_id": "cmd-exchange-present",
+        "symbol": "AMZN",
+        "exchange": "NYSE",
+    }
+
+    inserted_id = await repo.upsert_order(payload)
+    assert isinstance(inserted_id, int)
+
+    row = sqlite_db.execute(
+        "SELECT exchange FROM orders WHERE id = ?",
+        (inserted_id,),
+    ).fetchone()
+
+    assert row["exchange"] == "NYSE"
+
