@@ -28,6 +28,8 @@ from .base import BaseStrategy
 class CandleSubscriptionStrategy(BaseStrategy):
     """Base class that manages unified candle subscriptions for strategies."""
 
+    __strategy_helper__ = True
+
     candle_interval: str = "1m"
     candle_history: int = 200
 

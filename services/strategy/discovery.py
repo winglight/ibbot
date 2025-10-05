@@ -26,6 +26,14 @@ _FILESYSTEM_METADATA_KEYS = {
     "paths",
 }
 
+_SKIPPED_MODULE_BASENAMES = {"__init__", "base", "candle_base"}
+_HELPER_CLASS_FLAGS = (
+    "__abstract__",
+    "__is_strategy_helper__",
+    "__strategy_helper__",
+    "__strategy_base__",
+)
+
 
 @dataclass(slots=True)
 class StrategyMetadata:
@@ -60,6 +68,17 @@ def _load_package(package: str) -> ModuleType | None:
         return None
 
 
+def _is_helper_strategy_class(candidate: type[object]) -> bool:
+    """Return ``True`` when ``candidate`` represents a helper/base strategy class."""
+
+    if inspect.isabstract(candidate):
+        return True
+    for flag in _HELPER_CLASS_FLAGS:
+        if getattr(candidate, "__dict__", {}).get(flag):
+            return True
+    return False
+
+
 def discover_builtin_strategies(package: str = "src.strategies") -> dict[str, str]:
     """Return mapping of bundled strategy names to their factory path."""
 
@@ -79,6 +98,9 @@ def discover_builtin_strategies(package: str = "src.strategies") -> dict[str, st
         if module_info.ispkg:
             continue
         module_name = module_info.name
+        module_basename = module_name.rsplit(".", 1)[-1]
+        if module_basename in _SKIPPED_MODULE_BASENAMES:
+            continue
         try:
             candidate = importlib.import_module(module_name)
         except Exception:  # pragma: no cover - defensive import guard
@@ -89,6 +111,8 @@ def discover_builtin_strategies(package: str = "src.strategies") -> dict[str, st
             if not issubclass(attr_value, base_cls):
                 continue
             if attr_value.__module__ != module_name:
+                continue
+            if _is_helper_strategy_class(attr_value):
                 continue
             strategy_name = attr_value.__name__
             discovered.setdefault(strategy_name, f"{module_name}:{strategy_name}")
