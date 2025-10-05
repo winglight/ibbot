@@ -467,6 +467,25 @@ class PubSubListener:
         self._callbacks[channel].append(callback)
         self._channel_event.set()
 
+    def unregister_callback(self, channel: str, callback: Callback | None = None) -> None:
+        callbacks = self._callbacks.get(channel)
+        if not callbacks:
+            return
+        if callback is None:
+            self._callbacks.pop(channel, None)
+            self._channel_event.set()
+            return
+        try:
+            callbacks.remove(callback)
+        except ValueError:
+            return
+        if not callbacks:
+            self._callbacks.pop(channel, None)
+        self._channel_event.set()
+
+    def unregister_channel(self, channel: str) -> None:
+        self.unregister_callback(channel)
+
     async def start(self) -> None:
         if self._running:
             return
@@ -503,10 +522,16 @@ class PubSubListener:
                 while self._running:
                     if self._channel_event.is_set():
                         self._channel_event.clear()
-                        new_channels = [ch for ch in self._callbacks.keys() if ch not in subscribed]
+                        current_channels = set(self._callbacks.keys())
+                        new_channels = [ch for ch in current_channels if ch not in subscribed]
                         if new_channels:
                             await pubsub.subscribe(*new_channels)
                             subscribed.update(new_channels)
+                        removed_channels = [ch for ch in tuple(subscribed) if ch not in current_channels]
+                        if removed_channels:
+                            await pubsub.unsubscribe(*removed_channels)
+                            for channel in removed_channels:
+                                subscribed.discard(channel)
                     try:
                         message = await pubsub.get_message(
                             ignore_subscribe_messages=True,
