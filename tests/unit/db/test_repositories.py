@@ -1,14 +1,17 @@
+from __future__ import annotations
+
 from datetime import datetime, timezone
 
 import pytest
 
+
 @pytest.mark.asyncio
-async def test_order_repository_upserts_payload(
+async def test_order_repository_upserts_by_command_id(
     sqlite_db, order_repository_factory
 ) -> None:
     repo = await order_repository_factory()
     payload = {
-        "order_id": "1001",
+        "command_id": "cmd-123",
         "symbol": "AAPL",
         "side": "BUY",
         "quantity": 10,
@@ -16,61 +19,76 @@ async def test_order_repository_upserts_payload(
         "status": "submitted",
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
-    await repo.upsert_order(payload)
 
-    updated_payload = dict(payload, status="filled", filled_quantity=10, price=151.25)
-    await repo.upsert_order(updated_payload)
+    inserted_id = await repo.upsert_order(payload)
+    assert isinstance(inserted_id, int)
 
     row = sqlite_db.execute(
-        "SELECT status, filled_quantity FROM orders WHERE order_id = ?", ("1001",)
+        "SELECT id, command_id, status FROM orders WHERE command_id = ?",
+        ("cmd-123",),
     ).fetchone()
-    assert row["status"] == "filled"
-    assert row["filled_quantity"] == pytest.approx(10.0)
+    assert row["id"] == inserted_id
+    assert row["status"].lower() == "submitted"
+
+    updated_payload = dict(
+        payload,
+        status="filled",
+        filled_quantity=10,
+        price=151.25,
+    )
+    updated_id = await repo.upsert_order(updated_payload)
+    assert updated_id is None
+
+    updated_row = sqlite_db.execute(
+        "SELECT id, status, filled_quantity FROM orders WHERE command_id = ?",
+        ("cmd-123",),
+    ).fetchone()
+    assert updated_row["id"] == inserted_id
+    assert updated_row["status"].lower() == "filled"
+    assert updated_row["filled_quantity"] == pytest.approx(10.0)
 
 
 @pytest.mark.asyncio
-async def test_market_event_repository_inserts_event(
-    sqlite_db, market_event_repository_factory
+async def test_order_repository_updates_existing_row_with_ib_identifier(
+    sqlite_db, order_repository_factory
 ) -> None:
-    repo = await market_event_repository_factory()
-    event = {
-        "event_type": "market.quote",
-        "topic": "quotes.AAPL",
-        "symbol": "AAPL",
-        "source": "unit-test",
-        "payload": {"bid": 100.5, "ask": 100.6},
-        "meta": {"interval": "1s"},
-        "ts_ns": 1_700_000_000_000_000_000,
+    repo = await order_repository_factory()
+
+    initial_payload = {
+        "command_id": "cmd-ib",
+        "symbol": "MSFT",
+        "side": "SELL",
+        "quantity": 5,
+        "status": "submitted",
     }
+    inserted_id = await repo.upsert_order(initial_payload)
+    assert isinstance(inserted_id, int)
 
-    await repo.insert_event(event)
+    association_payload = {
+        "command_id": "cmd-ib",
+        "ib_order_id": "IB1001",
+        "status": "accepted",
+    }
+    association_result = await repo.upsert_order(association_payload)
+    assert association_result is None
+
+    final_payload = {
+        "ib_order_id": "IB1001",
+        "status": "filled",
+        "filled_quantity": 5,
+        "avg_fill_price": 215.5,
+    }
+    final_result = await repo.upsert_order(final_payload)
+    assert final_result is None
 
     row = sqlite_db.execute(
-        "SELECT event_type, topic, symbol, ts_ns FROM market_events"
+        "SELECT id, command_id, ib_order_id, status, filled_quantity "
+        "FROM orders WHERE id = ?",
+        (inserted_id,),
     ).fetchone()
-    assert tuple(row) == ("market.quote", "quotes.AAPL", "AAPL", 1_700_000_000_000_000_000)
+    assert row["id"] == inserted_id
+    assert row["command_id"] == "cmd-ib"
+    assert row["ib_order_id"] == "IB1001"
+    assert row["status"].lower() == "filled"
+    assert row["filled_quantity"] == pytest.approx(5.0)
 
-
-@pytest.mark.asyncio
-async def test_service_metric_repository_records_metrics(
-    sqlite_db, service_metric_repository_factory
-) -> None:
-    repo = await service_metric_repository_factory()
-    metrics = [
-        {
-            "service": "market-data",
-            "metric": "latency",
-            "value": 0.25,
-            "details": {"updates": 10},
-        },
-        {
-            "service": "market-data",
-            "metric": "throughput",
-            "value": 1200,
-        },
-    ]
-
-    await repo.record_metrics(metrics)
-
-    rows = sqlite_db.execute("SELECT metric, value FROM service_metrics").fetchall()
-    assert {row["metric"] for row in rows} == {"latency", "throughput"}

@@ -22,7 +22,7 @@ from src.ibbot.redis import DEFAULT_COMMAND_QUEUE, enqueue_ib_command, get_redis
 
 @runtime_checkable
 class OrderRepositoryProtocol(Protocol):
-    async def upsert_order(self, payload: Mapping[str, Any]) -> None:
+    async def upsert_order(self, payload: Mapping[str, Any]) -> int | None:
         ...
 
 LOGGER = logging.getLogger("ibbot.services.orders")
@@ -624,10 +624,14 @@ class OrdersRuntime:
             await self._append_history({"event": "submitted", "command_id": command_id, "order": entry})
             entry_snapshot = _clone_order_record(entry)
         if entry_snapshot is not None:
-            await self._upsert_order_snapshot(
+            inserted_id = await self._upsert_order_snapshot(
                 entry_snapshot,
                 timestamp=entry_snapshot.get("requested_at"),
             )
+            if inserted_id is not None:
+                await self._register_persisted_order_id(
+                    command_id, entry_snapshot, inserted_id
+                )
         await self._publish_health()
         return command_id
 
@@ -688,6 +692,7 @@ class OrdersRuntime:
         timestamp_dt = _utc_now()
         timestamp = _serialise_datetime(timestamp_dt)
         record_snapshot: dict[str, Any] | None = None
+        record_identifier_for_repo: str | None = None
 
         async with self._lock:
             record = self._find_order_unlocked(identifier)
@@ -748,6 +753,8 @@ class OrdersRuntime:
             if record_snapshot.get("command_id"):
                 self._command_to_order[str(record_snapshot["command_id"])] = canonical_identifier
 
+            record_identifier_for_repo = canonical_identifier
+
             if not in_active and not in_history:
                 self._history.appendleft(record_snapshot)
             elif in_history:
@@ -775,7 +782,13 @@ class OrdersRuntime:
             )
 
         if record_snapshot is not None:
-            await self._upsert_order_snapshot(record_snapshot, timestamp=timestamp)
+            inserted_id = await self._upsert_order_snapshot(
+                record_snapshot, timestamp=timestamp
+            )
+            if inserted_id is not None and record_identifier_for_repo is not None:
+                await self._register_persisted_order_id(
+                    record_identifier_for_repo, record_snapshot, inserted_id
+                )
             return record_snapshot
         raise RuntimeError("failed to update fill metrics")
 
@@ -1103,6 +1116,7 @@ class OrdersRuntime:
         timestamp: str | datetime | None = None,
     ) -> Mapping[str, Any]:
         payload = _normalise_cached_record(record)
+        payload.pop("id", None)
         if timestamp is not None:
             normalised_timestamp = _normalise_timestamp(timestamp)
             if normalised_timestamp is not None:
@@ -1122,27 +1136,62 @@ class OrdersRuntime:
         record: Mapping[str, Any],
         *,
         timestamp: str | datetime | None = None,
-    ) -> None:
+    ) -> int | None:
         if self.order_repository_factory is None:
-            return
+            return None
 
         repository = self._order_repository
         if repository is None:
             self.logger.warning("Order repository unavailable; dropping snapshot")
             self._record_repository_failure("repository unavailable")
-            return
+            return None
 
         payload = self._build_repository_order_payload(record, timestamp=timestamp)
 
         try:
-            await repository.upsert_order(payload)
+            result = await repository.upsert_order(payload)
         except Exception as exc:
             self._record_repository_failure(str(exc))
             self.logger.warning(
                 "Failed to persist order snapshot to repository", exc_info=True
             )
+            return None
         else:
             self._repository_last_error = ""
+            return result
+
+    async def _register_persisted_order_id(
+        self,
+        record_identifier: str,
+        snapshot: Mapping[str, Any],
+        inserted_id: int,
+    ) -> None:
+        identifier = str(record_identifier or "").strip()
+        if not identifier:
+            return
+        inserted_id_str = str(inserted_id)
+        command_id = _coerce_str(snapshot.get("command_id"))
+        order_id = _coerce_str(snapshot.get("order_id"))
+
+        async with self._lock:
+            record = self._active_orders.get(identifier)
+            if record is not None:
+                record["id"] = inserted_id
+                if command_id:
+                    record["command_id"] = command_id
+
+            for entry in self._history:
+                if _record_matches(entry, identifier, order_id, command_id):
+                    entry["id"] = inserted_id
+                    if command_id:
+                        entry["command_id"] = command_id
+
+            self._command_to_order[identifier] = identifier
+            self._command_to_order[inserted_id_str] = identifier
+            if command_id:
+                self._command_to_order[command_id] = identifier
+            if order_id:
+                self._command_to_order[order_id] = identifier
 
     async def _initialise_order_repository(self) -> None:
         if self.order_repository_factory is None:
@@ -1277,6 +1326,7 @@ class OrdersRuntime:
         event_time = _event_timestamp(parsed_payload)
         updated = False
         record_snapshot: dict[str, Any] | None = None
+        record_identifier_for_repo: str | None = None
         async with self._lock:
             record_identifier = identifier
             record = self._active_orders.get(record_identifier)
@@ -1371,9 +1421,16 @@ class OrdersRuntime:
                 existing_history.insert(0, _clone_order_record(record))
                 self._history = deque(existing_history, maxlen=self.history_limit)
             record_snapshot = _clone_order_record(record)
+            record_identifier_for_repo = record_identifier
             updated = True
         if record_snapshot is not None:
-            await self._upsert_order_snapshot(record_snapshot, timestamp=event_time)
+            inserted_id = await self._upsert_order_snapshot(
+                record_snapshot, timestamp=event_time
+            )
+            if inserted_id is not None and record_identifier_for_repo is not None:
+                await self._register_persisted_order_id(
+                    record_identifier_for_repo, record_snapshot, inserted_id
+                )
         return updated
 
     def _extract_order_id(
@@ -1462,8 +1519,8 @@ def create_app(runtime: OrdersRuntime | None = None, *, enable_events: bool = Tr
                     self._upsert = getattr(repo, "upsert_order")
                     self._close = getattr(repo, "close", None)
 
-                async def upsert_order(self, payload: Mapping[str, Any]) -> None:
-                    await _run_in_thread(self._upsert, payload)
+                async def upsert_order(self, payload: Mapping[str, Any]) -> int | None:
+                    return await _run_in_thread(self._upsert, payload)
 
                 async def aclose(self) -> None:
                     if callable(self._close):

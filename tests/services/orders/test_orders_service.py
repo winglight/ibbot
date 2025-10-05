@@ -10,7 +10,7 @@ from typing import Any, Awaitable, Callable, Mapping
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from services.orders.main import OrderSubmission, OrdersRuntime, create_app
+from services.orders.main import _coerce_str, OrderSubmission, OrdersRuntime, create_app
 from src.utils.ibkr_serialization import trade_to_dict
 from tests.services.redis_utils import InMemoryRedis
 
@@ -19,9 +19,39 @@ class RecordingRepository:
     def __init__(self) -> None:
         self.payloads: list[dict[str, Any]] = []
         self.closed = False
+        self._next_id = 1
+        self._by_command: dict[str, int] = {}
+        self._by_ib: dict[str, int] = {}
+        self.created_ids: list[int] = []
 
-    async def upsert_order(self, payload: Mapping[str, Any]) -> None:
-        self.payloads.append(dict(payload))
+    async def upsert_order(self, payload: Mapping[str, Any]) -> int | None:
+        record = dict(payload)
+        self.payloads.append(record)
+
+        command_id = _coerce_str(record.get("command_id"))
+        ib_order_id = _coerce_str(record.get("ib_order_id"))
+
+        assigned: int | None = None
+        created = False
+        if command_id and command_id in self._by_command:
+            assigned = self._by_command[command_id]
+        elif ib_order_id and ib_order_id in self._by_ib:
+            assigned = self._by_ib[ib_order_id]
+
+        if assigned is None:
+            if command_id is None and ib_order_id is None:
+                return None
+            assigned = self._next_id
+            self._next_id += 1
+            self.created_ids.append(assigned)
+            created = True
+
+        if command_id:
+            self._by_command[command_id] = assigned
+        if ib_order_id:
+            self._by_ib[ib_order_id] = assigned
+
+        return assigned if created else None
 
     async def close(self) -> None:
         self.closed = True
@@ -171,6 +201,7 @@ def test_order_submission_persists_snapshot_and_normalises_request() -> None:
             assert snapshot["active_orders"][0]["limit_price"] == 4450.5
             assert snapshot["active_orders"][0]["notes"] == "Entry at support"
             assert snapshot["active_orders"][0]["events"][0]["type"] == "submission"
+            assert isinstance(snapshot["active_orders"][0]["id"], int)
 
             history = await redis.lrange(runtime.history_key, 0, -1)
             assert history
@@ -184,6 +215,7 @@ def test_order_submission_persists_snapshot_and_normalises_request() -> None:
             assert payload["orders"][0]["symbol"] == "ES"
             assert payload["orders"][0]["limit_price"] == 4450.5
             assert payload["orders"][0]["notes"] == "Entry at support"
+            assert isinstance(payload["orders"][0]["id"], int)
             assert payload["limit"] == 50
             assert payload["offset"] == 0
             assert payload["page"] == 0
@@ -348,6 +380,7 @@ def test_patch_fill_metrics_updates_runtime_and_repository() -> None:
             assert active["result"]["realized_pnl"] == pytest.approx(45.0)
             assert active["result"]["unrealized_pnl"] == pytest.approx(5.5)
             assert active["commission"] == pytest.approx(12.5)
+            assert isinstance(active.get("id"), int)
 
             detail_payload = detail.json()
             assert detail_payload["order"]["commission"] == pytest.approx(12.5)
@@ -375,6 +408,7 @@ def test_patch_fill_metrics_updates_runtime_and_repository() -> None:
             assert persisted["realized_pnl"] == pytest.approx(45.0)
             assert persisted["filled_quantity"] == pytest.approx(1.0)
             assert persisted["unrealized_pnl"] == pytest.approx(5.5)
+            assert len(repository.created_ids) == 1
         finally:
             await runtime.stop()
 
@@ -641,6 +675,7 @@ def test_order_update_persists_to_repository() -> None:
             assert pytest.approx(payload_record["commission"], rel=1e-6) == 2.5
             assert pytest.approx(payload_record["realized_pnl"], rel=1e-6) == 120.0
             assert payload_record.get("order_id") == "IB123"
+            assert len(repository.created_ids) == 1
         finally:
             await runtime.stop()
 
