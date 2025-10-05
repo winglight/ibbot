@@ -105,9 +105,9 @@ Consumers: DOMService, StrategyManager, WebSocket, Alerts, Optimizer
   - Key: `DOMSnapshot:{symbol}` → 最新 DOM/指标；TTL 2s。
   - Key: `Candles:{symbol}:{interval}` → 最近 N 根（默认 300 条）JSON 列表。
   - Key: `ServiceMetrics:{service}:{metric}` → Redis ZSET 存储服务指标，默认保留 24h。
-- **MariaDB**
-  - Table: `market_events` → 记录 `event_type/topic/symbol/payload/meta`，用于回放与历史查询。
-  - Table: `market_prices` → 保留最近一次盘口快照与观测时间。
+- **持久化**
+  - MariaDB: `orders`/`risk_rules`/`strategies`/`config` 存储结构化元数据。
+  - Parquet: `data/market-data/<symbol>/<interval>.parquet` 按符号/周期保存行情与 DOM 快照。
 
 ### 实际部署配置
 

@@ -50,10 +50,9 @@
   - `config` 表：配置参数由主程序写入，模块轮询版本号更新本地缓存。
   - `list:queue:strategy`：策略任务队列。
   - `zset:service_metrics:<service>:<metric>`：记录服务写入吞吐、延迟、队列深度等监控指标（默认保留 24 小时）。
-- **MariaDB**
-  - `orders`：记录订单请求/执行结果（时间、策略、状态、数量、错误码）。
-  - `market_events`：存储行情/DOM/指标事件的 JSON 负载，便于历史回放。
-  - `market_prices`：缓存最新盘口快照与观测时间。
+- **持久化**
+  - MariaDB `orders`/`risk_rules`/`strategies`/`config`：保存交易指令、风险规则、策略与配置元数据。
+  - Parquet `data/market-data/*.parquet`：存储行情 K 线/DOM 快照，替代原 `market_events`/`market_prices` 表。
 - **日志**
   - 每个服务使用 `foundation-libs` 的日志封装写入 `data/logs/<module>.log`。
   - 主程序读取并索引日志文件供前端展示，可结合 WebSocket 推送最新日志。
@@ -104,10 +103,10 @@
   - 集成测试使用 IB 模拟环境验证下单与回执。
 
 ### 4.3 IB 数据采集服务
-- 职责：管理 IB 行情订阅，推送至 Redis 并写入 MariaDB。
+- 职责：管理 IB 行情订阅，推送至 Redis 并写入本地 Parquet 历史库。
 - 行情缓存：使用 `foundation-libs.redis` 更新 `hash:market:snapshot:<symbol>`。
-- DOM 处理：将多个级别的数据打包为结构化 JSON，写入 MariaDB `market_events`。
-- 落库职责明确：**此服务是行情/DOM 的唯一落库者**，其他服务禁止直接写入相关 MariaDB 表。
+- DOM 处理：将多个级别的数据打包为结构化 JSON，调用 Parquet 写入器落盘。
+- 落库职责明确：**此服务是行情/DOM 的唯一落库者**，其他服务禁止直接写入 Parquet 历史库。
 - 验证：
   - 模拟行情流测试吞吐与落库。
   - 对 MariaDB 查询接口编写回归测试，验证数据完整性。
@@ -118,7 +117,7 @@
   - WebSocket `/ws/market` 推送订阅符号列表。
   - Redis `stream:market-service` 提供统一的事件流。
 - 内部：订阅 `ib-feed-service` 的 Pub/Sub，维护内存快照；定期将统计信息写入 Redis 指标集合。
-- 还提供历史查询聚合：从 MariaDB 拉取数据并缓存。
+- 还提供历史查询聚合：从 Parquet 历史库或 Redis 快照读取并缓存。
 - 验证：
   - 单元测试覆盖缓存更新、接口响应。
   - 性能测试验证高频订阅下的延迟。

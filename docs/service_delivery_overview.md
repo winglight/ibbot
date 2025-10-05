@@ -17,7 +17,7 @@
 | 服务 | 入口 | 核心功能 | 依赖 | 可观测性/指标 |
 | --- | --- | --- | --- | --- |
 | IB Command (`ib_command`) | `services/ib_command/main.py` | 消费 Redis 队列、调用 `IBKRClient` 执行指令、写入结果流 | Redis 队列（`DEFAULT_COMMAND_QUEUE`）、可选 IBKR 客户端 | Redis 健康键 `hash:service:health:ib-command`、结果流 `stream:ib:results` |
-| IB Feed (`ib_feed`) | `services/ib_feed/main.py` | 订阅 IB 行情、发布价格/DOM 快照、写入 MariaDB | IBKR 客户端、Redis、MariaDB（`market_events`/`market_prices` 表） | Pub/Sub 频道 `pubsub:ib:price:*`、`pubsub:ib:dom:*`，MariaDB `market_events` 最近写入 |
+| IB Feed (`ib_feed`) | `services/ib_feed/main.py` | 订阅 IB 行情、发布价格/DOM 快照、落地 Redis/Parquet 快照 | IBKR 客户端、Redis、磁盘 Parquet 存储 | Pub/Sub 频道 `pubsub:ib:price:*`、`pubsub:ib:dom:*`，Parquet `data/market-data` 目录最近写入 |
 | Market Data (`market_data`) | `services/market_data/main.py` | 汇总行情快照、提供 REST/WebSocket、写入服务指标 | Redis Pub/Sub、MariaDB | WebSocket `/ws/market`、Redis Stream `stream:market-service`、Redis 指标集合（metric=`price-throughput`、`price-latency` 等，保留 24h） |
 | Queue Monitor (`queue_monitor`) | `services/queue_monitor/main.py` | 统计队列/Stream 长度、滞留时间，广播指标 | Redis | Redis 哈希 `hash:service:queue-monitor`、Redis 指标集合（metric=`queue-*`，保留 24h） |
 | Risk Service (`risk`) | `services/risk/main.py` & `runtime.py` | 消费行情/执行结果、运行 `RiskEngine`、触发平仓、写入事件 | Redis Streams（`stream:market-service`、`stream:ib:results`）、命令队列、MariaDB | Redis 指标集合与本地日志目录（`log_dir`） |
