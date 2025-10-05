@@ -43,7 +43,7 @@ _JSON_COLUMNS: dict[str, set[str]] = {
 }
 
 _PRIMARY_KEYS: dict[str, tuple[str, ...]] = {
-    "orders": ("order_id",),
+    "orders": ("id", "order_id", "command_id", "client_order_id", "ib_order_id"),
     "risk_rules": ("id", "symbol"),
     "strategies": ("id", "name"),
     "config": ("id", "config_key"),
@@ -52,7 +52,7 @@ _PRIMARY_KEYS: dict[str, tuple[str, ...]] = {
 }
 
 _SKIP_UPDATE_COLUMNS: dict[str, set[str]] = {
-    "orders": {"created_at"},
+    "orders": {"id", "created_at"},
     "risk_rules": {"created_at"},
     "strategies": {"created_at"},
     "config": {"created_at"},
@@ -215,6 +215,13 @@ def _sqlite_rows(connection: sqlite3.Connection, table: str) -> Iterable[Mapping
 
 def _prepare_order_row(row: Mapping[str, Any]) -> dict[str, Any]:
     data: dict[str, Any] = dict(row)
+    command_identifier = _coerce_str(
+        data.get("command_id")
+        or data.get("client_order_id")
+        or data.get("order_id")
+    )
+    if command_identifier:
+        data["command_id"] = command_identifier
     data.setdefault("client_order_id", row.get("order_id"))
     data.setdefault("strategy_name", row.get("strategy") or row.get("strategy_name"))
     data.setdefault("strategy", row.get("strategy") or row.get("strategy_name"))
@@ -249,6 +256,12 @@ def _prepare_row(table: str, row: Mapping[str, Any], target_columns: list[str]) 
             payload[column] = _coerce_str(source.get("strategy") or source.get("strategy_name"))
         elif table == "orders" and column == "order_source":
             payload[column] = source.get("order_source") or "manual"
+        elif table == "orders" and column == "command_id":
+            payload[column] = _coerce_str(
+                source.get("command_id")
+                or source.get("client_order_id")
+                or source.get("order_id")
+            )
     return {key: value for key, value in payload.items() if value is not None}
 
 
