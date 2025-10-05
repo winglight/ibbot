@@ -2113,7 +2113,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     continue
 
                 try:
-                    data = build_metric_series_payload(
+                    data = await build_metric_series_payload(
                         window=window,
                         service=service_filter,
                         metric=metric_filter,

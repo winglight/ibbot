@@ -9,7 +9,7 @@
 | 阶段 0：准备 | 初始化仓库后 | `.env.example` 模板、`data/logs` 目录、README 基础结构 | `README.md` 的“快速开始”、`data/.gitkeep` 保留目录结构 |
 | 阶段 1：基础能力库 | 基础依赖可被脚本消费 | 统一配置加载、Redis/MariaDB 封装、日志管理、诊断脚本 | `src/ibbot/{config,redis,db,logging}`、`scripts/diagnose_foundation.py` 可独立运行 |
 | 阶段 2：独立服务 | 微服务容器可启动并协同 | 指令执行（`ib_command`）、行情采集（`ib_feed`）、行情聚合（`market_data`）、风险引擎、策略调度、通知下发、队列监控、优化器 | 对应 `services/*` 目录均包含 `main.py` 与运行时逻辑；`docker/local.compose.yml` 暴露各容器 |
-| 阶段 3：主程序改造 | 主应用对接新增服务 | FastAPI 路由整合、监控仪表盘、MariaDB 查询接口、UI 更新 | `main.py`、`src/routes/monitoring.py`、`static/index.html` 中的监控面板 |
+| 阶段 3：主程序改造 | 主应用对接新增服务 | FastAPI 路由整合、监控仪表盘、Redis 指标查询接口、UI 更新 | `main.py`、`src/routes/monitoring.py`、`static/index.html` 中的监控面板 |
 | 阶段 4：联调与回归 | 交付前验收 | Docker Compose 全量联调、端到端/性能/故障注入测试覆盖、CI 冒烟 | `tests/{e2e,perf,failover}`、`scripts/perf/run_benchmark.py`、`.github/workflows/ci.yml`（如存在） |
 
 ## 服务矩阵（阶段 ≥2）
@@ -18,11 +18,11 @@
 | --- | --- | --- | --- | --- |
 | IB Command (`ib_command`) | `services/ib_command/main.py` | 消费 Redis 队列、调用 `IBKRClient` 执行指令、写入结果流 | Redis 队列（`DEFAULT_COMMAND_QUEUE`）、可选 IBKR 客户端 | Redis 健康键 `hash:service:health:ib-command`、结果流 `stream:ib:results` |
 | IB Feed (`ib_feed`) | `services/ib_feed/main.py` | 订阅 IB 行情、发布价格/DOM 快照、写入 MariaDB | IBKR 客户端、Redis、MariaDB（`market_events`/`market_prices` 表） | Pub/Sub 频道 `pubsub:ib:price:*`、`pubsub:ib:dom:*`，MariaDB `market_events` 最近写入 |
-| Market Data (`market_data`) | `services/market_data/main.py` | 汇总行情快照、提供 REST/WebSocket、写入服务指标 | Redis Pub/Sub、MariaDB | WebSocket `/ws/market`、Redis Stream `stream:market-service`、MariaDB `service_metrics`（metric=`price-throughput`、`price-latency` 等） |
-| Queue Monitor (`queue_monitor`) | `services/queue_monitor/main.py` | 统计队列/Stream 长度、滞留时间，广播指标 | Redis、MariaDB | Redis 哈希 `hash:service:queue-monitor`、MariaDB `service_metrics`（metric=`queue-*`） |
-| Risk Service (`risk`) | `services/risk/main.py` & `runtime.py` | 消费行情/执行结果、运行 `RiskEngine`、触发平仓、写入事件 | Redis Streams（`stream:market-service`、`stream:ib:results`）、命令队列、MariaDB | MariaDB `service_metrics` 与本地日志目录（`log_dir`） |
+| Market Data (`market_data`) | `services/market_data/main.py` | 汇总行情快照、提供 REST/WebSocket、写入服务指标 | Redis Pub/Sub、MariaDB | WebSocket `/ws/market`、Redis Stream `stream:market-service`、Redis 指标集合（metric=`price-throughput`、`price-latency` 等，保留 24h） |
+| Queue Monitor (`queue_monitor`) | `services/queue_monitor/main.py` | 统计队列/Stream 长度、滞留时间，广播指标 | Redis | Redis 哈希 `hash:service:queue-monitor`、Redis 指标集合（metric=`queue-*`，保留 24h） |
+| Risk Service (`risk`) | `services/risk/main.py` & `runtime.py` | 消费行情/执行结果、运行 `RiskEngine`、触发平仓、写入事件 | Redis Streams（`stream:market-service`、`stream:ib:results`）、命令队列、MariaDB | Redis 指标集合与本地日志目录（`log_dir`） |
 | Strategy Service (`strategy`) | `services/strategy/main.py` | 读取策略任务、生成 IB 指令、回写事件流 | Redis 列表/流、命令队列 | Redis 队列 `list:queue:strategy`、事件流 `stream:strategy:events` |
-| Notification Service (`notification`) | `services/notification/main.py` | 消费事件、调用浏览器/Telegram 客户端发送通知 | Redis Stream、外部 webhook/Telegram | MariaDB 审计记录（如 `service_metrics`）与 Redis `stream:notification:events` |
+| Notification Service (`notification`) | `services/notification/main.py` | 消费事件、调用浏览器/Telegram 客户端发送通知 | Redis Stream、外部 webhook/Telegram | Redis 指标集合与 Redis `stream:notification:events` |
 | Optimizer Service (`optimizer`) | `services/optimizer/main.py` | 调度 DOM 优化任务、写入进度、发布结果 | Redis、MariaDB、DOM 数据源 | Redis 流 `stream:optimizer:events`、结果哈希 `hash:optimizer:result:<task_id>`、MariaDB 历史行情查询 |
 
 > 注：所有服务均通过 `ConfigProvider`（`src/ibbot/config/provider.py`）读取远程配置，若配置项未提供则回退到默认值。

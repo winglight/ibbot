@@ -1,4 +1,6 @@
 import asyncio
+from typing import Mapping
+
 import pytest
 
 from src.data_layer.event_bus import EventEnvelope
@@ -9,11 +11,19 @@ from src.data_layer.persistence import MariaDbPersistenceBackend
 async def test_mariadb_persistence_backend_records_events_and_metrics(
     sqlite_db,
     market_event_repository_factory,
-    service_metric_repository_factory,
 ) -> None:
+    recorded: list[dict[str, object]] = []
+
+    class DummyMetricsWriter:
+        async def record_metrics(self, metrics):
+            if isinstance(metrics, Mapping):
+                recorded.append(dict(metrics))
+            else:
+                recorded.extend(dict(entry) for entry in metrics)
+
     backend = MariaDbPersistenceBackend(
         repository_factory=market_event_repository_factory,
-        metric_repository_factory=service_metric_repository_factory,
+        metric_writer=DummyMetricsWriter(),
     )
 
     envelope = EventEnvelope(
@@ -46,9 +56,7 @@ async def test_mariadb_persistence_backend_records_events_and_metrics(
     event_row = sqlite_db.execute(
         "SELECT event_type, topic FROM market_events"
     ).fetchone()
-    metric_row = sqlite_db.execute(
-        "SELECT service, metric, value FROM service_metrics"
-    ).fetchone()
-
     assert tuple(event_row) == ("market.candle", "candles.AAPL")
-    assert tuple(metric_row) == ("market-data", "events-written", 1.0)
+    assert recorded[0]["service"] == "market-data"
+    assert recorded[0]["metric"] == "events-written"
+    assert recorded[0]["value"] == 1

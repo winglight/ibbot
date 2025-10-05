@@ -25,8 +25,8 @@ from src.db import (
     MariaDBConfigurationError,
     connect as db_connect,
     market_event_writer,
-    service_metric_writer,
 )
+from src.services.factories import create_service_metrics_writer
 
 __all__ = ["get_data_source_manager", "get_quote_feed"]
 
@@ -141,7 +141,9 @@ def _get_persistence_backend():
     else:
         _persistence_backend = MariaDbPersistenceBackend(
             repository_factory=market_event_writer,
-            metric_repository_factory=service_metric_writer,
+            metric_writer_factory=lambda: create_service_metrics_writer(
+                logger_name="data-layer.metrics"
+            ),
         )
         logger.info("Using MariaDB persistence backend")
         return _persistence_backend

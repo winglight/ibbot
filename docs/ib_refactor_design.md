@@ -49,11 +49,11 @@
   - `hash:service:health:<module>`：每个服务上报健康信息（心跳时间、最近错误）。
   - `hash:config:<module>`：配置参数，由主程序写入，模块订阅变化。
   - `list:queue:strategy`：策略任务队列。
+  - `zset:service_metrics:<service>:<metric>`：记录服务写入吞吐、延迟、队列深度等监控指标（默认保留 24 小时）。
 - **MariaDB**
   - `orders`：记录订单请求/执行结果（时间、策略、状态、数量、错误码）。
   - `market_events`：存储行情/DOM/指标事件的 JSON 负载，便于历史回放。
   - `market_prices`：缓存最新盘口快照与观测时间。
-  - `service_metrics`：服务写入吞吐、延迟、队列深度等监控指标。
 - **日志**
   - 每个服务使用 `foundation-libs` 的日志封装写入 `data/logs/<module>.log`。
   - 主程序读取并索引日志文件供前端展示，可结合 WebSocket 推送最新日志。
@@ -117,7 +117,7 @@
   - REST `/market/<symbol>` 返回价格+DOM+账户快照。
   - WebSocket `/ws/market` 推送订阅符号列表。
   - Redis `stream:market-service` 提供统一的事件流。
-- 内部：订阅 `ib-feed-service` 的 Pub/Sub，维护内存快照；定期将统计信息写入 `service_metrics`。
+- 内部：订阅 `ib-feed-service` 的 Pub/Sub，维护内存快照；定期将统计信息写入 Redis 指标集合。
 - 还提供历史查询聚合：从 MariaDB 拉取数据并缓存。
 - 验证：
   - 单元测试覆盖缓存更新、接口响应。
@@ -165,7 +165,7 @@
   - 订单、策略、风控状态展示。
   - 日志查看：读取 `data/logs` 文件并分页/搜索；支持实时 tail。
   - Redis 队列/Stream 可视化：展示队列长度、消费速率、最后消费时间。
-  - MariaDB 数据写入监控：读取 `service_metrics` 中的写入数量、延迟。
+  - Redis 指标写入监控：读取服务指标集合中的写入数量、延迟。
   - 一键重启：通过容器编排（Docker API 或脚本）触发指定服务重启。
 - 依赖：仅通过基础库访问 Redis/MariaDB，不直接访问 IB。
 
@@ -179,7 +179,7 @@
    - 行情展示 -> 调用市场数据服务 REST/WS。
 3. **监控面板**：
    - 汇总 Redis 队列/Stream 指标（队列长度、滞留时间）。
-  - 展示 MariaDB 写入速率（通过 `service_metrics`）。
+  - 展示 Redis 指标写入速率（通过 `zset:service_metrics:*`）。
    - 读取 `data/logs` 并提供下载/搜索。
 4. **容器控制**：
    - 集成 Docker Engine API 或 `docker-compose` 脚本，实现服务重启按钮。
@@ -239,7 +239,7 @@
 1. 移除旧依赖注入；整合新 API。
 2. 开发监控仪表板：
    - Redis 队列视图（读基础库监控 API）。
-   - MariaDB 写入视图（查询 `service_metrics`）。
+   - Redis 指标视图（查询服务指标集合）。
    - 日志查看页面（读 `data/logs`）。
 3. 实现服务健康检查与一键重启。
 4. 测试：

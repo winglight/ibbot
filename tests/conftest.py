@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from src.db import market_event_writer, order_repository, service_metric_writer, set_engine
+from src.db import market_event_writer, order_repository, set_engine
 from tests.services.redis_utils import InMemoryRedis
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -169,17 +169,6 @@ CREATE TABLE notification_history (
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE service_metrics (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    service TEXT NOT NULL,
-    metric TEXT NOT NULL,
-    value REAL NOT NULL,
-    status TEXT,
-    host TEXT,
-    details TEXT,
-    recorded_at TEXT NOT NULL
-);
-
 CREATE TABLE market_prices (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     symbol TEXT NOT NULL,
@@ -242,15 +231,6 @@ def market_event_repository_factory(
     """Return an async-compatible factory for the market event repository."""
 
     return _async_factory(market_event_writer)
-
-
-@pytest.fixture()
-def service_metric_repository_factory(
-    sqlite_db: sqlite3.Connection,
-) -> Callable[[], Awaitable[Any] | Any]:
-    """Return an async-compatible factory for the service metric repository."""
-
-    return _async_factory(service_metric_writer)
 
 
 @pytest.fixture(scope="session")
