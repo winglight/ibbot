@@ -9,12 +9,6 @@ from .components import (
     StrategyNotFoundError,
     StrategyTaskConsumer,
 )
-from .discovery import (
-    DEFAULT_METADATA_PREFIX,
-    discover_builtin_strategies,
-    discover_filesystem_strategies,
-    sync_strategy_metadata,
-)
 
 __all__ = [
     "MarketDataFacade",
@@ -24,8 +18,4 @@ __all__ = [
     "StrategyExecutionError",
     "StrategyNotFoundError",
     "StrategyTaskConsumer",
-    "DEFAULT_METADATA_PREFIX",
-    "discover_builtin_strategies",
-    "discover_filesystem_strategies",
-    "sync_strategy_metadata",
 ]

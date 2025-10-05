@@ -11,18 +11,12 @@ from collections.abc import AsyncIterator, Awaitable, Mapping
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 import secrets
-from pathlib import Path
 from typing import Any, Callable
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from services.strategy import StrategyTaskConsumer
-from src.db.repositories.strategy import (
-    StrategyRecord,
-    StrategyRepository,
-    StrategyRepositoryError,
-)
 from src.ibbot import update_service_health
 from src.ibbot.logging import get_logger
 from src.ibbot.redis import DEFAULT_REDIS_URL, close_global_client, get_redis_client
@@ -213,7 +207,6 @@ class StrategyRuntime:
     """Runtime container coordinating strategy metadata and task queue state."""
 
     _FILE_METADATA_KEYS = ("file", "file_path", "filepath", "path", "script", "scripts", "files", "paths")
-    _STRATEGY_FILE_SUFFIXES = {".py", ".json", ".yaml", ".yml"}
 
     def __init__(
         self,
@@ -541,20 +534,10 @@ class StrategyRuntime:
 
     async def list_strategy_files(self) -> list[str]:
         await self._synchronise_metadata(force=True)
-        try:
-            settings = await load_strategy_settings(self._redis)
-        except Exception:  # pragma: no cover - defensive guard
-            settings = dict(DEFAULT_SETTINGS)
-        strategy_path = settings.get("strategy_path") or DEFAULT_SETTINGS.get("strategy_path")
-
         entries: set[str] = set()
         async with self._lock:
             for document in self._strategies.values():
                 entries.update(self._extract_metadata_files(document.metadata))
-
-        for candidate in self._scan_strategy_path(strategy_path):
-            entries.add(candidate)
-
         return sorted(entries)
 
     async def enqueue_task(self, name: str, payload: StrategyRunRequest) -> StrategyRunResponse:
@@ -1045,19 +1028,10 @@ class StrategyRuntime:
             if not force and self._last_metadata_sync is not None:
                 return
             try:
-                records = await self._repository.list_strategies()
-            except StrategyRepositoryError:
-                self._logger.warning("Failed to load strategy metadata from repository", exc_info=True)
+                await self._load_metadata()
+            except Exception:  # pragma: no cover - defensive guard
+                self._logger.warning("Failed to refresh strategy metadata", exc_info=True)
                 return
-            documents: dict[str, StrategyDocument] = {}
-            for record in records:
-                try:
-                    document = self._record_to_document(record)
-                except StrategyRepositoryError:
-                    continue
-                documents[document.name] = document
-            async with self._lock:
-                self._strategies = documents
             self._last_metadata_sync = time.monotonic()
 
     @classmethod
@@ -1087,43 +1061,32 @@ class StrategyRuntime:
             for item in value:
                 cls._collect_file_values(item, entries)
 
-    @classmethod
-    def _scan_strategy_path(cls, path_value: Any) -> set[str]:
-        resolved = cls._resolve_strategy_path(path_value)
-        if resolved is None:
-            return set()
-        entries: set[str] = set()
-        try:
-            if resolved.is_dir():
-                base = resolved
-                for candidate in base.rglob("*"):
-                    if not candidate.is_file():
-                        continue
-                    if candidate.suffix.lower() not in cls._STRATEGY_FILE_SUFFIXES:
-                        continue
-                    try:
-                        relative = candidate.relative_to(base).as_posix()
-                    except ValueError:
-                        relative = candidate.name
-                    entries.add(relative)
-            elif resolved.is_file():
-                if resolved.suffix.lower() in cls._STRATEGY_FILE_SUFFIXES:
-                    entries.add(resolved.name)
-        except OSError:  # pragma: no cover - filesystem access guard
-            return set()
-        return entries
-
-    @staticmethod
-    def _resolve_strategy_path(path_value: Any) -> Path | None:
-        if not path_value or not isinstance(path_value, str):
-            return None
-        candidate = Path(path_value).expanduser()
-        if not candidate.is_absolute():
-            candidate = Path.cwd() / candidate
-        try:
-            return candidate.resolve()
-        except OSError:
-            return candidate
+    async def _load_metadata(self) -> None:
+        raw_index = await self._redis.get(self._metadata_index_key)
+        names = []
+        if isinstance(raw_index, str):
+            try:
+                decoded = json.loads(raw_index)
+            except json.JSONDecodeError:
+                decoded = []
+            if isinstance(decoded, list):
+                names = [str(entry) for entry in decoded]
+        elif isinstance(raw_index, list):
+            names = [str(entry) for entry in raw_index]
+        async with self._lock:
+            self._strategies.clear()
+            for name in names:
+                raw = await self._redis.get(self._metadata_key(name))
+                if not raw:
+                    continue
+                payload = _normalise_json_payload(raw)
+                if not payload:
+                    continue
+                try:
+                    document = StrategyDocument.model_validate(payload)
+                except ValidationError:
+                    continue
+                self._strategies[name] = document
 
     async def _event_loop(self) -> None:
         try:
