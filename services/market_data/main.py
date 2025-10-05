@@ -334,6 +334,100 @@ def _calculate_candle_coverage(
     return coverage, normalised
 
 
+def _merge_intervals(intervals: Sequence[tuple[int, int]]) -> list[tuple[int, int]]:
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(intervals, key=lambda item: item[0]):
+        if end <= start:
+            continue
+        if not merged:
+            merged.append((start, end))
+            continue
+        last_start, last_end = merged[-1]
+        if start <= last_end:
+            merged[-1] = (last_start, max(last_end, end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _identify_missing_segments(
+    candles: Sequence[Mapping[str, Any]],
+    *,
+    interval: str,
+    duration_minutes: int,
+    expected_rows: int,
+    coverage: CandleCoverage,
+) -> list[tuple[int, int]]:
+    interval_seconds = _INTERVAL_TO_SECONDS.get(interval)
+    if not interval_seconds:
+        return []
+
+    interval_ns = interval_seconds * 1_000_000_000
+    normalised = _normalise_candles(candles)
+    intervals: list[tuple[int, int]] = []
+    for candle in normalised:
+        start_ns = _candle_ns(candle, prefer_end=False)
+        end_ns = _candle_ns(candle, prefer_end=True)
+        if start_ns is None and end_ns is None:
+            continue
+        if start_ns is None:
+            start_ns = end_ns - interval_ns
+        if end_ns is None:
+            end_ns = start_ns + interval_ns
+        if end_ns <= start_ns:
+            continue
+        intervals.append((start_ns, end_ns))
+
+    intervals = _merge_intervals(intervals)
+
+    if coverage.latest_ns is not None:
+        target_end_ns = coverage.latest_ns
+    elif intervals:
+        target_end_ns = intervals[-1][1]
+    else:
+        target_end_ns = int(datetime.now(NY_TZ).timestamp() * 1_000_000_000)
+
+    desired_start_candidates: list[int] = []
+    if duration_minutes > 0:
+        desired_start_candidates.append(
+            target_end_ns - duration_minutes * 60 * 1_000_000_000
+        )
+    if expected_rows > 0:
+        desired_start_candidates.append(
+            target_end_ns - expected_rows * interval_ns
+        )
+
+    if not desired_start_candidates:
+        return []
+
+    desired_start_ns = min(desired_start_candidates)
+    desired_start_ns = min(desired_start_ns, target_end_ns - interval_ns)
+    if desired_start_ns < 0:
+        desired_start_ns = 0
+    if desired_start_ns >= target_end_ns:
+        return []
+
+    segments: list[tuple[int, int]] = []
+    cursor = desired_start_ns
+    for start_ns, end_ns in intervals:
+        if end_ns <= desired_start_ns:
+            continue
+        if start_ns >= target_end_ns:
+            break
+        if start_ns > cursor:
+            gap_end = min(start_ns, target_end_ns)
+            if gap_end > cursor:
+                segments.append((cursor, gap_end))
+        cursor = max(cursor, min(end_ns, target_end_ns))
+        if cursor >= target_end_ns:
+            break
+
+    if cursor < target_end_ns:
+        segments.append((cursor, target_end_ns))
+
+    return [segment for segment in segments if segment[1] > segment[0]]
+
+
 def _candidate_source_intervals(target_interval: str) -> list[str]:
     if target_interval not in _INTERVAL_TO_SECONDS:
         return [target_interval]
@@ -799,6 +893,7 @@ async def _fetch_candles_from_ib(
     interval: str,
     persist: Callable[[Sequence[Mapping[str, Any]]], Awaitable[None]],
     logger: Any,
+    missing_segments: Sequence[tuple[int, int]] | None = None,
 ) -> list[dict[str, Any]]:
     if not IB_FALLBACK_ENABLED:
         return []
@@ -834,44 +929,67 @@ async def _fetch_candles_from_ib(
 
         bar_size = _resolve_ib_bar_size(query.bar_size, interval)
 
-        try:
-            data_frame = await client.get_historical_data(
-                query.symbol,
-                duration=query.duration,
-                bar_size=bar_size,
-                exchange=query.exchange,
-            )
-        except Exception:
-            if logger:
-                logger.warning(
-                    "IBKR historical request failed for %s interval=%s",
-                    query.symbol,
-                    interval,
-                    exc_info=True,
-                )
-            return []
+        interval_seconds = _INTERVAL_TO_SECONDS.get(interval, 0)
+        requests: list[tuple[datetime | None, str]] = []
+        if missing_segments and interval_seconds > 0:
+            for start_ns, end_ns in missing_segments:
+                if end_ns <= start_ns:
+                    continue
+                duration_seconds = math.ceil((end_ns - start_ns) / 1_000_000_000)
+                duration_seconds = max(duration_seconds, interval_seconds)
+                duration_seconds += interval_seconds
+                try:
+                    end_dt = datetime.fromtimestamp(end_ns / 1_000_000_000, tz=NY_TZ)
+                except Exception:
+                    end_dt = None
+                requests.append((end_dt, f"{int(duration_seconds)} S"))
 
-        if data_frame is None:
-            if logger:
-                logger.warning(
-                    "IB fallback returned no dataframe for %s interval=%s",
-                    query.symbol,
-                    interval,
-                )
-            return []
+        if not requests:
+            requests.append((None, query.duration))
 
-        try:
-            records = data_frame.to_dict("records")
-        except Exception:
-            if logger:
-                logger.warning(
-                    "Failed to serialise IBKR historical data for %s",
+        combined_records: list[Mapping[str, Any]] = []
+        for end_dt, duration_override in requests:
+            duration_value = duration_override or query.duration
+            if not duration_value:
+                duration_value = "1 D"
+            try:
+                data_frame = await client.get_historical_data(
                     query.symbol,
-                    exc_info=True,
+                    duration=duration_value,
+                    bar_size=bar_size,
+                    exchange=query.exchange,
+                    end_datetime=end_dt,
                 )
-            return []
+            except Exception:
+                if logger:
+                    logger.warning(
+                        "IBKR historical request failed for %s interval=%s",
+                        query.symbol,
+                        interval,
+                        exc_info=True,
+                    )
+                return []
 
-        if not records:
+            if data_frame is None:
+                continue
+
+            try:
+                records = data_frame.to_dict("records")
+            except Exception:
+                if logger:
+                    logger.warning(
+                        "Failed to serialise IBKR historical data for %s",
+                        query.symbol,
+                        exc_info=True,
+                    )
+                return []
+
+            if not records:
+                continue
+
+            combined_records.extend(records)
+
+        if not combined_records:
             if logger:
                 logger.info(
                     "IB fallback returned empty records for %s interval=%s",
@@ -880,7 +998,8 @@ async def _fetch_candles_from_ib(
                 )
             return []
 
-        candles = _bars_to_candles(records, symbol=query.symbol, interval=interval)
+        candles = _bars_to_candles(combined_records, symbol=query.symbol, interval=interval)
+        candles = _normalise_candles(candles)
         if not candles:
             if logger:
                 logger.info(
@@ -1661,11 +1780,20 @@ def create_app(*, runtime: MarketDataRuntime | None = None) -> FastAPI:
                     cache_limit=cache_limit,
                 )
 
+            missing_segments = _identify_missing_segments(
+                normalised,
+                interval=interval,
+                duration_minutes=duration_minutes,
+                expected_rows=expected_rows,
+                coverage=coverage,
+            )
+
             ib_candles = await _fetch_candles_from_ib(
                 query,
                 interval=interval,
                 persist=_persist_ib_candles,
                 logger=logger,
+                missing_segments=missing_segments,
             )
 
             if ib_candles:

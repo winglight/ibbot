@@ -6,6 +6,7 @@ import csv
 import itertools
 import math
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -1187,8 +1188,87 @@ class IBKRClient:
         else:
             return self.get_stock_contract(symbol, exchange, currency)
     
-    async def get_historical_data(self, symbol: str, duration: str = '1 Y',
-                                bar_size: str = '1 day', exchange: str = 'SMART') -> pd.DataFrame:
+    @staticmethod
+    def _parse_bar_size_seconds(value: str) -> int | None:
+        if not value:
+            return None
+        text = value.strip().lower()
+        if not text:
+            return None
+
+        fixed = {
+            '1 sec': 1,
+            '1 secs': 1,
+            '1 second': 1,
+            '1 seconds': 1,
+            '5 sec': 5,
+            '5 secs': 5,
+            '5 second': 5,
+            '5 seconds': 5,
+            '15 sec': 15,
+            '15 secs': 15,
+            '15 second': 15,
+            '15 seconds': 15,
+            '30 sec': 30,
+            '30 secs': 30,
+            '30 second': 30,
+            '30 seconds': 30,
+            '1 min': 60,
+            '1 mins': 60,
+            '1 minute': 60,
+            '1 minutes': 60,
+            '5 min': 300,
+            '5 mins': 300,
+            '5 minute': 300,
+            '5 minutes': 300,
+            '15 min': 900,
+            '15 mins': 900,
+            '15 minute': 900,
+            '15 minutes': 900,
+            '30 min': 1800,
+            '30 mins': 1800,
+            '30 minute': 1800,
+            '30 minutes': 1800,
+            '1 hour': 3600,
+            '1 hours': 3600,
+            '1 hr': 3600,
+            '1 hrs': 3600,
+            '1 day': 86400,
+            '1 days': 86400,
+        }
+        if text in fixed:
+            return fixed[text]
+
+        match = re.match(r"(\d+(?:\.\d+)?)\s*([a-zA-Z]+)", text)
+        if not match:
+            return None
+
+        try:
+            magnitude = float(match.group(1))
+        except (TypeError, ValueError):
+            return None
+
+        unit = match.group(2).lower()
+        if unit in {'s', 'sec', 'secs', 'second', 'seconds'}:
+            return int(magnitude)
+        if unit in {'m', 'min', 'mins', 'minute', 'minutes'}:
+            return int(magnitude * 60)
+        if unit in {'h', 'hr', 'hrs', 'hour', 'hours'}:
+            return int(magnitude * 3600)
+        if unit in {'d', 'day', 'days'}:
+            return int(magnitude * 86400)
+        return None
+
+    async def get_historical_data(
+        self,
+        symbol: str,
+        duration: str | None = '1 Y',
+        bar_size: str = '1 day',
+        exchange: str = 'SMART',
+        *,
+        end_datetime: datetime | str | None = None,
+        bars: int | None = None,
+    ) -> pd.DataFrame:
         """获取历史数据（在连接线程事件循环中执行，避免事件循环错误）"""
         try:
             # 获取IB实例
@@ -1208,10 +1288,40 @@ class IBKRClient:
                 ibkr_logger.error(f"Failed to qualify contract for {symbol}")
                 return None
             qc = qualified[0]
+            end_value = ''
+            if end_datetime is not None:
+                if isinstance(end_datetime, datetime):
+                    end_value = end_datetime.astimezone(NY_TZ).strftime("%Y%m%d %H:%M:%S")
+                else:
+                    end_value = str(end_datetime)
+
+            duration_str = (duration or '') if duration is not None else ''
+            if bars is not None:
+                try:
+                    bar_seconds = self._parse_bar_size_seconds(bar_size)
+                except Exception:
+                    bar_seconds = None
+                if bar_seconds:
+                    try:
+                        bar_count = max(int(bars), 1)
+                    except Exception:
+                        bar_count = 1
+                    total_seconds = max(bar_seconds, bar_count * bar_seconds)
+                    duration_str = f"{int(total_seconds)} S"
+                elif not duration_str:
+                    duration_str = str(bars)
+
+            if not duration_str:
+                duration_str = '1 Y'
+
             # 使用异步版本请求历史数据
             bars = await ib.reqHistoricalDataAsync(
-                contract=contract, endDateTime='', durationStr=duration,
-                barSizeSetting=bar_size, whatToShow='TRADES', useRTH=False
+                contract=contract,
+                endDateTime=end_value,
+                durationStr=duration_str,
+                barSizeSetting=bar_size,
+                whatToShow='TRADES',
+                useRTH=False,
             )
             if not bars:
                 ibkr_logger.warning(f"No historical data returned for {symbol}")
