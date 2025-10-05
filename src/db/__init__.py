@@ -19,8 +19,6 @@ from .repositories import (
     ConfigRepositoryError,
     AuditLogRepository,
     AuditLogRepositoryError,
-    MarketEventRepository,
-    MarketEventRepositoryError,
     ModuleConfigSnapshot,
     OrderRepository,
     OrderRepositoryError,
@@ -40,8 +38,6 @@ __all__ = [
     "RepositoryValidationError",
     "AuditLogRepository",
     "AuditLogRepositoryError",
-    "MarketEventRepository",
-    "MarketEventRepositoryError",
     "ModuleConfigSnapshot",
     "OrderRepository",
     "OrderRepositoryError",
@@ -52,7 +48,6 @@ __all__ = [
     "connect",
     "get_database_url",
     "get_service_metrics_columns",
-    "market_event_writer",
     "order_repository",
     "ensure_schema",
     "REQUIRED_TABLES",
@@ -74,12 +69,6 @@ def risk_snapshot_repository(*, logger_name: str = "db.risk") -> RiskSnapshotRep
     """Return a :class:`RiskSnapshotRepository` instance."""
 
     return RiskSnapshotRepository(logger_name=logger_name)
-
-
-def market_event_writer(*, logger_name: str = "db.events") -> MarketEventRepository:
-    """Return a :class:`MarketEventRepository` instance."""
-
-    return MarketEventRepository(logger_name=logger_name)
 
 
 def audit_log_writer(*, logger_name: str = "db.audit") -> AuditLogRepository:
