@@ -52,7 +52,7 @@ services:
       MARIADB_ROOT_PASSWORD: ${IBBOT_DB_ROOT_PASSWORD:-ibbot-root-password}
     volumes:
       - ./data/mariadb:/var/lib/mysql
-      - ./scripts/sql/20240522_init_mariadb.sql:/docker-entrypoint-initdb.d/001-init.sql:ro
+      - ./scripts/sql/db.sql:/docker-entrypoint-initdb.d/001-init.sql:ro
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
       interval: 10s

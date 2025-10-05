@@ -1489,6 +1489,19 @@ def create_app(runtime: OrdersRuntime | None = None, *, enable_events: bool = Tr
     def _initialise_runtime() -> OrdersRuntime:
         if runtime is not None:
             return runtime
+
+        try:
+            from src.db.bootstrap import SchemaBootstrapError, ensure_schema
+        except ImportError:  # pragma: no cover - optional dependency in minimal builds
+            LOGGER.debug("Database bootstrap helper unavailable; skipping schema check")
+        else:
+            try:
+                ensure_schema(logger=LOGGER)
+            except SchemaBootstrapError:
+                LOGGER.exception("Database schema bootstrap failed")
+            except Exception as exc:  # pragma: no cover - defensive logging
+                LOGGER.warning("Database schema bootstrap skipped: %s", exc, exc_info=True)
+
         try:
             from src.db import order_repository
         except ImportError as exc:  # pragma: no cover - optional dependency

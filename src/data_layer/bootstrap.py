@@ -23,7 +23,8 @@ from .quote_feed import QuoteFeed, resolve_default_quote_feed
 from src.ibbot.redis import DEFAULT_REDIS_URL
 from src.db import (
     MariaDBConfigurationError,
-    connect as db_connect,
+    SchemaBootstrapError,
+    ensure_schema,
     market_event_writer,
 )
 from src.services.factories import create_service_metrics_writer
@@ -132,13 +133,16 @@ def _get_persistence_backend():
         logger.warning("Failed to initialise Parquet backend: {}", exc)
 
     try:
-        with db_connect():
-            pass
+        result = ensure_schema(logger=logger)
     except MariaDBConfigurationError as exc:
         logger.info("MariaDB persistence disabled: {}", exc)
+    except SchemaBootstrapError as exc:
+        logger.warning("Database schema bootstrap failed: {}", exc)
     except Exception as exc:  # pragma: no cover - defensive guard
-        logger.warning("Failed to initialise MariaDB persistence backend: {}", exc)
+        logger.warning("Failed to bootstrap database schema: {}", exc)
     else:
+        if result.created_tables:
+            logger.info("Created missing database tables: {}", ", ".join(result.created_tables))
         _persistence_backend = MariaDbPersistenceBackend(
             repository_factory=market_event_writer,
             metric_writer_factory=lambda: create_service_metrics_writer(
