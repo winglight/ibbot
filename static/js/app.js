@@ -22,6 +22,9 @@ const OrdersManagerClass = OrdersManagerModule.OrderManager || globalScope.Order
 const notificationsModules = appModules.notifications || {};
 const NotificationsManagerModule = notificationsModules.manager || {};
 const NotificationsManagerClass = NotificationsManagerModule.NotificationsManager || globalScope.NotificationsManager;
+const riskModules = appModules.risk || {};
+const RiskRulesManagerModule = riskModules.manager || {};
+const RiskRulesManagerClass = RiskRulesManagerModule.RiskRulesManager || globalScope.RiskRulesManager;
 const serviceRestartModules = appModules.serviceRestart || {};
 
 const getConfigCenterModules = () => {
@@ -172,7 +175,10 @@ class TradingApp {
         this.summaryPrimarySaving = false;
         this.summaryPrimaryCurrent = null;
         this.summaryDataFeedCurrent = null;
-        this.riskRulesManager = new RiskRulesManager(this);
+        if (typeof RiskRulesManagerClass !== 'function') {
+            throw new Error('RiskRulesManager module is required');
+        }
+        this.riskRulesManager = new RiskRulesManagerClass(this);
         this.strategiesManager = typeof StrategiesManagerClass === 'function'
             ? new StrategiesManagerClass(this)
             : null;
