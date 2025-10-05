@@ -25,7 +25,9 @@ if str(SRC) not in sys.path:
 
 TEST_DB_SCHEMA = """
 CREATE TABLE orders (
-    order_id TEXT PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    command_id TEXT,
+    order_id TEXT,
     client_order_id TEXT,
     ib_order_id TEXT,
     symbol TEXT NOT NULL,
@@ -66,6 +68,7 @@ CREATE TABLE orders (
     raw_payload TEXT,
     is_deleted INTEGER DEFAULT 0
 );
+CREATE UNIQUE INDEX ix_orders_command_id ON orders(command_id);
 CREATE UNIQUE INDEX ix_orders_client_order_id ON orders(client_order_id);
 CREATE UNIQUE INDEX ix_orders_ib_order_id ON orders(ib_order_id);
 CREATE INDEX ix_orders_symbol ON orders(symbol);

@@ -13,7 +13,6 @@ from src.ibbot.logging import get_logger
 from .base import (
     RepositoryError,
     RepositoryValidationError,
-    execute_write,
     is_sqlite,
     json_dumps,
     use_connection,
@@ -131,9 +130,14 @@ def _normalise_order_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
                     return value
         return None
 
+    command_identifier = _first_nonempty(
+        payload.get("command_id"),
+        _lookup("command_id", "commandId"),
+    )
+
     client_identifier = _first_nonempty(
         payload.get("client_order_id"),
-        payload.get("command_id"),
+        command_identifier,
         payload.get("id"),
         _lookup("client_order_id", "clientOrderId", "command_id", "commandId", "id"),
     )
@@ -272,6 +276,9 @@ def _normalise_order_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
 
     normalised["strategy"] = strategy_value
 
+    if command_identifier is not None:
+        normalised["command_id"] = str(command_identifier)
+
     if action_text:
         normalised["action"] = action_text.upper()
 
@@ -337,11 +344,11 @@ class OrderRepository:
     def __init__(self, *, logger_name: str = "db.orders") -> None:
         self._logger = get_logger(logger_name)
 
-    async def upsert_order(self, payload: Mapping[str, Any]) -> None:
+    async def upsert_order(self, payload: Mapping[str, Any]) -> int | None:
         normalised = _normalise_order_payload(payload)
 
         try:
-            await run_in_thread(self._write_order, normalised)
+            return await run_in_thread(self._write_order, normalised)
         except RepositoryValidationError:
             raise
         except MariaDBConfigurationError as exc:
@@ -351,47 +358,191 @@ class OrderRepository:
             self._logger.exception("Failed to upsert order %s", order_id)
             raise OrderRepositoryError("Failed to upsert order") from exc
 
-    def _write_order(self, row: Mapping[str, Any]) -> None:
+    def _write_order(self, row: Mapping[str, Any]) -> int | None:
         with use_connection() as connection:
-            prepared = dict(row)
+            prepared = {key: value for key, value in dict(row).items() if key != "id"}
             if prepared.get("raw_payload") is not None:
                 prepared["raw_payload"] = json_dumps(prepared["raw_payload"])
 
-            columns = list(prepared.keys())
-            if not columns:
+            if not prepared:
                 raise RepositoryValidationError("Normalised order payload is empty")
 
-            if is_sqlite(connection):
-                placeholders = ", ".join(f":{col}" for col in columns)
-                update_columns = ", ".join(
-                    f"{col}=excluded.{col}"
-                    for col in columns
-                    if col not in {"order_id", "created_at"}
+            command_id = prepared.get("command_id")
+            ib_order_id = prepared.get("ib_order_id")
+            if command_id is not None:
+                command_id = str(command_id)
+                prepared["command_id"] = command_id
+            if ib_order_id is not None:
+                ib_order_id = str(ib_order_id)
+                prepared["ib_order_id"] = ib_order_id
+
+            if command_id is None and ib_order_id is None:
+                raise RepositoryValidationError(
+                    "Normalised order payload requires a command_id or ib_order_id"
                 )
-                if update_columns:
-                    update_clause = (
-                        f"{update_columns}, updated_at=CURRENT_TIMESTAMP"
+
+            cursor = connection.cursor()
+            try:
+                if is_sqlite(connection):
+                    match_column, match_value = self._find_existing_sqlite(
+                        cursor, command_id, ib_order_id
                     )
-                else:
-                    update_clause = "updated_at=CURRENT_TIMESTAMP"
-                sql = (
-                    "INSERT INTO orders ({cols}) VALUES ({values}) "
-                    "ON CONFLICT(order_id) DO UPDATE SET {updates}"
-                ).format(cols=", ".join(columns), values=placeholders, updates=update_clause)
-                execute_write(connection, sql, prepared)
-            else:
-                placeholders = ", ".join(f"%({col})s" for col in columns)
-                update_columns = ", ".join(
-                    f"{col}=VALUES({col})"
-                    for col in columns
-                    if col not in {"order_id", "created_at"}
+                    if match_column is None:
+                        inserted_id = self._insert_sqlite(cursor, prepared)
+                        connection.commit()
+                        return inserted_id
+                    self._update_sqlite(cursor, prepared, match_column, match_value)
+                    connection.commit()
+                    return None
+
+                match_column, match_value = self._find_existing_mariadb(
+                    cursor, command_id, ib_order_id
                 )
-                if update_columns:
-                    update_clause = f"{update_columns}, updated_at=NOW()"
-                else:
-                    update_clause = "updated_at=NOW()"
-                sql = (
-                    "INSERT INTO orders ({cols}) VALUES ({values}) "
-                    "ON DUPLICATE KEY UPDATE {updates}"
-                ).format(cols=", ".join(columns), values=placeholders, updates=update_clause)
-                execute_write(connection, sql, prepared)
+                if match_column is None:
+                    inserted_id = self._insert_mariadb(cursor, prepared)
+                    connection.commit()
+                    return inserted_id
+                self._update_mariadb(cursor, prepared, match_column, match_value)
+                connection.commit()
+                return None
+            except Exception:
+                try:
+                    connection.rollback()
+                except Exception:  # pragma: no cover - defensive
+                    pass
+                raise
+            finally:
+                try:
+                    cursor.close()
+                except Exception:  # pragma: no cover - defensive
+                    pass
+
+    def _find_existing_sqlite(
+        self,
+        cursor: Any,
+        command_id: str | None,
+        ib_order_id: str | None,
+    ) -> tuple[str | None, str | None]:
+        if command_id:
+            cursor.execute(
+                "SELECT id FROM orders WHERE command_id = ?", (command_id,)
+            )
+            row = cursor.fetchone()
+            if row:
+                return "command_id", command_id
+        if ib_order_id:
+            cursor.execute(
+                "SELECT id FROM orders WHERE ib_order_id = ?", (ib_order_id,)
+            )
+            row = cursor.fetchone()
+            if row:
+                return "ib_order_id", ib_order_id
+        return None, None
+
+    def _insert_sqlite(self, cursor: Any, prepared: dict[str, Any]) -> int:
+        columns = list(prepared.keys())
+        placeholders = ", ".join(f":{col}" for col in columns)
+        sql = "INSERT INTO orders ({cols}) VALUES ({values})".format(
+            cols=", ".join(columns), values=placeholders
+        )
+        cursor.execute(sql, prepared)
+        lastrowid = getattr(cursor, "lastrowid", None)
+        if lastrowid is None:
+            raise OrderRepositoryError("Failed to obtain inserted order id")
+        return int(lastrowid)
+
+    def _update_sqlite(
+        self,
+        cursor: Any,
+        prepared: dict[str, Any],
+        match_column: str,
+        match_value: str,
+    ) -> None:
+        update_columns = [
+            col for col in prepared.keys() if col not in {"created_at", "updated_at"}
+        ]
+        assignments = ", ".join(f"{col} = :{col}" for col in update_columns)
+        params = {col: prepared[col] for col in update_columns}
+        if "updated_at" in prepared:
+            if assignments:
+                assignments += ", updated_at = :updated_at"
+            else:
+                assignments = "updated_at = :updated_at"
+            params["updated_at"] = prepared["updated_at"]
+        else:
+            if assignments:
+                assignments += ", updated_at = CURRENT_TIMESTAMP"
+            else:
+                assignments = "updated_at = CURRENT_TIMESTAMP"
+        if not assignments:
+            assignments = "updated_at = CURRENT_TIMESTAMP"
+        params[match_column] = match_value
+        sql = "UPDATE orders SET {assignments} WHERE {column} = :{column}".format(
+            assignments=assignments, column=match_column
+        )
+        cursor.execute(sql, params)
+
+    def _find_existing_mariadb(
+        self,
+        cursor: Any,
+        command_id: str | None,
+        ib_order_id: str | None,
+    ) -> tuple[str | None, str | None]:
+        if command_id:
+            cursor.execute(
+                "SELECT id FROM orders WHERE command_id = %s", (command_id,)
+            )
+            row = cursor.fetchone()
+            if row:
+                return "command_id", command_id
+        if ib_order_id:
+            cursor.execute(
+                "SELECT id FROM orders WHERE ib_order_id = %s", (ib_order_id,)
+            )
+            row = cursor.fetchone()
+            if row:
+                return "ib_order_id", ib_order_id
+        return None, None
+
+    def _insert_mariadb(self, cursor: Any, prepared: dict[str, Any]) -> int:
+        columns = list(prepared.keys())
+        placeholders = ", ".join(f"%({col})s" for col in columns)
+        sql = "INSERT INTO orders ({cols}) VALUES ({values})".format(
+            cols=", ".join(columns), values=placeholders
+        )
+        cursor.execute(sql, prepared)
+        lastrowid = getattr(cursor, "lastrowid", None)
+        if lastrowid is None:
+            raise OrderRepositoryError("Failed to obtain inserted order id")
+        return int(lastrowid)
+
+    def _update_mariadb(
+        self,
+        cursor: Any,
+        prepared: dict[str, Any],
+        match_column: str,
+        match_value: str,
+    ) -> None:
+        update_columns = [
+            col for col in prepared.keys() if col not in {"created_at", "updated_at"}
+        ]
+        assignments = ", ".join(f"{col} = %({col})s" for col in update_columns)
+        params = {col: prepared[col] for col in update_columns}
+        if "updated_at" in prepared:
+            if assignments:
+                assignments += ", updated_at = %(updated_at)s"
+            else:
+                assignments = "updated_at = %(updated_at)s"
+            params["updated_at"] = prepared["updated_at"]
+        else:
+            if assignments:
+                assignments += ", updated_at = NOW()"
+            else:
+                assignments = "updated_at = NOW()"
+        if not assignments:
+            assignments = "updated_at = NOW()"
+        params[match_column] = match_value
+        sql = "UPDATE orders SET {assignments} WHERE {column} = %({column})s".format(
+            assignments=assignments, column=match_column
+        )
+        cursor.execute(sql, params)
