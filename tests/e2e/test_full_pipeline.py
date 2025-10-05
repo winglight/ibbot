@@ -298,27 +298,7 @@ class DummyPubSubListener:
 
 class RecordingSnapshotRepository:
     def __init__(self) -> None:
-        self.config_snapshots: list[dict[str, Any]] = []
         self.rule_snapshots: list[dict[str, Any]] = []
-
-    async def save_config_snapshot(
-        self,
-        *,
-        service: str,
-        payload: Mapping[str, Any],
-        rules_count: int,
-        updated_at: str | None = None,
-        captured_at: str | datetime | None = None,
-    ) -> None:
-        self.config_snapshots.append(
-            {
-                "service": service,
-                "payload": dict(payload),
-                "rules_count": rules_count,
-                "updated_at": updated_at,
-                "captured_at": captured_at,
-            }
-        )
 
     async def bulk_upsert_rule_snapshots(
         self,
@@ -336,6 +316,31 @@ class RecordingSnapshotRepository:
                 "captured_at": captured_at,
             }
         )
+
+
+class RecordingConfigRepositorySnapshot:
+    def __init__(self, module: str, values: Mapping[str, str], version: str | None = None) -> None:
+        self.module = module
+        self.values = dict(values)
+        self.version = version
+
+
+class RecordingConfigRepository:
+    def __init__(self) -> None:
+        self.modules: dict[str, dict[str, str]] = {}
+        self.saved: list[tuple[str, dict[str, str]]] = []
+
+    async def load_module(self, module: str) -> RecordingConfigRepositorySnapshot:
+        values = dict(self.modules.get(module, {}))
+        return RecordingConfigRepositorySnapshot(module, values, values.get("__version__"))
+
+    async def save_module(
+        self, module: str, values: Mapping[str, str]
+    ) -> RecordingConfigRepositorySnapshot:
+        prepared = {str(key): str(value) for key, value in values.items()}
+        self.modules[module] = dict(prepared)
+        self.saved.append((module, dict(prepared)))
+        return RecordingConfigRepositorySnapshot(module, prepared, prepared.get("__version__"))
 
 
 class RecordingMetricsRepository:
@@ -482,6 +487,7 @@ async def _run_market_strategy_risk_flow(monkeypatch: pytest.MonkeyPatch) -> Non
     pubsub = DummyPubSubListener()
     metrics_repo = RecordingMetricsRepository()
     snapshot_repo = RecordingSnapshotRepository()
+    config_repo = RecordingConfigRepository()
 
     queue_key = "queue:ib:commands"
     result_stream = "stream:ib:results"
@@ -588,9 +594,13 @@ async def _run_market_strategy_risk_flow(monkeypatch: pytest.MonkeyPatch) -> Non
     async def _risk_repository_factory() -> Any:
         return snapshot_repo
 
+    async def _config_repository_factory() -> Any:
+        return config_repo
+
     risk_runtime = RiskRuntime(
         redis_factory=redis_factory,
         risk_snapshot_repository_factory=_risk_repository_factory,
+        config_repository_factory=_config_repository_factory,
         logger_name="tests.risk-service",
         service_name="tests.risk-service",
         poll_interval=0.05,
@@ -678,6 +688,7 @@ async def _run_market_strategy_risk_flow(monkeypatch: pytest.MonkeyPatch) -> Non
         assert {"job-1-order", risk_command_id} <= set(published_ids)
         broadcast_ids = {message["command_id"] for message in publisher.broadcasts}
         assert broadcast_ids == set(published_ids)
+        assert config_repo.saved
     finally:
         command_consumer.stop()
         strategy_consumer.stop()

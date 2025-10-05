@@ -14,7 +14,9 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 
 from services.risk import RiskRuntime
 from services.risk.runtime import (
+    ConfigRepositoryFactory,
     RiskSnapshotRepositoryFactory,
+    create_config_repository_factory,
     create_risk_snapshot_repository_factory,
 )
 from services.risk.engine import RiskRule
@@ -142,6 +144,7 @@ async def _lifespan(
     *,
     runtime_factory: Callable[[Any, RiskSnapshotRepositoryFactory | None], RiskRuntime],
     snapshot_repository_factory: RiskSnapshotRepositoryFactory | None = None,
+    config_repository_factory: ConfigRepositoryFactory | None = None,
     initial_config: Mapping[str, Any] | None = None,
     health_interval: float = DEFAULT_HEALTH_INTERVAL,
     redis_factory: Callable[[], Any] | None = None,
@@ -161,6 +164,7 @@ async def _lifespan(
         await provider.start()
 
     snapshot_repository_factory = snapshot_repository_factory or create_risk_snapshot_repository_factory()
+    config_repository_factory = config_repository_factory or create_config_repository_factory()
 
     try:
         config_payload = dict(initial_config or {})
@@ -177,6 +181,11 @@ async def _lifespan(
             and snapshot_repository_factory is not None
         ):
             runtime.risk_snapshot_repository_factory = snapshot_repository_factory
+        if (
+            getattr(runtime, "config_repository_factory", None) is None
+            and config_repository_factory is not None
+        ):
+            runtime.config_repository_factory = config_repository_factory
 
         stored_config = await runtime.load_risk_config()
         if not stored_config and config_payload:

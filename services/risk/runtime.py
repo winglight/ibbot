@@ -28,7 +28,8 @@ except Exception:  # pragma: no cover - redis might be unavailable in CI
     Redis = Any  # type: ignore[misc, assignment]
 
 if TYPE_CHECKING:  # pragma: no cover - typing helpers
-    from src.db import RiskSnapshotRepository
+    from src.db import ConfigRepository, RiskSnapshotRepository
+    from src.db.repositories.config import ModuleConfigSnapshot
 
 
 def _utc_now() -> datetime:
@@ -42,17 +43,6 @@ async def _maybe_await(result: Awaitable[Any] | Any) -> Any:
 
 
 class RiskSnapshotRepositoryProtocol(Protocol):
-    async def save_config_snapshot(
-        self,
-        *,
-        service: str,
-        payload: Mapping[str, Any],
-        rules_count: int,
-        updated_at: str | datetime | None = None,
-        captured_at: datetime | str | None = None,
-    ) -> None:
-        ...
-
     async def bulk_upsert_rule_snapshots(
         self,
         *,
@@ -103,7 +93,9 @@ class RiskRuntime:
 
     redis_factory: Callable[[], Awaitable[Redis]]
     risk_snapshot_repository: RiskSnapshotRepositoryProtocol | None = None
+    config_repository: ConfigRepositoryProtocol | None = None
     risk_snapshot_repository_factory: RiskSnapshotRepositoryFactory | None = None
+    config_repository_factory: ConfigRepositoryFactory | None = None
     logger_name: str = "risk-service"
     service_name: str = "risk-service"
     market_stream_key: str = "stream:market-service"
@@ -158,6 +150,9 @@ class RiskRuntime:
     _risk_snapshot_repository_created: bool = field(
         default=False, init=False, repr=False
     )
+    _config_repository_created: bool = field(
+        default=False, init=False, repr=False
+    )
 
     # ------------------------------------------------------------------
     # redis helpers
@@ -203,18 +198,92 @@ class RiskRuntime:
     async def load_risk_config(self) -> dict[str, Any]:
         redis = await self._get_cache_redis()
         if redis is None:
+            repository_config = await self._load_config_from_repository()
+            if repository_config:
+                return repository_config
             return dict(self._config_snapshot)
         try:
             payload = await redis.hgetall(self.config_hash_key)
         except Exception:
+            repository_config = await self._load_config_from_repository()
+            if repository_config:
+                return repository_config
             return dict(self._config_snapshot)
         if not payload:
+            repository_config = await self._load_config_from_repository()
+            if repository_config:
+                return repository_config
             return dict(self._config_snapshot)
         config: dict[str, Any] = {}
         for key, value in payload.items():
             key_str = key.decode("utf-8") if isinstance(key, bytes) else str(key)
             config[key_str] = self._decode_value(value)
         return config
+
+    async def _load_config_from_repository(self) -> dict[str, Any]:
+        repository = await self._ensure_config_repository()
+        if repository is None:
+            return {}
+
+        try:
+            snapshot = await repository.load_module(self.service_name)
+        except Exception:
+            logger = self._logger or get_logger(self.logger_name)
+            logger.debug("Failed to load config snapshot from repository", exc_info=True)
+            return {}
+
+        values: Mapping[str, Any] | None = None
+        if snapshot is None:
+            return {}
+        if isinstance(snapshot, Mapping):
+            candidate = snapshot.get("values")
+            if isinstance(candidate, Mapping):
+                values = candidate
+            elif isinstance(candidate, Sequence) and not isinstance(
+                candidate, (str, bytes, bytearray)
+            ):
+                values = {str(index): entry for index, entry in enumerate(candidate)}
+            elif isinstance(snapshot, Mapping):
+                values = snapshot
+        else:
+            candidate = getattr(snapshot, "values", None)
+            if isinstance(candidate, Mapping):
+                values = candidate
+
+        if not values:
+            return {}
+
+        def _parse_payload(raw: Any) -> dict[str, Any] | None:
+            if raw is None:
+                return None
+            if isinstance(raw, Mapping):
+                return {str(k): v for k, v in raw.items()}
+            if isinstance(raw, bytes):
+                text = raw.decode("utf-8", errors="ignore")
+            else:
+                text = str(raw)
+            if not text:
+                return None
+            try:
+                data = json.loads(text)
+            except (TypeError, ValueError):
+                return None
+            if isinstance(data, Mapping):
+                return {str(k): v for k, v in data.items()}
+            return None
+
+        for key in ("snapshot", "config", "payload", "risk_config"):
+            candidate = values.get(key)
+            parsed = _parse_payload(candidate)
+            if parsed is not None:
+                return parsed
+
+        if all(isinstance(v, (str, bytes)) for v in values.values()):
+            parsed = _parse_payload({k: v for k, v in values.items()})
+            if parsed is not None:
+                return parsed
+
+        return {}
 
     async def save_risk_config(self, updates: Mapping[str, Any]) -> dict[str, Any]:
         config = await self.load_risk_config()
@@ -698,13 +767,13 @@ class RiskRuntime:
             self._dump_json(message),
         )
 
-    async def _persist_repository_snapshot(
+    async def _persist_config_snapshot(
         self,
         config_payload: Mapping[str, Any],
         rules_payload: Mapping[str, Mapping[str, Any]],
         timestamp: str,
     ) -> None:
-        repository = await self._ensure_risk_snapshot_repository()
+        repository = await self._ensure_config_repository()
         if repository is None:
             return
 
@@ -712,15 +781,25 @@ class RiskRuntime:
         config_snapshot.setdefault("updated_at", timestamp)
         config_snapshot["rules_count"] = int(len(rules_payload))
 
-        await repository.save_config_snapshot(
-            service=self.service_name,
-            payload=config_snapshot,
-            rules_count=int(len(rules_payload)),
-            updated_at=config_snapshot.get("updated_at"),
-            captured_at=timestamp,
-        )
+        payload = self._dump_json(config_snapshot)
+        values = {"snapshot": payload}
 
-        if not rules_payload:
+        try:
+            await repository.save_module(self.service_name, values)
+        except Exception:
+            logger = self._logger or get_logger(self.logger_name)
+            logger.debug("Failed to persist config snapshot", exc_info=True)
+
+    async def _persist_repository_snapshot(
+        self,
+        config_payload: Mapping[str, Any],
+        rules_payload: Mapping[str, Mapping[str, Any]],
+        timestamp: str,
+    ) -> None:
+        await self._persist_config_snapshot(config_payload, rules_payload, timestamp)
+
+        repository = await self._ensure_risk_snapshot_repository()
+        if repository is None or not rules_payload:
             return
 
         normalised_rules: dict[str, dict[str, Any]] = {}
@@ -768,6 +847,20 @@ class RiskRuntime:
             self._last_exception_message = str(exc)
             return None
         return self.risk_snapshot_repository
+
+    async def _ensure_config_repository(self) -> ConfigRepositoryProtocol | None:
+        if self.config_repository is not None:
+            return self.config_repository
+        try:
+            await self._initialise_config_repository()
+        except Exception as exc:
+            logger = self._logger or get_logger(self.logger_name)
+            logger.warning(
+                "Failed to initialise config repository", exc_info=True
+            )
+            self._last_exception_message = str(exc)
+            return None
+        return self.config_repository
 
     async def _initialise_risk_snapshot_repository(self) -> None:
         if self.risk_snapshot_repository is not None:
@@ -835,6 +928,44 @@ class RiskRuntime:
             repository, *extra_resources
         )
 
+    async def _initialise_config_repository(self) -> None:
+        if self.config_repository is not None:
+            return
+        factory = self.config_repository_factory
+        if factory is None:
+            return
+        repository_candidate = factory()
+        result = await _maybe_await(repository_candidate)
+
+        repository: ConfigRepositoryProtocol | None = None
+
+        if isinstance(result, Mapping):
+            for key in (
+                "repository",
+                "config_repository",
+                "instance",
+                "value",
+                "object",
+            ):
+                candidate = result.get(key)
+                if candidate is not None:
+                    repository = candidate  # type: ignore[assignment]
+                    break
+        elif isinstance(result, Sequence) and not isinstance(
+            result, (str, bytes, bytearray)
+        ):
+            if result:
+                repository = result[0]  # type: ignore[assignment]
+        else:
+            repository = result  # type: ignore[assignment]
+
+        if repository is None:
+            self._config_repository_created = False
+            return
+
+        self.config_repository = repository
+        self._config_repository_created = True
+
     async def _shutdown_risk_snapshot_repository(self) -> None:
         closer = self._risk_snapshot_repository_close
         self._risk_snapshot_repository_close = None
@@ -849,6 +980,23 @@ class RiskRuntime:
         if self._risk_snapshot_repository_created:
             self.risk_snapshot_repository = None
             self._risk_snapshot_repository_created = False
+
+    async def _shutdown_config_repository(self) -> None:
+        if not self._config_repository_created:
+            return
+        repository = self.config_repository
+        self.config_repository = None
+        self._config_repository_created = False
+        closer = getattr(repository, "close", None)
+        if callable(closer):
+            try:
+                result = closer()
+                await _maybe_await(result)
+            except Exception:
+                logger = self._logger or get_logger(self.logger_name)
+                logger.debug(
+                    "Failed to close config repository", exc_info=True
+                )
 
     def _resolve_repository_close(
         self,
@@ -1203,6 +1351,7 @@ class RiskRuntime:
         self._redis = None
         self._pending_commands.clear()
         await self._shutdown_risk_snapshot_repository()
+        await self._shutdown_config_repository()
 
     async def _await_task(self, task: asyncio.Task[None] | None) -> None:
         if task is None:
@@ -1517,3 +1666,37 @@ class RiskRuntime:
         }
         await self.append_sizing_history(result)
         return result
+class ConfigRepositoryProtocol(Protocol):
+    async def load_module(self, module: str) -> "ModuleConfigSnapshot":
+        ...
+
+    async def save_module(
+        self, module: str, values: Mapping[str, str]
+    ) -> "ModuleConfigSnapshot":
+        ...
+
+
+ConfigRepositoryFactoryResult = (
+    ConfigRepositoryProtocol | Mapping[str, Any] | Sequence[Any] | None
+)
+
+
+ConfigRepositoryFactory = Callable[
+    [], Awaitable[ConfigRepositoryFactoryResult] | ConfigRepositoryFactoryResult
+]
+
+
+def create_config_repository_factory(
+    *, logger_name: str = "db.config"
+) -> ConfigRepositoryFactory | None:
+    """Return a factory that constructs the DB-API config repository."""
+
+    try:
+        from src.db.repositories.config import ConfigRepository
+    except ModuleNotFoundError:  # pragma: no cover - optional dependency
+        return None
+
+    def _factory() -> ConfigRepositoryProtocol:
+        return ConfigRepository(logger_name=logger_name)
+
+    return _factory
