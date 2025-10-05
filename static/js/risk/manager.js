@@ -855,6 +855,7 @@
                 take_profit_price: document.getElementById('riskTakeProfitPrice').value ? parseFloat(document.getElementById('riskTakeProfitPrice').value) : null,
                 max_time_span: document.getElementById('riskMaxTime').value || null,
                 rule_type: selectedRuleType,
+                enabled: true,
             };
 
             if (selectedRuleType === 'trailing') {
@@ -884,7 +885,7 @@
                 document.getElementById('riskRuleForm').reset();
                 this.populateAtrParams({});
                 this.handleRuleTypeSwitch('fixed');
-                this.loadRiskRules({ force: true });
+                await this.loadRiskRules({ force: true });
 
                 const modal = bootstrap.Modal.getInstance(document.getElementById('riskRuleModal'));
                 if (modal) {
