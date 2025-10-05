@@ -7,7 +7,6 @@ import pytest
 
 import src.dom_service as dom_service_module
 from src.dom_dependencies import DOMConfig
-from src.dom_processor import DOMProcessor
 
 
 @pytest.fixture()
@@ -16,10 +15,23 @@ def isolated_dom_service(monkeypatch: pytest.MonkeyPatch):
 
     dom_config = DOMConfig()
     monkeypatch.setattr(dom_service_module, "dom_config", dom_config)
-
-    processor = DOMProcessor(window=dom_config.window, max_levels=dom_config.max_levels)
-    monkeypatch.setattr(dom_service_module, "get_dom_processor", lambda: processor)
     monkeypatch.setattr(dom_service_module, "set_dom_processor", lambda _: None)
+
+    class _DummyProcessor:
+        def __init__(self, window: int, max_levels: int, parameter_tuner: Any | None = None) -> None:
+            self.window = window
+            self.max_levels = max_levels
+            self.parameter_tuner = parameter_tuner
+            self.last_metrics: Dict[str, Any] = {}
+            self.last_signals: Dict[str, Any] = {}
+            self.last_events: List[Any] = []
+
+        def on_depth_update(self, snapshot: Dict[str, Any]) -> None:  # pragma: no cover - helper stub
+            return None
+
+    processor = _DummyProcessor(window=dom_config.window, max_levels=dom_config.max_levels)
+    monkeypatch.setattr(dom_service_module, "DOMProcessor", _DummyProcessor)
+    monkeypatch.setattr(dom_service_module, "get_dom_processor", lambda: processor)
 
     yield
 
