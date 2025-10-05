@@ -212,6 +212,11 @@ const context = {
     utils: {
       TrendSignalLabelPlugin: { afterDatasetsDraw: () => {} },
       slugifyStrategyName: (name) => name,
+      strategyFilenameToDisplayName: (filename) => String(filename || '').replace(/\.py$/i, '').split('_').map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join(' '),
+      strategyDisplayNameToFilename: (name) => {
+        const base = String(name || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/_+/g, '_').replace(/^_+|_+$/g, '');
+        return base ? `${base}.py` : '';
+      },
       formatNumber: (n) => String(n),
       escapeHtml: (v) => v,
       formatDuration: (v) => v,

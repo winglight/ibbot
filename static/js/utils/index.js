@@ -11,6 +11,28 @@
             .replace(/^_+|_+$/g, '');
     }
 
+    function strategyFilenameToDisplayName(filename) {
+        if (!filename) return '';
+        const withoutExt = String(filename).replace(/\.py$/i, '').trim();
+        if (!withoutExt) return '';
+        const normalized = withoutExt
+            .replace(/[\\/]+/g, ' ')
+            .replace(/[_\s]+/g, ' ')
+            .trim();
+        if (!normalized) return '';
+        return normalized
+            .split(' ')
+            .filter(Boolean)
+            .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+            .join(' ');
+    }
+
+    function strategyDisplayNameToFilename(displayName) {
+        const safeBase = slugifyStrategyName(displayName);
+        if (!safeBase) return '';
+        return `${safeBase}.py`;
+    }
+
     const TrendSignalLabelPlugin = {
         id: 'trendSignalLabel',
         afterDatasetsDraw(chart, args, opts) {
@@ -178,6 +200,8 @@
     }
 
     utils.slugifyStrategyName = slugifyStrategyName;
+    utils.strategyFilenameToDisplayName = strategyFilenameToDisplayName;
+    utils.strategyDisplayNameToFilename = strategyDisplayNameToFilename;
     utils.TrendSignalLabelPlugin = TrendSignalLabelPlugin;
     utils.formatNumber = formatNumber;
     utils.escapeHtml = escapeHtml;
@@ -187,6 +211,8 @@
 
     if (root && typeof root === 'object') {
         root.slugifyStrategyName = root.slugifyStrategyName || slugifyStrategyName;
+        root.strategyFilenameToDisplayName = root.strategyFilenameToDisplayName || strategyFilenameToDisplayName;
+        root.strategyDisplayNameToFilename = root.strategyDisplayNameToFilename || strategyDisplayNameToFilename;
         root.formatNumber = root.formatNumber || formatNumber;
     }
 })(typeof window !== 'undefined' ? window : globalThis);
