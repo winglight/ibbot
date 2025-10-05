@@ -290,15 +290,6 @@ class IBKRConnectionManager {
         });
     }
 
-    requestDomAutomationStatus(options = {}) {
-        const payload = { type: 'request_dom_automation_status' };
-        if (options.force) payload.force = true;
-        return this._sendThrottled('dom_automation_status', payload, {
-            force: Boolean(options.force),
-            minInterval: options.minInterval ?? 15000,
-        });
-    }
-
     requestDomStats(options = {}) {
         const symbol = options.symbol || '';
         const payload = { type: 'request_dom_stats', symbol };
