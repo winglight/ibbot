@@ -21,7 +21,13 @@ _risk_logger = logger.bind(module="strategy_risk_manager", request_id="-")
 
 
 class StrategyRiskManager:
-    """Lightweight facade tailored for strategy components."""
+    """Lightweight facade tailored for strategy components.
+
+    The manager now prefers Redis snapshots (``hash:risk:rules``) for active
+    rule payloads so strategies see the same stop/limit levels as the risk
+    engine. When the cache is unavailable it transparently falls back to the
+    risk service HTTP client, preserving existing behaviour.
+    """
 
     def __init__(
         self,
@@ -29,10 +35,12 @@ class StrategyRiskManager:
         client: RiskServiceClient | None = None,
         redis_client: Any | None = None,
         settings_prefix: str = "json:strategy",
+        rules_hash_key: str = "hash:risk:rules",
     ) -> None:
         self._client = client or RiskServiceClient()
         self._redis = redis_client
         self._settings_prefix = settings_prefix.rstrip(":")
+        self._rules_hash_key = rules_hash_key
 
     async def _call(self, action: str, **kwargs: Any) -> Any:
         try:
@@ -115,6 +123,10 @@ class StrategyRiskManager:
 
     async def load_rules(self) -> dict[str, dict[str, Any]]:
         """Return a mapping of symbol to rule payloads."""
+
+        cached = await self._load_rules_from_cache()
+        if cached:
+            return cached
 
         payload = await self.list_rules()
         return self._normalise_rules_payload(payload)
@@ -244,3 +256,60 @@ class StrategyRiskManager:
             if isinstance(value, Mapping):
                 normalised[symbol.upper()] = {str(k): v for k, v in value.items()}
         return normalised
+
+    async def _load_rules_from_cache(self) -> dict[str, dict[str, Any]]:
+        """Return rules stored in Redis without querying the risk service."""
+
+        if not self._redis:
+            return {}
+        try:
+            payload = await self._redis.hgetall(self._rules_hash_key)
+        except Exception:  # pragma: no cover - defensive guard
+            return {}
+        if not payload:
+            return {}
+
+        rules: dict[str, dict[str, Any]] = {}
+        for raw_symbol, raw_value in payload.items():
+            symbol = self._decode_symbol(raw_symbol)
+            if not symbol:
+                continue
+            decoded = self._decode_cached_rule(raw_value)
+            if not isinstance(decoded, Mapping):
+                continue
+            rule_payload = {str(k): v for k, v in decoded.items()}
+            symbol_key = str(rule_payload.get("symbol") or symbol).strip().upper()
+            if not symbol_key:
+                continue
+            rule_payload["symbol"] = symbol_key
+            rules[symbol_key] = rule_payload
+        return rules
+
+    @staticmethod
+    def _decode_symbol(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, bytes):
+            return value.decode("utf-8", errors="ignore").strip().upper()
+        return str(value).strip().upper()
+
+    @staticmethod
+    def _decode_cached_rule(raw: Any) -> Any:
+        if raw is None:
+            return None
+        if isinstance(raw, Mapping):
+            return {str(k): v for k, v in raw.items()}
+        if isinstance(raw, bytes):
+            text = raw.decode("utf-8", errors="ignore")
+        else:
+            text = str(raw)
+        text = text.strip()
+        if not text:
+            return None
+        try:
+            data = json.loads(text)
+        except (TypeError, ValueError):
+            return None
+        if isinstance(data, Mapping):
+            return {str(k): v for k, v in data.items()}
+        return data
