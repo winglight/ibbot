@@ -390,9 +390,17 @@
                         ]);
                         try {
                             const detailRes = await this.app?.apiCall?.(`/strategies/${encodeURIComponent(currentName)}`);
-                            if (detailRes?.success) {
-                                this.updateStrategyDetailsHeader(detailRes.strategy || {});
-                            }
+                            const detailStrategy = detailRes && typeof detailRes === 'object'
+                                ? (detailRes.success === undefined
+                                    ? detailRes
+                                    : detailRes.success
+                                        ? detailRes.strategy || null
+                                        : null)
+                                : null;
+                            const normalizedDetail = detailStrategy
+                                ? this.app?.normalizeStrategyDocument?.(detailStrategy) || detailStrategy
+                                : null;
+                            this.updateStrategyDetailsHeader(normalizedDetail);
                         } catch (refreshErr) {
                             console.warn('Failed to refresh strategy info after reset', refreshErr);
                             this.updateStrategyDetailsHeader(null);
@@ -519,8 +527,10 @@
             if (this.strategyDetailsState.name !== name) {
                 return;
             }
-            const normalizedStrategy = strategy ? this.app?.normalizeStrategyDocument?.(strategy) : null;
-            const resolved = normalizedStrategy || normalizedCached || null;
+            const resolved = strategy
+                || this.strategyDetailsState.basicInfo
+                || normalizedCached
+                || null;
             this.strategyDetailsState.basicInfo = resolved;
             this.updateStrategyDetailsHeader(resolved);
             this.configureStrategyDetailsTabs(resolved);
@@ -660,19 +670,25 @@
             if (!state || state.name !== name) return null;
             if (!state.fetches.basicInfo) {
                 state.fetches.basicInfo = (async () => {
+                    let normalized = null;
                     try {
                         const res = await this.app?.apiCall?.(`/strategies/${encodeURIComponent(name)}`);
-                        if (res?.success) {
-                            const strategy = res.strategy || null;
-                            if (!strategy) {
-                                return null;
+                        if (res && typeof res === 'object') {
+                            let strategyPayload = res;
+                            if (Object.prototype.hasOwnProperty.call(res, 'success')) {
+                                strategyPayload = res.success ? res.strategy || null : null;
                             }
-                            return this.app?.normalizeStrategyDocument?.(strategy) || strategy;
+                            if (strategyPayload && typeof strategyPayload === 'object') {
+                                normalized = this.app?.normalizeStrategyDocument?.(strategyPayload) || strategyPayload;
+                            }
                         }
                     } catch (err) {
                         console.error('Failed to load strategy info:', err);
                     }
-                    return null;
+                    if (this.strategyDetailsState && this.strategyDetailsState.name === name) {
+                        this.strategyDetailsState.basicInfo = normalized || null;
+                    }
+                    return normalized || null;
                 })();
             }
             try {
