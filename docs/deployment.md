@@ -151,7 +151,7 @@ GitHub Actions `ci.yml` 增加了 Docker Compose 冒烟测试步骤，会在拉�
 3. **刷新服务缓存**：完成插入后运行 `scripts/diagnose_foundation.py --module <module>` 或调用 `/api/config/<module>/refresh`（如前端提供）确保各服务加载新配置。
 4. **清理 Redis 备份**：验证服务读取正常后，可删除旧的 `hash:config:<module>`，避免后续写入被误读。
 
-迁移期间 `ConfigProvider` 会优先读取 MariaDB，当数据库不可用时仍会回退到 Redis，因此可以先写入新表再逐步清除 Redis 记录。
+完成迁移后 `ConfigProvider` 仅使用 MariaDB 作为配置持久层，Redis 仅承担缓存与通知职责。请在清理旧键之前确认数据库写入与读取均正常。
 
 ## 更多运维资料
 
