@@ -371,12 +371,21 @@ class OrderRepository:
 
             command_id = prepared.get("command_id")
             ib_order_id = prepared.get("ib_order_id")
+            client_order_id = prepared.get("client_order_id")
+            order_id = prepared.get("order_id")
+
             if command_id is not None:
                 command_id = str(command_id)
                 prepared["command_id"] = command_id
             if ib_order_id is not None:
                 ib_order_id = str(ib_order_id)
                 prepared["ib_order_id"] = ib_order_id
+            if client_order_id is not None:
+                client_order_id = str(client_order_id)
+                prepared["client_order_id"] = client_order_id
+            if order_id is not None:
+                order_id = str(order_id)
+                prepared["order_id"] = order_id
 
             if command_id is None and ib_order_id is None:
                 raise RepositoryValidationError(
@@ -387,7 +396,7 @@ class OrderRepository:
             try:
                 if is_sqlite(connection):
                     match_column, match_value = self._find_existing_sqlite(
-                        cursor, command_id, ib_order_id
+                        cursor, command_id, ib_order_id, client_order_id, order_id
                     )
                     if match_column is None:
                         inserted_id = self._insert_sqlite(cursor, prepared)
@@ -398,7 +407,11 @@ class OrderRepository:
                     return None
 
                 match_column, match_value = self._find_existing_mariadb(
-                    cursor, command_id, ib_order_id
+                    cursor,
+                    command_id,
+                    ib_order_id,
+                    client_order_id,
+                    order_id,
                 )
                 if match_column is None:
                     inserted_id = self._insert_mariadb(cursor, prepared)
@@ -424,21 +437,27 @@ class OrderRepository:
         cursor: Any,
         command_id: str | None,
         ib_order_id: str | None,
+        client_order_id: str | None,
+        order_id: str | None,
     ) -> tuple[str | None, str | None]:
-        if command_id:
+        lookups: tuple[tuple[str, str | None], ...] = (
+            ("command_id", command_id),
+            ("ib_order_id", ib_order_id),
+            ("client_order_id", client_order_id),
+            ("order_id", order_id),
+        )
+
+        for column, value in lookups:
+            if value is None:
+                continue
+            if isinstance(value, str) and not value:
+                continue
             cursor.execute(
-                "SELECT id FROM orders WHERE command_id = ?", (command_id,)
+                f"SELECT id FROM orders WHERE {column} = ?", (value,)
             )
             row = cursor.fetchone()
             if row:
-                return "command_id", command_id
-        if ib_order_id:
-            cursor.execute(
-                "SELECT id FROM orders WHERE ib_order_id = ?", (ib_order_id,)
-            )
-            row = cursor.fetchone()
-            if row:
-                return "ib_order_id", ib_order_id
+                return column, value
         return None, None
 
     def _insert_sqlite(self, cursor: Any, prepared: dict[str, Any]) -> int:
@@ -489,21 +508,27 @@ class OrderRepository:
         cursor: Any,
         command_id: str | None,
         ib_order_id: str | None,
+        client_order_id: str | None,
+        order_id: str | None,
     ) -> tuple[str | None, str | None]:
-        if command_id:
+        lookups: tuple[tuple[str, str | None], ...] = (
+            ("command_id", command_id),
+            ("ib_order_id", ib_order_id),
+            ("client_order_id", client_order_id),
+            ("order_id", order_id),
+        )
+
+        for column, value in lookups:
+            if value is None:
+                continue
+            if isinstance(value, str) and not value:
+                continue
             cursor.execute(
-                "SELECT id FROM orders WHERE command_id = %s", (command_id,)
+                f"SELECT id FROM orders WHERE {column} = %s", (value,)
             )
             row = cursor.fetchone()
             if row:
-                return "command_id", command_id
-        if ib_order_id:
-            cursor.execute(
-                "SELECT id FROM orders WHERE ib_order_id = %s", (ib_order_id,)
-            )
-            row = cursor.fetchone()
-            if row:
-                return "ib_order_id", ib_order_id
+                return column, value
         return None, None
 
     def _insert_mariadb(self, cursor: Any, prepared: dict[str, Any]) -> int:
