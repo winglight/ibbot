@@ -22,6 +22,8 @@ class RecordingRepository:
         self._next_id = 1
         self._by_command: dict[str, int] = {}
         self._by_ib: dict[str, int] = {}
+        self._by_client: dict[str, int] = {}
+        self._by_order: dict[str, int] = {}
         self.created_ids: list[int] = []
         self.allow_insert_flags: list[bool] = []
 
@@ -34,6 +36,8 @@ class RecordingRepository:
 
         command_id = _coerce_str(record.get("command_id"))
         ib_order_id = _coerce_str(record.get("ib_order_id"))
+        client_order_id = _coerce_str(record.get("client_order_id"))
+        order_id = _coerce_str(record.get("order_id"))
 
         assigned: int | None = None
         created = False
@@ -41,6 +45,10 @@ class RecordingRepository:
             assigned = self._by_command[command_id]
         elif ib_order_id and ib_order_id in self._by_ib:
             assigned = self._by_ib[ib_order_id]
+        elif client_order_id and client_order_id in self._by_client:
+            assigned = self._by_client[client_order_id]
+        elif order_id and order_id in self._by_order:
+            assigned = self._by_order[order_id]
 
         if assigned is None:
             if command_id is None and ib_order_id is None:
@@ -56,6 +64,10 @@ class RecordingRepository:
             self._by_command[command_id] = assigned
         if ib_order_id:
             self._by_ib[ib_order_id] = assigned
+        if client_order_id:
+            self._by_client[client_order_id] = assigned
+        if order_id:
+            self._by_order[order_id] = assigned
 
         return assigned if created else None
 

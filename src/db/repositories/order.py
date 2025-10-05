@@ -106,6 +106,50 @@ def _generate_order_id(symbol: Any) -> str:
     return f"auto-{safe}-{uuid.uuid4().hex}"
 
 
+def _iter_identifier_candidates(
+    *,
+    command_id: Any,
+    ib_order_id: Any,
+    client_order_id: Any,
+    order_id: Any,
+) -> tuple[tuple[str, str], ...]:
+    """Return unique identifier lookup candidates for repository queries."""
+
+    raw_pairs: tuple[tuple[str, Any], ...] = (
+        ("command_id", command_id),
+        ("ib_order_id", ib_order_id),
+        ("client_order_id", client_order_id),
+        ("order_id", order_id),
+    )
+
+    seen: set[tuple[str, str]] = set()
+    candidates: list[tuple[str, str]] = []
+
+    def _register(column: str, value: Any) -> None:
+        text = _coerce_str(value)
+        if text is None:
+            return
+        key = (column, text)
+        if key in seen:
+            return
+        seen.add(key)
+        candidates.append((column, text))
+
+    for column, value in raw_pairs:
+        _register(column, value)
+
+    # When identifiers are swapped between ``client_order_id`` and ``order_id``
+    # (a behaviour observed when reconciling IB-only events), try both values
+    # against each column before conceding that no existing row can be found.
+    client_text = _coerce_str(client_order_id)
+    order_text = _coerce_str(order_id)
+    if client_text and order_text and client_text != order_text:
+        _register("client_order_id", order_text)
+        _register("order_id", client_text)
+
+    return tuple(candidates)
+
+
 def _normalise_order_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     request = _coerce_mapping(payload.get("request")) or {}
     response = _coerce_mapping(payload.get("response")) or {}
@@ -273,7 +317,7 @@ def _normalise_order_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         "raw_payload": _normalise_raw(payload),
     }
 
-    if exchange is not None:
+    if exchange:
         normalised["exchange"] = exchange
 
     normalised["strategy"] = strategy_value
@@ -448,18 +492,12 @@ class OrderRepository:
         client_order_id: str | None,
         order_id: str | None,
     ) -> tuple[str | None, str | None]:
-        lookups: tuple[tuple[str, str | None], ...] = (
-            ("command_id", command_id),
-            ("ib_order_id", ib_order_id),
-            ("client_order_id", client_order_id),
-            ("order_id", order_id),
-        )
-
-        for column, value in lookups:
-            if value is None:
-                continue
-            if isinstance(value, str) and not value:
-                continue
+        for column, value in _iter_identifier_candidates(
+            command_id=command_id,
+            ib_order_id=ib_order_id,
+            client_order_id=client_order_id,
+            order_id=order_id,
+        ):
             cursor.execute(
                 f"SELECT id FROM orders WHERE {column} = ?", (value,)
             )
@@ -519,18 +557,12 @@ class OrderRepository:
         client_order_id: str | None,
         order_id: str | None,
     ) -> tuple[str | None, str | None]:
-        lookups: tuple[tuple[str, str | None], ...] = (
-            ("command_id", command_id),
-            ("ib_order_id", ib_order_id),
-            ("client_order_id", client_order_id),
-            ("order_id", order_id),
-        )
-
-        for column, value in lookups:
-            if value is None:
-                continue
-            if isinstance(value, str) and not value:
-                continue
+        for column, value in _iter_identifier_candidates(
+            command_id=command_id,
+            ib_order_id=ib_order_id,
+            client_order_id=client_order_id,
+            order_id=order_id,
+        ):
             cursor.execute(
                 f"SELECT id FROM orders WHERE {column} = %s", (value,)
             )

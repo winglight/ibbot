@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Any
 
 import pytest
+
+from src.db.repositories.order import OrderRepository, _normalise_order_payload
 
 
 @pytest.mark.asyncio
@@ -217,6 +220,9 @@ async def test_order_repository_uses_default_exchange_when_value_missing(
     if exchange_value is not None:
         payload["exchange"] = exchange_value
 
+    normalised = _normalise_order_payload(payload)
+    assert "exchange" not in normalised
+
     inserted_id = await repo.upsert_order(payload)
     assert isinstance(inserted_id, int)
 
@@ -248,4 +254,56 @@ async def test_order_repository_persists_exchange_when_present(
     ).fetchone()
 
     assert row["exchange"] == "NYSE"
+
+
+class _LookupCursor:
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self._rows = rows
+        self._current: dict[str, Any] | None = None
+        self.queries: list[tuple[str, str]] = []
+
+    def execute(self, sql: str, params: tuple[str, ...]) -> None:
+        where_clause = sql.split("WHERE", 1)[1]
+        column = where_clause.split("=", 1)[0].strip().strip("`")
+        value = params[0]
+        self.queries.append((column, value))
+        self._current = None
+        for row in self._rows:
+            if row.get(column) == value:
+                self._current = {"id": row["id"]}
+                break
+
+    def fetchone(self) -> dict[str, Any] | None:
+        return self._current
+
+
+def test_find_existing_helpers_match_swapped_identifiers() -> None:
+    repo = OrderRepository()
+    rows = [
+        {
+            "id": 42,
+            "command_id": None,
+            "ib_order_id": None,
+            "client_order_id": "CLIENT-123",
+            "order_id": "ORDER-456",
+        }
+    ]
+    cursor = _LookupCursor(rows)
+
+    column, value = repo._find_existing_sqlite(
+        cursor, None, None, "ORDER-456", "CLIENT-123"
+    )
+
+    assert column == "client_order_id"
+    assert value == "CLIENT-123"
+    assert ("client_order_id", "CLIENT-123") in cursor.queries
+
+    cursor_mysql = _LookupCursor(rows)
+    column_mysql, value_mysql = repo._find_existing_mariadb(
+        cursor_mysql, None, None, "ORDER-456", "CLIENT-123"
+    )
+
+    assert column_mysql == "client_order_id"
+    assert value_mysql == "CLIENT-123"
+    assert ("client_order_id", "CLIENT-123") in cursor_mysql.queries
 
