@@ -109,7 +109,9 @@ def test_discovered_strategy_available_on_start(redis_client: InMemoryRedis) -> 
     assert any(entry.get("name") == "BuyTheDipStrategy" for entry in payload)
 
 
-def test_filesystem_strategies_discovered(redis_client: InMemoryRedis, tmp_path: Path) -> None:
+def test_filesystem_strategies_exposed_via_file_listing_only(
+    redis_client: InMemoryRedis, tmp_path: Path
+) -> None:
     strategy_dir = tmp_path / "strategies"
     strategy_dir.mkdir()
     file_path = strategy_dir / "filesystem_alpha.py"
@@ -131,11 +133,7 @@ def test_filesystem_strategies_discovered(redis_client: InMemoryRedis, tmp_path:
         assert strategies_response.status_code == 200
         strategies = strategies_response.json()
         names = [entry["name"] for entry in strategies]
-        assert "FilesystemAlpha" in names
-        fs_entry = next(entry for entry in strategies if entry["name"] == "FilesystemAlpha")
-        assert fs_entry["metadata"]["file"] == "filesystem_alpha.py"
-        assert fs_entry["metadata"]["source"] == "filesystem"
-        assert fs_entry["metadata"]["normalised_name"] == "FilesystemAlpha"
+        assert "FilesystemAlpha" not in names
 
 
 def test_strategy_crud_lifecycle(redis_client: InMemoryRedis) -> None:
