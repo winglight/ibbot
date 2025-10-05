@@ -23,6 +23,7 @@ _depth_logger = logger.bind(module="depth_subscriber", request_id="-")
 
 _SUBSCRIBE_TIMEOUT_SEC = 15.0
 _CANCEL_TIMEOUT_SEC = 5.0
+_CONNECT_RETRY_TIMEOUT_SEC = 10.0
 
 
 @dataclass
@@ -107,10 +108,39 @@ class DepthSubscriber:
             )
         num_rows = sanitized_rows
 
-        if not self.connection_manager.is_connected():
+        ensure_error: Optional[str] = None
+        try:
+            connected = self.connection_manager.connect(
+                timeout=_CONNECT_RETRY_TIMEOUT_SEC
+            )
+        except Exception as exc:
+            ensure_error = str(exc) or exc.__class__.__name__
+            connected = False
+            _depth_logger.warning(
+                "DepthSubscriber connection attempt failed", error=ensure_error
+            )
+
+        if not connected:
             reason = "IBKR connection not active for depth stream"
+            last_error: Optional[str] = None
+            try:
+                last_error = self.connection_manager.get_last_connect_error()
+            except Exception:
+                last_error = None
+            if not last_error and ensure_error:
+                last_error = ensure_error
+            if last_error:
+                reason = f"{reason}: {last_error}"
             self._set_last_error(reason, 400)
             _depth_logger.error(reason)
+            return False
+
+        if not self.connection_manager.is_connected():
+            reason = "IBKR connection not active for depth stream"
+            self._set_last_error(reason, 500)
+            _depth_logger.error(
+                "DepthSubscriber detected disconnected state after reconnect attempt"
+            )
             return False
 
         callbacks: List[Callable] = [callback]

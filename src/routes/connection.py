@@ -178,6 +178,7 @@ async def get_connection_status(user: Optional[str] = Depends(get_current_user))
     """
 
     try:
+        last_error: Optional[str] = None
         try:
             # Guard against rare blocking behaviour inside the IB client by
             # executing the check in a worker thread with a small timeout.
@@ -186,11 +187,28 @@ async def get_connection_status(user: Optional[str] = Depends(get_current_user))
                 timeout=1.0,
             )
         except asyncio.TimeoutError:
-            logger.warning("Connection status check timed out; using cached state")
-            is_connected = getattr(connection_manager, "connected", False)
+            logger.warning("Connection status check timed out; reporting disconnected state")
+            is_connected = False
+            try:
+                last_error = connection_manager.get_last_connect_error()
+            except Exception:
+                last_error = None
+            if not last_error:
+                last_error = "Connection status check timed out"
         except Exception as exc:
             logger.warning(f"Connection status check failed: {exc}")
-            is_connected = getattr(connection_manager, "connected", False)
+            is_connected = False
+            try:
+                last_error = connection_manager.get_last_connect_error()
+            except Exception:
+                last_error = None
+            if not last_error:
+                last_error = str(exc) or exc.__class__.__name__
+        else:
+            try:
+                last_error = connection_manager.get_last_connect_error()
+            except Exception:
+                last_error = None
 
         account_type = "Paper"
         try:
@@ -204,12 +222,8 @@ async def get_connection_status(user: Optional[str] = Depends(get_current_user))
             "account_type": account_type,
         }
 
-        try:
-            last_error = connection_manager.get_last_connect_error()
-            if last_error:
-                response["last_error"] = last_error
-        except Exception:
-            pass
+        if last_error:
+            response["last_error"] = last_error
 
         return response
     except Exception as e:
