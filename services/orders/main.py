@@ -22,7 +22,9 @@ from src.ibbot.redis import DEFAULT_COMMAND_QUEUE, enqueue_ib_command, get_redis
 
 @runtime_checkable
 class OrderRepositoryProtocol(Protocol):
-    async def upsert_order(self, payload: Mapping[str, Any]) -> int | None:
+    async def upsert_order(
+        self, payload: Mapping[str, Any], *, allow_insert: bool = True
+    ) -> int | None:
         ...
 
 LOGGER = logging.getLogger("ibbot.services.orders")
@@ -542,6 +544,7 @@ class OrdersRuntime:
         default_factory=lambda: deque(maxlen=200), init=False, repr=False
     )
     _command_to_order: Dict[str, str] = field(default_factory=dict, init=False, repr=False)
+    _ib_only_orders: set[str] = field(default_factory=set, init=False, repr=False)
     _last_message_id: str | None = field(default=None, init=False, repr=False)
     _last_updated_at: datetime | None = field(default=None, init=False, repr=False)
     _stream_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
@@ -559,6 +562,7 @@ class OrdersRuntime:
 
     def __post_init__(self) -> None:
         self._history = deque(maxlen=self.history_limit)
+        self._ib_only_orders = set()
 
     async def start(self) -> None:
         if self._stream_task is not None or self._redis is not None:
@@ -1039,6 +1043,7 @@ class OrdersRuntime:
             self._active_orders = {}
             self._history = deque(maxlen=self.history_limit)
             self._command_to_order = {}
+            self._ib_only_orders = set()
             for item in active_items:
                 if not isinstance(item, Mapping):
                     continue
@@ -1136,6 +1141,7 @@ class OrdersRuntime:
         record: Mapping[str, Any],
         *,
         timestamp: str | datetime | None = None,
+        allow_insert: bool = True,
     ) -> int | None:
         if self.order_repository_factory is None:
             return None
@@ -1149,7 +1155,7 @@ class OrdersRuntime:
         payload = self._build_repository_order_payload(record, timestamp=timestamp)
 
         try:
-            result = await repository.upsert_order(payload)
+            result = await repository.upsert_order(payload, allow_insert=allow_insert)
         except Exception as exc:
             self._record_repository_failure(str(exc))
             self.logger.warning(
@@ -1192,6 +1198,7 @@ class OrdersRuntime:
                 self._command_to_order[command_id] = identifier
             if order_id:
                 self._command_to_order[order_id] = identifier
+            self._ib_only_orders.discard(identifier)
 
     async def _initialise_order_repository(self) -> None:
         if self.order_repository_factory is None:
@@ -1327,6 +1334,8 @@ class OrdersRuntime:
         updated = False
         record_snapshot: dict[str, Any] | None = None
         record_identifier_for_repo: str | None = None
+        allow_insert = True
+        created_from_ib_event = False
         async with self._lock:
             record_identifier = identifier
             record = self._active_orders.get(record_identifier)
@@ -1351,6 +1360,11 @@ class OrdersRuntime:
                     "command_id": command_id or identifier,
                     "events": [],
                 }
+                created_from_ib_event = not bool(command_id)
+                if created_from_ib_event:
+                    self._ib_only_orders.add(record_identifier)
+                else:
+                    self._ib_only_orders.discard(record_identifier)
             if "events" not in record or not isinstance(record["events"], list):
                 record["events"] = list(record.get("events", []))
             record.setdefault("id", record_identifier)
@@ -1422,10 +1436,24 @@ class OrdersRuntime:
                 self._history = deque(existing_history, maxlen=self.history_limit)
             record_snapshot = _clone_order_record(record)
             record_identifier_for_repo = record_identifier
+            allow_insert = record_identifier not in self._ib_only_orders
+            if status_lower in _TERMINAL_STATUSES:
+                self._ib_only_orders.discard(record_identifier)
             updated = True
         if record_snapshot is not None:
+            if not allow_insert and created_from_ib_event:
+                identifier_for_log = (
+                    _coerce_str(record_snapshot.get("order_id"))
+                    or _coerce_str(record_snapshot.get("ib_order_id"))
+                    or _coerce_str(record_snapshot.get("command_id"))
+                    or record_identifier_for_repo
+                    or "unknown"
+                )
+                self.logger.info(
+                    "Skipping repository insert for IB-originated order %s", identifier_for_log
+                )
             inserted_id = await self._upsert_order_snapshot(
-                record_snapshot, timestamp=event_time
+                record_snapshot, timestamp=event_time, allow_insert=allow_insert
             )
             if inserted_id is not None and record_identifier_for_repo is not None:
                 await self._register_persisted_order_id(
@@ -1532,8 +1560,12 @@ def create_app(runtime: OrdersRuntime | None = None, *, enable_events: bool = Tr
                     self._upsert = getattr(repo, "upsert_order")
                     self._close = getattr(repo, "close", None)
 
-                async def upsert_order(self, payload: Mapping[str, Any]) -> int | None:
-                    return await _run_in_thread(self._upsert, payload)
+                async def upsert_order(
+                    self, payload: Mapping[str, Any], *, allow_insert: bool = True
+                ) -> int | None:
+                    return await _run_in_thread(
+                        self._upsert, payload, allow_insert=allow_insert
+                    )
 
                 async def aclose(self) -> None:
                     if callable(self._close):

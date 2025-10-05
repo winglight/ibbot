@@ -23,10 +23,14 @@ class RecordingRepository:
         self._by_command: dict[str, int] = {}
         self._by_ib: dict[str, int] = {}
         self.created_ids: list[int] = []
+        self.allow_insert_flags: list[bool] = []
 
-    async def upsert_order(self, payload: Mapping[str, Any]) -> int | None:
+    async def upsert_order(
+        self, payload: Mapping[str, Any], *, allow_insert: bool = True
+    ) -> int | None:
         record = dict(payload)
         self.payloads.append(record)
+        self.allow_insert_flags.append(allow_insert)
 
         command_id = _coerce_str(record.get("command_id"))
         ib_order_id = _coerce_str(record.get("ib_order_id"))
@@ -40,6 +44,8 @@ class RecordingRepository:
 
         if assigned is None:
             if command_id is None and ib_order_id is None:
+                return None
+            if not allow_insert:
                 return None
             assigned = self._next_id
             self._next_id += 1
@@ -161,7 +167,9 @@ class _FailingRepository:
         self.error = error
         self.calls = 0
 
-    async def upsert_order(self, payload: Mapping[str, Any]) -> None:
+    async def upsert_order(
+        self, payload: Mapping[str, Any], *, allow_insert: bool = True
+    ) -> None:
         self.calls += 1
         raise self.error
 
@@ -680,6 +688,62 @@ def test_order_update_persists_to_repository() -> None:
             await runtime.stop()
 
     asyncio.run(_scenario())
+
+
+def test_ib_only_event_skips_repository_insert(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="ibbot.services.orders")
+
+    async def _scenario() -> None:
+        repository = RecordingRepository()
+        runtime, _, repo = await _create_runtime(repository=repository)
+        try:
+            trade_payload = _build_trade_payload(
+                order_id="IB-ONLY-1",
+                symbol="ES",
+                exchange="GLOBEX",
+                status="Submitted",
+                avg_fill_price=0.0,
+                filled=0.0,
+                remaining=1.0,
+                commission=0.0,
+                realized_pnl=0.0,
+            )
+            payload = {
+                "status": "success",
+                "result": json.dumps(trade_payload),
+            }
+            updated = await runtime._apply_order_event(payload)
+            assert updated is True
+            assert repo.allow_insert_flags[-1] is False
+            assert not repo.created_ids
+            assert "IB-ONLY-1" in runtime._active_orders
+            assert "IB-ONLY-1" in runtime._ib_only_orders
+
+            updated_payload = dict(trade_payload)
+            updated_payload["status"] = "Filled"
+            updated_payload["filled"] = 1.0
+            updated_payload["remaining"] = 0.0
+            follow_up = {
+                "status": "success",
+                "result": json.dumps(updated_payload),
+            }
+            updated_again = await runtime._apply_order_event(follow_up)
+            assert updated_again is True
+            assert repo.allow_insert_flags[-2:] == [False, False]
+            assert not repo.created_ids
+        finally:
+            await runtime.stop()
+
+    asyncio.run(_scenario())
+
+    messages = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "ibbot.services.orders"
+    ]
+    assert any("Skipping repository insert" in message for message in messages)
 
 
 def test_apply_order_event_updates_order_from_serialised_trade() -> None:
