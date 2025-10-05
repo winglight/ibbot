@@ -265,7 +265,6 @@ def _normalise_order_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         "quantity": quantity,
         "price": price,
         "status": status,
-        "exchange": exchange,
         "order_timestamp": timestamp_dt,
         "order_source": order_source_value,
         "strategy_name": strategy_value,
@@ -273,6 +272,9 @@ def _normalise_order_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         "parent_order_id": parent_value,
         "raw_payload": _normalise_raw(payload),
     }
+
+    if exchange is not None:
+        normalised["exchange"] = exchange
 
     normalised["strategy"] = strategy_value
 
