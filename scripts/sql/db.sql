@@ -167,17 +167,3 @@ CREATE TABLE risk_config_snapshots (
 CREATE INDEX idx_risk_config_snapshots_service_time
                 ON risk_config_snapshots(service, captured_at DESC)
                 ;
-CREATE TABLE risk_rule_snapshots (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    service TEXT NOT NULL,
-                    symbol TEXT NOT NULL,
-                    payload TEXT,
-                    updated_at_text TEXT,
-                    captured_at TEXT NOT NULL
-                );
-CREATE INDEX idx_risk_rule_snapshots_service_symbol
-                ON risk_rule_snapshots(service, symbol)
-                ;
-CREATE INDEX idx_risk_rule_snapshots_captured
-                ON risk_rule_snapshots(captured_at DESC)
-                ;

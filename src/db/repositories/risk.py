@@ -19,11 +19,20 @@ from .base import (
     use_connection,
 )
 
-__all__ = ["RiskSnapshotRepository", "RiskSnapshotRepositoryError"]
+__all__ = [
+    "RiskSnapshotRepository",
+    "RiskSnapshotRepositoryError",
+    "RiskRulesRepository",
+    "RiskRulesRepositoryError",
+]
 
 
 class RiskSnapshotRepositoryError(RepositoryError):
     """Raised when persisting risk snapshots fails."""
+
+
+class RiskRulesRepositoryError(RepositoryError):
+    """Raised when persisting risk rules fails."""
 
 
 def _utc_now() -> datetime:
@@ -154,58 +163,6 @@ class RiskSnapshotRepository:
             )
             raise RiskSnapshotRepositoryError("Failed to persist risk rule snapshots") from exc
 
-    async def bulk_upsert_rule_snapshots(
-        self,
-        *,
-        service: str,
-        rules: Mapping[str, Mapping[str, Any]],
-        updated_at: str | datetime | None = None,
-        captured_at: datetime | str | None = None,
-    ) -> None:
-        if not rules:
-            return
-
-        timestamp = _parse_datetime(captured_at) or _utc_now()
-        rows: list[dict[str, Any]] = []
-        symbols: list[str] = []
-
-        for symbol, payload in rules.items():
-            symbol_str = str(symbol)
-            if not symbol_str:
-                continue
-            entry_payload = dict(payload)
-            entry_payload.pop("symbol", None)
-            entry_updated = entry_payload.get("updated_at", updated_at)
-            entry_captured = entry_payload.get("captured_at")
-            rows.append(
-                {
-                    "service": service,
-                    "symbol": symbol_str,
-                    "payload": _normalise_payload(entry_payload),
-                    "updated_at_text": str(entry_updated) if entry_updated is not None else None,
-                    "captured_at": _parse_datetime(entry_captured) or timestamp,
-                }
-            )
-            symbols.append(symbol_str)
-
-        if not rows:
-            return
-
-        if self._is_disabled():
-            return
-        try:
-            await run_in_thread(self._bulk_upsert_rules, service, rows, symbols)
-        except MariaDBConfigurationError as exc:
-            self._disable(str(exc))
-            return
-        except Exception as exc:  # pragma: no cover - log and wrap
-            self._logger.exception(
-                "Failed to upsert risk rule snapshots for service %s (count=%d)",
-                service,
-                len(rows),
-            )
-            raise RiskSnapshotRepositoryError("Failed to upsert risk rule snapshots") from exc
-
     def _write_rule_snapshots(self, rows: Sequence[Mapping[str, Any]]) -> None:
         with use_connection() as connection:
             prepared_rows = [_prepare_json(row, "payload") for row in rows]
@@ -220,56 +177,214 @@ class RiskSnapshotRepository:
             )
             executemany_write(connection, sql, prepared_rows)
 
-    def _bulk_upsert_rules(
+class RiskRulesRepository:
+    """Persist the active set of risk rules."""
+
+    _COLUMNS = (
+        "symbol",
+        "stop_loss_price",
+        "take_profit_price",
+        "max_loss_percent",
+        "enabled",
+        "max_time_span",
+        "timestamp",
+        "auto_trailing",
+        "atr_params",
+        "rule_type",
+    )
+
+    def __init__(self, *, logger_name: str = "db.risk_rules") -> None:
+        self._logger = get_logger(logger_name)
+        self._disabled_reason: str | None = None
+
+    def _is_disabled(self) -> bool:
+        if self._disabled_reason is None:
+            return False
+        if self._logger.isEnabledFor(logging.DEBUG):
+            self._logger.debug(
+                "Skipping risk rules persistence; disabled: %s",
+                self._disabled_reason,
+            )
+        return True
+
+    def _disable(self, reason: str) -> None:
+        if self._disabled_reason is not None:
+            return
+        self._disabled_reason = reason or "MariaDB configuration error"
+        self._logger.warning("Disabling risk rules persistence: %s", self._disabled_reason)
+
+    async def replace_rules(
         self,
-        service: str,
-        rows: Sequence[Mapping[str, Any]],
-        symbols: Sequence[str],
+        rules: Mapping[str, Mapping[str, Any]],
+        *,
+        timestamp: str | datetime | None = None,
     ) -> None:
+        if self._is_disabled():
+            return
+
+        prepared = self._prepare_rows(rules, timestamp)
+
+        try:
+            await run_in_thread(self._replace_rules, prepared)
+        except RepositoryValidationError:
+            raise
+        except MariaDBConfigurationError as exc:
+            self._disable(str(exc))
+        except Exception as exc:  # pragma: no cover - log and wrap
+            self._logger.exception("Failed to persist risk rules")
+            raise RiskRulesRepositoryError("Failed to persist risk rules") from exc
+
+    def _prepare_rows(
+        self,
+        rules: Mapping[str, Mapping[str, Any]],
+        timestamp: str | datetime | None,
+    ) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        default_timestamp = _parse_datetime(timestamp) or _utc_now()
+        for symbol, payload in rules.items():
+            if not isinstance(payload, Mapping):
+                raise RepositoryValidationError("risk rule payload must be a mapping")
+            symbol_str = str(symbol).strip()
+            if not symbol_str:
+                raise RepositoryValidationError("risk rule requires a symbol")
+            prepared: dict[str, Any] = {
+                "symbol": symbol_str,
+                "stop_loss_price": _coerce_float(
+                    payload.get("stop_loss_price"), payload.get("stop_loss")
+                ),
+                "take_profit_price": _coerce_float(
+                    payload.get("take_profit_price"), payload.get("take_profit")
+                ),
+                "max_loss_percent": _coerce_float(payload.get("max_loss_percent")),
+                "enabled": _coerce_bool(payload.get("enabled"), default=True),
+                "max_time_span": _coerce_int(payload.get("max_time_span")),
+                "timestamp": _coerce_timestamp(
+                    payload.get("updated_at")
+                    or payload.get("timestamp")
+                    or default_timestamp
+                ),
+                "auto_trailing": _coerce_bool(payload.get("auto_trailing"), default=False),
+                "atr_params": _coerce_atr_params(payload.get("atr_params")),
+                "rule_type": str(payload.get("rule_type") or "fixed"),
+            }
+            rows.append(prepared)
+        return rows
+
+    def _replace_rules(self, rows: Sequence[Mapping[str, Any]]) -> None:
         with use_connection() as connection:
             sqlite = is_sqlite(connection)
-            delete_params: dict[str, Any] = {"service": service}
-            symbol_placeholders: list[str] = []
-            for index, symbol in enumerate(symbols):
-                key = f"symbol_{index}"
-                delete_params[key] = symbol
-                symbol_placeholders.append(f":{key}" if sqlite else f"%({key})s")
-
-            if not symbol_placeholders:
-                return
-
-            delete_sql = (
-                "DELETE FROM risk_rule_snapshots WHERE service = {service} AND symbol IN ({symbols})"
-            ).format(
-                service=":service" if sqlite else "%(service)s",
-                symbols=", ".join(symbol_placeholders),
-            )
-
-            insert_rows = [_prepare_json(row, "payload") for row in rows]
-            columns = list(insert_rows[0].keys())
-            placeholders = (
-                ", ".join(f":{col}" for col in columns)
-                if sqlite
-                else ", ".join(f"%({col})s" for col in columns)
-            )
-            insert_sql = "INSERT INTO risk_rule_snapshots ({cols}) VALUES ({values})".format(
-                cols=", ".join(columns), values=placeholders
-            )
-
             cursor = connection.cursor()
             try:
-                cursor.execute(delete_sql, delete_params)
-                cursor.executemany(insert_sql, insert_rows)
-            except Exception:
                 try:
-                    connection.rollback()
-                except Exception:  # pragma: no cover - defensive
-                    pass
-                raise
-            else:
-                connection.commit()
+                    cursor.execute("SELECT symbol FROM risk_rules")
+                    existing_symbols = {str(row[0]) for row in cursor.fetchall()}
+                except Exception:
+                    existing_symbols = set()
+
+                new_symbols = {str(row["symbol"]) for row in rows}
+                obsolete = existing_symbols - new_symbols
+
+                if obsolete:
+                    delete_sql, delete_params = _build_symbol_delete(obsolete, sqlite)
+                    cursor.execute(delete_sql, delete_params)
             finally:
                 try:
                     cursor.close()
                 except Exception:  # pragma: no cover - defensive
                     pass
+
+            if rows:
+                insert_sql = _build_upsert_sql(sqlite)
+                executemany_write(connection, insert_sql, rows)
+            else:
+                try:
+                    connection.commit()
+                except Exception:
+                    try:
+                        connection.rollback()
+                    except Exception:  # pragma: no cover - defensive
+                        pass
+                    raise
+        # executemany_write commits on success. If rows is empty we commit manually above.
+
+
+def _coerce_float(*values: Any) -> float | None:
+    for value in values:
+        if value is None or value == "":
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _coerce_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_bool(value: Any, *, default: bool) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if value in (None, ""):
+        return int(default)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "t", "yes", "y"}:
+        return 1
+    if text in {"0", "false", "f", "no", "n"}:
+        return 0
+    return int(default)
+
+
+def _coerce_timestamp(value: Any) -> str:
+    parsed = _parse_datetime(value)
+    if parsed is None:
+        parsed = _utc_now()
+    return parsed.isoformat()
+
+
+def _coerce_atr_params(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, (str, bytes)):
+        return value if isinstance(value, str) else value.decode("utf-8", errors="ignore")
+    if isinstance(value, Mapping):
+        return json_dumps({str(k): v for k, v in value.items()})
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return json_dumps(list(value))
+    return json_dumps(value)
+
+
+def _build_symbol_delete(
+    symbols: set[str], sqlite: bool
+) -> tuple[str, Sequence[Any]]:
+    placeholders: list[str] = []
+    params: list[Any] = []
+    for symbol in symbols:
+        placeholders.append("?" if sqlite else "%s")
+        params.append(symbol)
+    sql = "DELETE FROM risk_rules WHERE symbol IN ({})".format(", ".join(placeholders))
+    return sql, tuple(params)
+
+
+def _build_upsert_sql(sqlite: bool) -> str:
+    columns = list(RiskRulesRepository._COLUMNS)
+    column_list = ", ".join(columns)
+    if sqlite:
+        values = ", ".join(f":{col}" for col in columns)
+        updates = ", ".join(f"{col}=excluded.{col}" for col in columns if col != "symbol")
+        return (
+            "INSERT INTO risk_rules ({cols}) VALUES ({values}) "
+            "ON CONFLICT(symbol) DO UPDATE SET {updates}"
+        ).format(cols=column_list, values=values, updates=updates)
+    values = ", ".join(f"%({col})s" for col in columns)
+    updates = ", ".join(f"{col}=VALUES({col})" for col in columns if col != "symbol")
+    return (
+        "INSERT INTO risk_rules ({cols}) VALUES ({values}) "
+        "ON DUPLICATE KEY UPDATE {updates}"
+    ).format(cols=column_list, values=values, updates=updates)
