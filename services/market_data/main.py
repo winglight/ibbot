@@ -284,6 +284,56 @@ def _combine_candle_sets(*candle_sets: Sequence[Mapping[str, Any]]) -> list[dict
     return _normalise_candles(combined)
 
 
+@dataclass
+class CandleCoverage:
+    earliest_ns: int | None = None
+    latest_ns: int | None = None
+    missing_rows: int = 0
+    missing_minutes: int = 0
+
+    @property
+    def has_gap(self) -> bool:
+        return (self.missing_rows > 0) or (self.missing_minutes > 0)
+
+
+def _calculate_candle_coverage(
+    candles: Sequence[Mapping[str, Any]],
+    *,
+    expected_rows: int,
+    duration_minutes: int,
+) -> tuple[CandleCoverage, list[dict[str, Any]]]:
+    normalised = _normalise_candles(candles)
+    earliest_ns = None
+    latest_ns = None
+    if normalised:
+        earliest_ns = _candle_ns(normalised[0], prefer_end=False)
+        latest_ns = _candle_ns(normalised[-1], prefer_end=True)
+
+    missing_rows = 0
+    if expected_rows > 0:
+        missing_rows = max(0, int(expected_rows) - len(normalised))
+
+    missing_minutes = 0
+    if duration_minutes > 0:
+        if earliest_ns is None:
+            missing_minutes = duration_minutes
+        else:
+            cutoff_dt = datetime.now(NY_TZ) - timedelta(minutes=duration_minutes)
+            cutoff_ns = int(cutoff_dt.timestamp() * 1_000_000_000)
+            if earliest_ns > cutoff_ns:
+                missing_minutes = math.ceil(
+                    (earliest_ns - cutoff_ns) / (60 * 1_000_000_000)
+                )
+
+    coverage = CandleCoverage(
+        earliest_ns=earliest_ns,
+        latest_ns=latest_ns,
+        missing_rows=missing_rows,
+        missing_minutes=missing_minutes,
+    )
+    return coverage, normalised
+
+
 def _candidate_source_intervals(target_interval: str) -> list[str]:
     if target_interval not in _INTERVAL_TO_SECONDS:
         return [target_interval]
@@ -1530,9 +1580,11 @@ def create_app(*, runtime: MarketDataRuntime | None = None) -> FastAPI:
         query: ChartDataQuery,
         interval: str,
         limit: int | None,
+        desired_rows: int,
+        duration_minutes: int,
         redis_client: Any,
         logger: Any,
-    ) -> list[dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], CandleCoverage]:
         key = _series_key(query.symbol, interval)
         candles = await _fetch_cached_candles(
             redis_client=redis_client,
@@ -1541,12 +1593,14 @@ def create_app(*, runtime: MarketDataRuntime | None = None) -> FastAPI:
             logger=logger,
         )
 
-        desired = limit or MAX_RETURNED_CANDLES
+        desired = limit or desired_rows or MAX_RETURNED_CANDLES
         if desired <= 0:
             desired = MAX_RETURNED_CANDLES
+        desired = min(int(desired), _MAX_SOURCE_FETCH)
 
-        if len(candles) >= desired:
-            return _normalise_candles(candles)[-desired:]
+        expected_rows = desired
+        if desired_rows > 0:
+            expected_rows = max(expected_rows, int(desired_rows))
 
         fallback_limit = max(desired, MAX_RETURNED_CANDLES)
         fallback_limit = min(fallback_limit, _MAX_SOURCE_FETCH)
@@ -1566,10 +1620,90 @@ def create_app(*, runtime: MarketDataRuntime | None = None) -> FastAPI:
             )
             candles = _combine_candle_sets(candles, fallback_candles)
 
-        if not candles:
-            return []
+        coverage, normalised = _calculate_candle_coverage(
+            candles,
+            expected_rows=expected_rows,
+            duration_minutes=duration_minutes,
+        )
 
-        return _normalise_candles(candles)[-desired:]
+        if logger:
+            logger.debug(
+                "Cache coverage for %s interval=%s earliest=%s latest=%s missing_rows=%s missing_minutes=%s",
+                query.symbol,
+                interval,
+                coverage.earliest_ns,
+                coverage.latest_ns,
+                coverage.missing_rows,
+                coverage.missing_minutes,
+            )
+
+        if coverage.has_gap and IB_FALLBACK_ENABLED:
+            if logger:
+                logger.info(
+                    "Detected cache gap for %s interval=%s (missing_rows=%s missing_minutes=%s)",
+                    query.symbol,
+                    interval,
+                    coverage.missing_rows,
+                    coverage.missing_minutes,
+                )
+
+            async def _persist_ib_candles(candles: Sequence[Mapping[str, Any]]) -> None:
+                if not candles:
+                    return
+                cache_limit = max(desired, expected_rows, MAX_RETURNED_CANDLES)
+                cache_limit = min(cache_limit, _MAX_SOURCE_FETCH)
+                await _persist_candles_for_interval(
+                    symbol=query.symbol,
+                    interval=interval,
+                    candles=candles,
+                    redis_client=redis_client,
+                    logger=logger,
+                    cache_limit=cache_limit,
+                )
+
+            ib_candles = await _fetch_candles_from_ib(
+                query,
+                interval=interval,
+                persist=_persist_ib_candles,
+                logger=logger,
+            )
+
+            if ib_candles:
+                combined = _combine_candle_sets(normalised, ib_candles)
+                coverage, normalised = _calculate_candle_coverage(
+                    combined,
+                    expected_rows=expected_rows,
+                    duration_minutes=duration_minutes,
+                )
+            elif logger:
+                logger.info(
+                    "IB fallback returned no additional candles for %s interval=%s",
+                    query.symbol,
+                    interval,
+                )
+
+        trimmed = list(normalised)
+        if trimmed and desired > 0 and len(trimmed) > desired:
+            trimmed = trimmed[-desired:]
+
+        final_coverage, final_candles = _calculate_candle_coverage(
+            trimmed,
+            expected_rows=expected_rows,
+            duration_minutes=duration_minutes,
+        )
+
+        if logger:
+            logger.debug(
+                "Final coverage for %s interval=%s earliest=%s latest=%s missing_rows=%s missing_minutes=%s",
+                query.symbol,
+                interval,
+                final_coverage.earliest_ns,
+                final_coverage.latest_ns,
+                final_coverage.missing_rows,
+                final_coverage.missing_minutes,
+            )
+
+        return final_candles, final_coverage
 
     def _series_key(symbol: str, interval: str) -> str:
         return f"{cache_prefix}:series:market.candle.{interval}:{symbol}"
@@ -1797,15 +1931,26 @@ def create_app(*, runtime: MarketDataRuntime | None = None) -> FastAPI:
                 source_seconds=source_seconds,
                 target_rows=desired_rows,
             )
-            source_candles = await _load_candles_with_fallback(
+            source_candles, coverage = await _load_candles_with_fallback(
                 query=query,
                 interval=source_interval,
                 limit=source_limit,
+                desired_rows=desired_rows,
+                duration_minutes=duration_minutes,
                 redis_client=redis_client,
                 logger=logger,
             )
             if not source_candles:
                 continue
+
+            if coverage.has_gap and logger:
+                logger.info(
+                    "Source interval %s coverage gap remains for %s (missing_rows=%s missing_minutes=%s)",
+                    source_interval,
+                    query.symbol,
+                    coverage.missing_rows,
+                    coverage.missing_minutes,
+                )
 
             if source_interval != interval:
                 aggregated = _aggregate_candles(
