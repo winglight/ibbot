@@ -17,7 +17,12 @@ from typing import Any, Callable
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
-from services.strategy import StrategyTaskConsumer, sync_strategy_metadata
+from services.strategy import StrategyTaskConsumer
+from src.db.repositories.strategy import (
+    StrategyRecord,
+    StrategyRepository,
+    StrategyRepositoryError,
+)
 from src.ibbot import update_service_health
 from src.ibbot.logging import get_logger
 from src.ibbot.redis import DEFAULT_REDIS_URL, close_global_client, get_redis_client
@@ -78,6 +83,8 @@ class StrategyDocument(BaseModel):
     enabled: bool = True
     created_at: str
     updated_at: str
+    enabled_at: str | None = None
+    disabled_at: str | None = None
 
 
 class StrategyUpsertRequest(BaseModel):
@@ -212,6 +219,7 @@ class StrategyRuntime:
         self,
         redis_client: Any,
         *,
+        strategy_repository: StrategyRepository,
         queue_key: str = DEFAULT_STRATEGY_QUEUE,
         event_stream: str = DEFAULT_EVENT_STREAM,
         result_stream: str = DEFAULT_RESULT_STREAM,
@@ -223,11 +231,11 @@ class StrategyRuntime:
         data_push_handler: Callable[[str, Mapping[str, Any]], Any] | None = None,
     ) -> None:
         self._redis = redis_client
+        self._repository = strategy_repository
         self._queue_key = queue_key
         self._event_stream = event_stream
         self._result_stream = result_stream
         self._metadata_prefix = metadata_prefix.rstrip(":")
-        self._metadata_index_key = f"{self._metadata_prefix}:index"
         self._strategies: dict[str, StrategyDocument] = {}
         self._lock = asyncio.Lock()
         self._health_interval = max(0.1, float(health_interval))
@@ -247,6 +255,19 @@ class StrategyRuntime:
         self.last_event_at: str | None = None
         self._metadata_sync_lock = asyncio.Lock()
         self._last_metadata_sync: float | None = None
+
+    def _record_to_document(self, record: StrategyRecord) -> StrategyDocument:
+        try:
+            payload = record.to_payload()
+        except AttributeError:
+            payload = dict(record)  # type: ignore[arg-type]
+        try:
+            return StrategyDocument.model_validate(payload)
+        except ValidationError as exc:  # pragma: no cover - defensive guard
+            self._logger.error(
+                "Repository returned invalid strategy payload", exc_info=True
+            )
+            raise StrategyRepositoryError("Invalid strategy payload returned") from exc
 
     @property
     def queue_key(self) -> str:
@@ -334,14 +355,14 @@ class StrategyRuntime:
         await self._persist_parameters(name, overrides)
         async with self._lock:
             stored = self._strategies.get(name)
-            if stored is not None:
-                new_params = dict(stored.params)
-                new_params[str(parameter)] = applied
-                updated = stored.model_copy(
-                    update={"params": new_params, "updated_at": _utc_now().isoformat()}
-                )
-                self._strategies[name] = updated
-                await self._persist_document(updated)
+            if stored is None:
+                raise StrategyNotRegistered(name)
+            new_params = dict(stored.params)
+            new_params[str(parameter)] = applied
+        record = await self._repository.update_strategy(name, {"params": new_params})
+        updated = self._record_to_document(record)
+        async with self._lock:
+            self._strategies[name] = updated
         await self.get_internal_info_payload(name)
         return {"name": parameter, "value": applied}
 
@@ -418,17 +439,11 @@ class StrategyRuntime:
             document = self._strategies.get(name)
             if document is None:
                 raise StrategyNotRegistered(name)
-            updated = document.model_copy(
-                update={"name": new_name, "updated_at": _utc_now().isoformat()}
-            )
+        record = await self._repository.rename_strategy(name, new_name)
+        updated = self._record_to_document(record)
+        async with self._lock:
             self._strategies.pop(name, None)
             self._strategies[new_name] = updated
-            await self._persist_document(updated)
-            await self._persist_index()
-        try:
-            await self._redis.delete(self._metadata_key(name))
-        except Exception:
-            self._logger.debug("Failed to delete old metadata key for %s", name, exc_info=True)
         await self._rename_auxiliary_keys(name, new_name)
         self._health_signal.set()
         return updated
@@ -477,70 +492,43 @@ class StrategyRuntime:
         self._health_signal.set()
         return command
     async def upsert_strategy(self, payload: StrategyUpsertRequest) -> tuple[StrategyDocument, bool]:
-        now = _utc_now().isoformat()
+        record, created = await self._repository.upsert_strategy(payload.model_dump())
+        document = self._record_to_document(record)
         async with self._lock:
-            existing = self._strategies.get(payload.name)
-            created = existing is None
-            created_at = existing.created_at if existing is not None else now
-            document = StrategyDocument(
-                name=payload.name,
-                factory=payload.factory,
-                params=payload.params,
-                metadata=payload.metadata,
-                description=payload.description,
-                enabled=payload.enabled,
-                created_at=created_at,
-                updated_at=now,
-            )
-            self._strategies[payload.name] = document
-            await self._persist_document(document)
-            await self._persist_index()
+            self._strategies[document.name] = document
         self._health_signal.set()
         return document, created
 
     async def delete_strategy(self, name: str) -> bool:
+        removed = await self._repository.delete_strategy(name)
+        if not removed:
+            await self._synchronise_metadata(force=True)
+            return False
         async with self._lock:
-            document = self._strategies.pop(name, None)
-            if document is None:
-                return False
-            await self._persist_index()
-        metadata_key = self._metadata_key(name)
-        try:
-            await self._redis.delete(metadata_key)
-        except Exception:
-            self._logger.debug("Failed to delete strategy metadata", exc_info=True)
+            self._strategies.pop(name, None)
         await self._delete_auxiliary_keys(name)
         self._health_signal.set()
         return True
 
     async def set_strategy_enabled(self, name: str, *, enabled: bool) -> StrategyDocument:
+        document = await self.get_strategy(name)
+        if document is None:
+            raise StrategyNotRegistered(name)
+        record = await self._repository.set_strategy_enabled(name, enabled=enabled)
+        updated = self._record_to_document(record)
         async with self._lock:
-            document = self._strategies.get(name)
-            if document is None:
-                raise StrategyNotRegistered(name)
-            updated = document.model_copy(
-                update={"enabled": bool(enabled), "updated_at": _utc_now().isoformat()}
-            )
             self._strategies[name] = updated
-            await self._persist_document(updated)
         self._health_signal.set()
         return updated
 
     async def reset_strategy(self, name: str) -> StrategyDocument:
+        document = await self.get_strategy(name)
+        if document is None:
+            raise StrategyNotRegistered(name)
+        record = await self._repository.reset_strategy(name)
+        updated = self._record_to_document(record)
         async with self._lock:
-            document = self._strategies.get(name)
-            if document is None:
-                raise StrategyNotRegistered(name)
-            updated = document.model_copy(
-                update={
-                    "params": {},
-                    "metadata": {},
-                    "enabled": True,
-                    "updated_at": _utc_now().isoformat(),
-                }
-            )
             self._strategies[name] = updated
-            await self._persist_document(updated)
         try:
             await self._redis.delete(
                 self._parameters_key(name),
@@ -755,17 +743,6 @@ class StrategyRuntime:
             return int(await self._redis.llen(self._queue_key))
         except Exception:
             return self.pending_tasks
-
-    async def _persist_document(self, document: StrategyDocument) -> None:
-        metadata_key = self._metadata_key(document.name)
-        await self._redis.set(metadata_key, json.dumps(document.model_dump()))
-
-    async def _persist_index(self) -> None:
-        payload = [doc.name for doc in sorted(self._strategies.values(), key=lambda d: d.name)]
-        await self._redis.set(self._metadata_index_key, json.dumps(payload))
-
-    def _metadata_key(self, name: str) -> str:
-        return f"{self._metadata_prefix}:{name}"
 
     def _internal_info_key(self, name: str) -> str:
         return f"{self._metadata_prefix}:{name}:internal-info"
@@ -1068,22 +1045,19 @@ class StrategyRuntime:
             if not force and self._last_metadata_sync is not None:
                 return
             try:
-                settings = await load_strategy_settings(self._redis)
-            except Exception:  # pragma: no cover - defensive guard
-                settings = dict(DEFAULT_SETTINGS)
-            strategy_path = settings.get("strategy_path") or DEFAULT_SETTINGS.get("strategy_path")
-            try:
-                await sync_strategy_metadata(
-                    self._redis,
-                    {},
-                    metadata_prefix=self._metadata_prefix,
-                    strategy_path=strategy_path,
-                    logger=self._logger,
-                )
-            except Exception:  # pragma: no cover - defensive guard
-                self._logger.warning("Failed to synchronise strategy metadata", exc_info=True)
+                records = await self._repository.list_strategies()
+            except StrategyRepositoryError:
+                self._logger.warning("Failed to load strategy metadata from repository", exc_info=True)
                 return
-            await self._load_metadata()
+            documents: dict[str, StrategyDocument] = {}
+            for record in records:
+                try:
+                    document = self._record_to_document(record)
+                except StrategyRepositoryError:
+                    continue
+                documents[document.name] = document
+            async with self._lock:
+                self._strategies = documents
             self._last_metadata_sync = time.monotonic()
 
     @classmethod
@@ -1150,33 +1124,6 @@ class StrategyRuntime:
             return candidate.resolve()
         except OSError:
             return candidate
-
-    async def _load_metadata(self) -> None:
-        raw_index = await self._redis.get(self._metadata_index_key)
-        names = []
-        if isinstance(raw_index, str):
-            try:
-                decoded = json.loads(raw_index)
-            except json.JSONDecodeError:
-                decoded = []
-            if isinstance(decoded, list):
-                names = [str(entry) for entry in decoded]
-        elif isinstance(raw_index, list):
-            names = [str(entry) for entry in raw_index]
-        async with self._lock:
-            self._strategies.clear()
-            for name in names:
-                raw = await self._redis.get(self._metadata_key(name))
-                if not raw:
-                    continue
-                payload = _normalise_json_payload(raw)
-                if not payload:
-                    continue
-                try:
-                    document = StrategyDocument.model_validate(payload)
-                except ValidationError:
-                    continue
-                self._strategies[name] = document
 
     async def _event_loop(self) -> None:
         try:
@@ -1268,8 +1215,14 @@ class TaskEnqueueError(StrategyError):
 async def _lifespan(
     app: FastAPI,
     *,
-    runtime_factory: Callable[[Any], StrategyRuntime | Awaitable[StrategyRuntime]],
+    runtime_factory: Callable[
+        [Any, StrategyRepository | None],
+        StrategyRuntime | Awaitable[StrategyRuntime],
+    ],
     redis_factory: Callable[[], Any] | None = None,
+    repository_provider: Callable[[], Awaitable[tuple[StrategyRepository | None, bool]]]
+    | Callable[[], tuple[StrategyRepository | None, bool]]
+    | None = None,
 ) -> AsyncIterator[None]:
     logger = get_logger("ibbot.services.strategy.http")
     if redis_factory is None:
@@ -1279,12 +1232,21 @@ async def _lifespan(
         candidate = redis_factory()
         redis = await candidate if asyncio.iscoroutine(candidate) else candidate
         owns_redis = False
-    runtime_candidate = runtime_factory(redis)
+    if repository_provider is None:
+        repository: StrategyRepository | None = StrategyRepository()
+        owns_repository = True
+    else:
+        repo_candidate = repository_provider()
+        repository, owns_repository = (
+            await repo_candidate if asyncio.iscoroutine(repo_candidate) else repo_candidate
+        )
+    runtime_candidate = runtime_factory(redis, repository)
     runtime = await runtime_candidate if asyncio.iscoroutine(runtime_candidate) else runtime_candidate
     try:
         await runtime.start()
         app.state.redis = redis
         app.state.runtime = runtime
+        app.state.strategy_repository = repository
         yield
     finally:
         with contextlib.suppress(Exception):  # type: ignore[name-defined]
@@ -1292,6 +1254,17 @@ async def _lifespan(
         if owns_redis:
             with contextlib.suppress(Exception):
                 await close_global_client()
+        if owns_repository and repository is not None:
+            close_method = getattr(repository, "aclose", None)
+            if close_method is None:
+                close_method = getattr(repository, "close", None)
+            if callable(close_method):
+                try:
+                    result = close_method()
+                    if asyncio.iscoroutine(result):
+                        await result
+                except Exception:  # pragma: no cover - defensive guard
+                    logger.debug("Failed to close strategy repository", exc_info=True)
 
 
 def create_app(
@@ -1307,8 +1280,13 @@ def create_app(
     metadata_prefix: str = DEFAULT_METADATA_PREFIX,
     risk_manager_factory: Callable[[Any], StrategyRiskManager] | None = None,
     data_push_handler: Callable[[str, Mapping[str, Any]], Any] | None = None,
+    strategy_repository: StrategyRepository | None = None,
+    strategy_repository_factory: Callable[[], StrategyRepository | Awaitable[StrategyRepository]]
+    | None = None,
 ) -> FastAPI:
-    async def _runtime_factory(redis: Any) -> StrategyRuntime:
+    async def _runtime_factory(
+        redis: Any, repository: StrategyRepository | None
+    ) -> StrategyRuntime:
         if runtime is not None:
             return runtime
         consumer = consumer_factory(redis) if consumer_factory is not None else None
@@ -1318,8 +1296,11 @@ def create_app(
             risk_manager = await candidate if asyncio.iscoroutine(candidate) else candidate
         else:
             risk_manager = StrategyRiskManager(redis_client=redis, settings_prefix=metadata_prefix)
+        if repository is None:
+            raise RuntimeError("strategy repository unavailable")
         return StrategyRuntime(
             redis,
+            strategy_repository=repository,
             queue_key=queue_key,
             event_stream=event_stream,
             result_stream=result_stream,
@@ -1331,10 +1312,26 @@ def create_app(
             data_push_handler=data_push_handler,
         )
 
+    async def _repository_provider() -> tuple[StrategyRepository | None, bool]:
+        if strategy_repository is not None:
+            return strategy_repository, False
+        if strategy_repository_factory is not None:
+            candidate = strategy_repository_factory()
+            repository = await candidate if asyncio.iscoroutine(candidate) else candidate
+            return repository, True
+        if runtime is not None:
+            return None, False
+        return StrategyRepository(), True
+
     app = FastAPI(
         title="Strategy Service",
         version="1.0.0",
-        lifespan=lambda app: _lifespan(app, runtime_factory=_runtime_factory, redis_factory=redis_factory),
+        lifespan=lambda app: _lifespan(
+            app,
+            runtime_factory=_runtime_factory,
+            redis_factory=redis_factory,
+            repository_provider=_repository_provider,
+        ),
     )
 
     async def _get_runtime(request: Request) -> StrategyRuntime:

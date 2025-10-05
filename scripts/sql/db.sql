@@ -75,14 +75,29 @@ CREATE TABLE IF NOT EXISTS `risk_rules` (
     UNIQUE KEY `ux_risk_rules_symbol` (`symbol`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- Migration path for deployments upgrading from Redis-backed strategies:
+--   ALTER TABLE `strategies`
+--       ADD COLUMN `factory` VARCHAR(255) NULL AFTER `name`,
+--       ADD COLUMN `params` JSON NULL AFTER `factory`,
+--       ADD COLUMN `metadata` JSON NULL AFTER `params`,
+--       ADD COLUMN `enabled` TINYINT(1) NOT NULL DEFAULT 1 AFTER `metadata`,
+--       ADD COLUMN `enabled_at` DATETIME NULL AFTER `enabled`,
+--       ADD COLUMN `disabled_at` DATETIME NULL AFTER `enabled_at`,
+--       MODIFY `description` TEXT NULL,
+--       DROP COLUMN `strategy_type`,
+--       DROP COLUMN `api_endpoint`,
+--       DROP COLUMN `file_path`;
+
 CREATE TABLE IF NOT EXISTS `strategies` (
     `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
     `name` VARCHAR(191) NOT NULL,
-    `strategy_type` VARCHAR(64) NOT NULL,
-    `enabled` TINYINT(1) NOT NULL DEFAULT 1,
-    `api_endpoint` VARCHAR(255) NULL,
-    `file_path` VARCHAR(255) NULL,
+    `factory` VARCHAR(255) NULL,
+    `params` JSON NULL,
+    `metadata` JSON NULL,
     `description` TEXT NULL,
+    `enabled` TINYINT(1) NOT NULL DEFAULT 1,
+    `enabled_at` DATETIME NULL,
+    `disabled_at` DATETIME NULL,
     `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (`id`),

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
@@ -11,16 +12,17 @@ from typing import Any, Mapping
 import pytest
 from fastapi.testclient import TestClient
 
-from services.strategy.discovery import sync_strategy_metadata
-from services.strategy.http import (
-    DEFAULT_SETTINGS,
-    StrategyRuntime,
-    create_app,
-    persist_strategy_settings,
-)
+from services.strategy.http import DEFAULT_SETTINGS, create_app, persist_strategy_settings
+from src.db.mariadb import set_engine
+from src.db.repositories.strategy import StrategyRepository
 import src.utils.strategy_cache as strategy_cache_module
 from tests.services.redis_utils import InMemoryRedis
 import tests.services.strategy.sample as sample_strategy
+
+
+_CURRENT_REPOSITORY: StrategyRepository | None = None
+
+pytestmark = pytest.mark.usefixtures("strategy_repository")
 
 
 @pytest.fixture
@@ -34,7 +36,45 @@ def redis_client() -> InMemoryRedis:
         asyncio.run(client.close())
 
 
-def _build_client(redis: InMemoryRedis) -> TestClient:
+@pytest.fixture
+def strategy_repository(monkeypatch: pytest.MonkeyPatch) -> StrategyRepository:
+    connection = sqlite3.connect(
+        "file::memory:?cache=shared", uri=True, check_same_thread=False
+    )
+    connection.row_factory = sqlite3.Row
+    connection.executescript(
+        """
+        CREATE TABLE strategies (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            factory TEXT NULL,
+            params TEXT NULL,
+            metadata TEXT NULL,
+            description TEXT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            enabled_at TEXT NULL,
+            disabled_at TEXT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        """
+    )
+    connection.commit()
+    set_engine(lambda: connection, close=False)
+    repository = StrategyRepository(logger_name="tests.strategy")
+    global _CURRENT_REPOSITORY
+    _CURRENT_REPOSITORY = repository
+    try:
+        yield repository
+    finally:
+        _CURRENT_REPOSITORY = None
+        set_engine(None)
+        connection.close()
+
+
+def _build_client(
+    redis: InMemoryRedis, repository: StrategyRepository | None = None
+) -> TestClient:
     def redis_factory() -> InMemoryRedis:
         return redis
 
@@ -45,24 +85,25 @@ def _build_client(redis: InMemoryRedis) -> TestClient:
         data_push_calls.append((name, snapshot))
         return {"status_reason": "handler", "active": snapshot.get("active", False)}
 
+    effective_repository = repository or _CURRENT_REPOSITORY
+    if effective_repository is None:
+        raise RuntimeError("strategy repository fixture not initialised")
+
     app = create_app(
         redis_factory=redis_factory,
         health_interval=0.05,
         event_poll_interval=0.05,
         data_push_handler=data_push_handler,
+        strategy_repository=effective_repository,
     )
     client = TestClient(app)
     setattr(client, "data_push_calls", data_push_calls)
     return client
 
 
-def _read_metadata(redis: InMemoryRedis, name: str) -> dict[str, object]:
-    raw = asyncio.run(redis.get(f"json:strategy:{name}"))
-    if not raw:
-        return {}
-    if isinstance(raw, str):
-        return json.loads(raw)
-    return dict(raw)
+def _fetch_strategy(repository: StrategyRepository, name: str) -> Mapping[str, Any] | None:
+    record = asyncio.run(repository.get_strategy(name))
+    return record.to_payload() if record is not None else None
 
 
 def _install_strategy_cache_stubs(redis: InMemoryRedis, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -96,9 +137,22 @@ def _prepare_recent_fills(redis: InMemoryRedis, name: str, fills: list[dict[str,
         asyncio.run(redis.rpush(key, json.dumps(fill)))
 
 
-def test_discovered_strategy_available_on_start(redis_client: InMemoryRedis) -> None:
-    asyncio.run(sync_strategy_metadata(redis_client, {}))
-    client = _build_client(redis_client)
+def test_discovered_strategy_available_on_start(
+    redis_client: InMemoryRedis, strategy_repository: StrategyRepository
+) -> None:
+    asyncio.run(
+        strategy_repository.upsert_strategy(
+            {
+                "name": "BuyTheDipStrategy",
+                "factory": "tests.services.strategy.sample:factory",
+                "params": {"symbol": "ES"},
+                "metadata": {"source": "builtin"},
+                "description": "Builtin",
+                "enabled": True,
+            }
+        )
+    )
+    client = _build_client(redis_client, strategy_repository)
 
     with client:
         response = client.get("/strategy")
@@ -136,8 +190,10 @@ def test_filesystem_strategies_exposed_via_file_listing_only(
         assert "FilesystemAlpha" not in names
 
 
-def test_strategy_crud_lifecycle(redis_client: InMemoryRedis) -> None:
-    client = _build_client(redis_client)
+def test_strategy_crud_lifecycle(
+    redis_client: InMemoryRedis, strategy_repository: StrategyRepository
+) -> None:
+    client = _build_client(redis_client, strategy_repository)
 
     payload = {
         "name": "demo",
@@ -160,10 +216,16 @@ def test_strategy_crud_lifecycle(redis_client: InMemoryRedis) -> None:
         assert created["params"]["symbol"] == "ES"
         assert "created_at" in created
         assert "updated_at" in created
-
-        stored = _read_metadata(redis_client, "demo")
+        stored = _fetch_strategy(strategy_repository, "demo")
+        assert stored is not None
         assert stored["name"] == "demo"
         assert stored["metadata"]["owner"] == "qa"
+        assert stored["created_at"] == created["created_at"]
+
+        list_response = client.get("/strategy")
+        assert list_response.status_code == 200
+        listing = {entry["name"]: entry for entry in list_response.json()}
+        assert listing["demo"]["factory"] == stored["factory"]
 
         response = client.get("/strategy/demo")
         assert response.status_code == 200
@@ -177,11 +239,16 @@ def test_strategy_crud_lifecycle(redis_client: InMemoryRedis) -> None:
         assert updated["params"]["size"] == 2
         assert updated["created_at"] == created["created_at"]
         assert updated["updated_at"] != created["updated_at"]
+        stored = _fetch_strategy(strategy_repository, "demo")
+        assert stored is not None
+        assert stored["params"]["symbol"] == "NQ"
+        assert stored["params"]["size"] == 2
+        assert stored["updated_at"] == updated["updated_at"]
 
         response = client.delete("/strategy/demo")
         assert response.status_code == 204
 
-    removed = asyncio.run(redis_client.get("json:strategy:demo"))
+    removed = _fetch_strategy(strategy_repository, "demo")
     assert removed is None
 
 
