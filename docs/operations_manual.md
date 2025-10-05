@@ -85,6 +85,11 @@
   ```
 - **风险快照持久化**：风险服务启动时会使用 `src.db` 提供的仓库工厂创建 MariaDB 写入器。
   请在 `.env.local` 中配置 `IBBOT_DB_URL`，否则仅会在 Redis 中缓存风险配置与规则快照。
+- **实时止损/止盈权威数据**：风控判断依赖行情服务写入的
+  `hash:market:snapshot:{symbol}` 与风险服务维护的 `hash:risk:rules`
+  Hash。Redis 中的这两类快照是唯一可信的实时价格与规则来源；
+  MariaDB `risk_rules` 表仅作备份，直接读取可能因延迟或缓存失效
+  返回空值，导致止损/止盈误判。
 
 ## 3. 常见故障排查
 

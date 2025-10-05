@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Mapping
+
+import json
 
 import pytest
 
@@ -83,3 +85,33 @@ async def test_strategy_risk_manager_handles_missing_rule() -> None:
     rule = await manager.load_rule("nq")
 
     assert rule is None
+
+
+class StubRedis:
+    def __init__(self, mapping: Mapping[str, Any]) -> None:
+        self._mapping = {str(k): v for k, v in mapping.items()}
+        self.calls: list[str] = []
+
+    async def hgetall(self, key: str) -> Mapping[str, Any]:
+        self.calls.append(key)
+        return self._mapping.get(key, {})
+
+
+@pytest.mark.anyio("asyncio")
+async def test_strategy_risk_manager_prefers_redis_cache() -> None:
+    stub = StubRiskClient()
+    redis = StubRedis(
+        {
+            "hash:risk:rules": {
+                "es": json.dumps({"symbol": "es", "stop_loss_price": 4100.5, "enabled": True})
+            }
+        }
+    )
+    manager = StrategyRiskManager(client=stub, redis_client=redis)
+
+    rules = await manager.load_rules()
+
+    assert "ES" in rules
+    assert rules["ES"]["stop_loss_price"] == 4100.5
+    assert stub.calls == []
+    assert redis.calls == ["hash:risk:rules"]
