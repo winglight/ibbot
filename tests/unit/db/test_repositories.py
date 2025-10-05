@@ -94,6 +94,79 @@ async def test_order_repository_updates_existing_row_with_ib_identifier(
 
 
 @pytest.mark.asyncio
+async def test_order_repository_updates_existing_row_with_client_identifier(
+    sqlite_db, order_repository_factory
+) -> None:
+    repo = await order_repository_factory()
+
+    initial_payload = {
+        "command_id": "cmd-client-match",
+        "client_order_id": 123456,
+        "symbol": "NVDA",
+        "status": "submitted",
+    }
+
+    inserted_id = await repo.upsert_order(initial_payload)
+    assert isinstance(inserted_id, int)
+
+    ib_payload = {
+        "ib_order_id": "IB-CLIENT-1",
+        "client_order_id": 123456,
+        "status": "filled",
+        "filled_quantity": 1,
+    }
+
+    update_result = await repo.upsert_order(ib_payload)
+    assert update_result is None
+
+    row = sqlite_db.execute(
+        "SELECT id, client_order_id, ib_order_id, status, filled_quantity FROM orders "
+        "WHERE id = ?",
+        (inserted_id,),
+    ).fetchone()
+
+    assert row["id"] == inserted_id
+    assert row["client_order_id"] == "123456"
+    assert row["ib_order_id"] == "IB-CLIENT-1"
+    assert row["status"].lower() == "filled"
+    assert row["filled_quantity"] == pytest.approx(1.0)
+
+
+@pytest.mark.asyncio
+async def test_order_repository_updates_existing_row_with_order_identifier(
+    sqlite_db, order_repository_factory
+) -> None:
+    repo = await order_repository_factory()
+
+    cursor = sqlite_db.execute(
+        "INSERT INTO orders (order_id, symbol, status) VALUES (?, ?, ?)",
+        ("6001", "NFLX", "submitted"),
+    )
+    sqlite_db.commit()
+    existing_id = int(cursor.lastrowid)
+
+    ib_payload = {
+        "ib_order_id": "IB-ORDER-1",
+        "order_id": 6001,
+        "status": "cancelled",
+    }
+
+    update_result = await repo.upsert_order(ib_payload)
+    assert update_result is None
+
+    row = sqlite_db.execute(
+        "SELECT id, order_id, client_order_id, ib_order_id, status FROM orders WHERE id = ?",
+        (existing_id,),
+    ).fetchone()
+
+    assert row["id"] == existing_id
+    assert row["order_id"] == "6001"
+    assert row["client_order_id"] == "6001"
+    assert row["ib_order_id"] == "IB-ORDER-1"
+    assert row["status"].lower() == "cancelled"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "exchange_value",
     [None, "", "   "],
