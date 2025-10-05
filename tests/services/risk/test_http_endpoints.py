@@ -173,6 +173,7 @@ class StubRuntime:
             else:
                 merged[key_str] = value
         merged["symbol"] = symbol_str
+        merged.setdefault("enabled", True)
         timestamp = datetime.now(timezone.utc).isoformat()
         merged["updated_at"] = timestamp
         normalised = RiskRule.normalise_payload(merged)
@@ -415,6 +416,19 @@ def test_rule_crud_operations() -> None:
         response = client.post("/risk/rules", json={"symbol": "ES", "stop_loss_price": 25.0})
         assert response.status_code == 200
         assert "ES" in response.json()["rules"]
+
+        trailing_response = client.post(
+            "/risk_rules",
+            json={
+                "symbol": "NQ",
+                "rule_type": "trailing",
+                "atr_params": {"multiplier_sl": 1.2, "multiplier_tp": 2.1},
+            },
+        )
+        assert trailing_response.status_code == 200
+        trailing_payload = trailing_response.json()["rules"]["NQ"]
+        assert trailing_payload["rule_type"] == "trailing"
+        assert trailing_payload["enabled"] is True
 
         response = client.put("/risk_rules/ES", params={"enabled": "false"})
         assert response.status_code == 200

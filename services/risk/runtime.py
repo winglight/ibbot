@@ -956,6 +956,7 @@ class RiskRuntime:
             else:
                 merged[key_str] = value
         merged["symbol"] = symbol
+        merged.setdefault("enabled", True)
         return merged
 
     def _update_rule_snapshot(
