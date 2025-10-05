@@ -1,38 +1,57 @@
 CREATE TABLE orders (
-                    order_id TEXT PRIMARY KEY,
-                    symbol TEXT NOT NULL,
-                    action TEXT NOT NULL,
-                    quantity INTEGER NOT NULL,
-                    order_type TEXT NOT NULL,
-                    price REAL,
-                    status TEXT DEFAULT 'Submitted',
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    executed_at TEXT,
-                    fill_price REAL,
-                    order_source TEXT DEFAULT 'manual',
-                    strategy_name TEXT,
-                    rule_id TEXT,
-                    parent_order_id TEXT,
-                    exchange TEXT DEFAULT 'SMART',
-                    sec_type TEXT DEFAULT 'STK',
-                    notes TEXT,
-                    commission REAL,
-                    pnl REAL,
-                    is_deleted INTEGER DEFAULT 0
-                );
-CREATE INDEX idx_orders_strategy_source_created
-                ON orders(strategy_name, order_source, is_deleted, created_at DESC)
-                ;
-CREATE INDEX idx_orders_source_state_strategy_created
-                ON orders(order_source, is_deleted, strategy_name, created_at DESC)
-                ;
-CREATE INDEX idx_orders_strategy_activity
-                ON orders(strategy_name, is_deleted, executed_at, created_at)
-                ;
-CREATE INDEX idx_orders_created_flag
-                ON orders(is_deleted, created_at DESC)
-                ;
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    command_id TEXT,
+    order_id TEXT,
+    client_order_id TEXT,
+    ib_order_id TEXT,
+    symbol TEXT NOT NULL,
+    action TEXT,
+    side TEXT,
+    quantity REAL,
+    order_type TEXT,
+    price REAL,
+    limit_price REAL,
+    stop_price REAL,
+    status TEXT DEFAULT 'Submitted',
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    executed_at TEXT,
+    order_timestamp TEXT,
+    fill_price REAL,
+    filled_quantity REAL,
+    remaining_quantity REAL,
+    avg_fill_price REAL,
+    order_source TEXT,
+    strategy TEXT,
+    strategy_name TEXT,
+    rule_id TEXT,
+    parent_order_id TEXT,
+    exchange TEXT DEFAULT 'SMART',
+    sec_type TEXT DEFAULT 'STK',
+    notes TEXT,
+    commission REAL,
+    pnl REAL,
+    realized_pnl REAL,
+    unrealized_pnl REAL,
+    trigger TEXT,
+    trigger_type TEXT,
+    trigger_status TEXT,
+    trigger_price REAL,
+    account TEXT,
+    source TEXT,
+    raw_payload TEXT,
+    is_deleted INTEGER DEFAULT 0
+);
+CREATE UNIQUE INDEX ix_orders_command_id ON orders(command_id);
+CREATE UNIQUE INDEX ix_orders_client_order_id ON orders(client_order_id);
+CREATE UNIQUE INDEX ix_orders_ib_order_id ON orders(ib_order_id);
+CREATE INDEX ix_orders_symbol ON orders(symbol);
+CREATE INDEX ix_orders_status_created ON orders(status, created_at);
+CREATE INDEX ix_orders_strategy ON orders(strategy);
+CREATE INDEX ix_orders_strategy_name ON orders(strategy_name);
+CREATE INDEX ix_orders_parent ON orders(parent_order_id);
+CREATE INDEX ix_orders_created ON orders(created_at);
+
 CREATE TABLE risk_rules (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     symbol TEXT UNIQUE NOT NULL,
