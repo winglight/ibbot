@@ -10,6 +10,8 @@ from loguru import logger
 class BaseStrategy:
     """Common scaffolding for internal strategies."""
 
+    __strategy_helper__ = True
+
     def __init__(self, name: str, description: str = "") -> None:
         self.name = name
         self.description = description or name
