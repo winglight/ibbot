@@ -14,10 +14,12 @@ import inspect
 import json
 import logging
 import os
-import uuid
 import sys
+import time
+import uuid
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping, MutableMapping, Optional
 
 from src.cache import close_redis as cache_close_redis
@@ -54,6 +56,12 @@ DEFAULT_COMMAND_QUEUE = "queue:ib:commands"
 DEFAULT_MARKET_STREAM = "stream:ib:market"
 DEFAULT_STREAM_GROUP = "group:ib:market"
 DEFAULT_MARKET_CHANNEL = "pubsub:ib:market"
+
+SERVICE_METRICS_ROOT = "zset:service_metrics"
+SERVICE_METRICS_INDEX_KEY = "set:service_metrics:index"
+SERVICE_METRICS_SERVICE_INDEX_PREFIX = "set:service_metrics:service"
+SERVICE_METRICS_METRIC_INDEX_PREFIX = "set:service_metrics:metric"
+DEFAULT_SERVICE_METRICS_TTL = 24 * 60 * 60
 
 
 class IBCommandError(Exception):
@@ -547,6 +555,205 @@ class PubSubListener:
                 logger.exception("Error while handling pubsub message on %s", channel)
 
 
+def _slug_value(value: Any) -> str:
+    text = str(value or "")
+    if not text:
+        return "unknown"
+    result = [
+        ch.lower() if ch.isalnum() or ch in {"-", "_"} else "_"
+        for ch in text
+    ]
+    slug = "".join(result).strip("_")
+    return slug or "unknown"
+
+
+def _metric_key(service: Any, metric: Any) -> str:
+    return f"{SERVICE_METRICS_ROOT}:{_slug_value(service)}:{_slug_value(metric)}"
+
+
+def _split_metric_key(key: str) -> tuple[str, str]:
+    parts = key.split(":")
+    if len(parts) >= 4:
+        return parts[2], parts[3]
+    return "unknown", "metric"
+
+
+def _normalise_metric_timestamp(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, (int, float)):
+        if value > 10_000_000_000:  # assume milliseconds
+            value /= 1000.0
+        return datetime.fromtimestamp(value, tz=timezone.utc)
+    if isinstance(value, str):
+        text = value.strip()
+        if text:
+            if text.endswith("Z"):
+                text = text[:-1] + "+00:00"
+            try:
+                parsed = datetime.fromisoformat(text)
+                return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+            except ValueError:
+                pass
+    return datetime.now(timezone.utc)
+
+
+async def record_service_metrics(
+    metrics: Mapping[str, Any] | Iterable[Mapping[str, Any]],
+    *,
+    redis: Redis | None = None,
+    ttl_seconds: int = DEFAULT_SERVICE_METRICS_TTL,
+) -> None:
+    entries: list[Mapping[str, Any]]
+    if isinstance(metrics, Mapping):
+        entries = [metrics]
+    else:
+        entries = [entry for entry in metrics if isinstance(entry, Mapping)]
+
+    if not entries:
+        return
+
+    client = await _ensure_client(redis)
+    now = datetime.now(timezone.utc)
+    cutoff = now.timestamp() - ttl_seconds
+    pipe = client.pipeline()
+
+    for entry in entries:
+        service = entry.get("service") or "unknown"
+        metric = entry.get("metric") or "metric"
+        value_raw = entry.get("value")
+        try:
+            value = float(value_raw)
+        except (TypeError, ValueError):
+            continue
+
+        timestamp = _normalise_metric_timestamp(
+            entry.get("timestamp") or entry.get("recorded_at")
+        )
+        score = timestamp.timestamp()
+        payload: dict[str, Any] = {
+            "timestamp": timestamp.isoformat(),
+            "value": value,
+            "service": service,
+            "metric": metric,
+        }
+        for key in ("queue_key", "stream_key", "group", "name"):
+            if entry.get(key) is not None:
+                payload[key] = entry.get(key)
+        details = entry.get("details")
+        if isinstance(details, Mapping):
+            payload["details"] = dict(details)
+            for key in ("queue_key", "stream_key", "group"):
+                if key not in payload and details.get(key) is not None:
+                    payload[key] = details.get(key)
+
+        encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        metric_key = _metric_key(service, metric)
+        pipe.zadd(metric_key, {encoded: score})
+        pipe.zremrangebyscore(metric_key, "-inf", cutoff)
+        pipe.expire(metric_key, ttl_seconds)
+
+        pipe.sadd(SERVICE_METRICS_INDEX_KEY, metric_key)
+        pipe.expire(SERVICE_METRICS_INDEX_KEY, ttl_seconds)
+
+        service_index = f"{SERVICE_METRICS_SERVICE_INDEX_PREFIX}:{_slug_value(service)}"
+        pipe.sadd(service_index, metric_key)
+        pipe.expire(service_index, ttl_seconds)
+
+        metric_index = f"{SERVICE_METRICS_METRIC_INDEX_PREFIX}:{_slug_value(metric)}"
+        pipe.sadd(metric_index, metric_key)
+        pipe.expire(metric_index, ttl_seconds)
+
+    await pipe.execute()
+
+
+async def _resolve_metric_keys(
+    client: Redis,
+    *,
+    service: str | None = None,
+    metric: str | None = None,
+) -> list[str]:
+    if service and metric:
+        return [_metric_key(service, metric)]
+
+    keys: set[str] = set()
+    if service:
+        index = f"{SERVICE_METRICS_SERVICE_INDEX_PREFIX}:{_slug_value(service)}"
+        members = await client.smembers(index)
+        keys.update(
+            member.decode("utf-8") if isinstance(member, bytes) else str(member)
+            for member in members
+        )
+    if metric:
+        index = f"{SERVICE_METRICS_METRIC_INDEX_PREFIX}:{_slug_value(metric)}"
+        members = await client.smembers(index)
+        keys.update(
+            member.decode("utf-8") if isinstance(member, bytes) else str(member)
+            for member in members
+        )
+    if not service and not metric:
+        members = await client.smembers(SERVICE_METRICS_INDEX_KEY)
+        keys.update(
+            member.decode("utf-8") if isinstance(member, bytes) else str(member)
+            for member in members
+        )
+    return sorted(keys)
+
+
+async def _prune_metric_key(client: Redis, key: str) -> None:
+    service_slug, metric_slug = _split_metric_key(key)
+    await client.srem(SERVICE_METRICS_INDEX_KEY, key)
+    await client.srem(f"{SERVICE_METRICS_SERVICE_INDEX_PREFIX}:{service_slug}", key)
+    await client.srem(f"{SERVICE_METRICS_METRIC_INDEX_PREFIX}:{metric_slug}", key)
+
+
+async def load_service_metrics(
+    start: datetime,
+    end: datetime | None = None,
+    *,
+    service: str | None = None,
+    metric: str | None = None,
+    redis: Redis | None = None,
+) -> list[dict[str, Any]]:
+    client = await _ensure_client(redis)
+    end = end or datetime.now(timezone.utc)
+    start_ts = start.timestamp()
+    end_ts = end.timestamp()
+
+    keys = await _resolve_metric_keys(client, service=service, metric=metric)
+    if not keys:
+        return []
+
+    results: list[dict[str, Any]] = []
+    for key in keys:
+        if not key:
+            continue
+        if not await client.exists(key):
+            await _prune_metric_key(client, key)
+            continue
+        raw_entries = await client.zrangebyscore(key, start_ts, end_ts)
+        for raw in raw_entries:
+            if isinstance(raw, bytes):
+                raw = raw.decode("utf-8")
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            timestamp_text = payload.get("timestamp") or payload.get("time")
+            timestamp = _normalise_metric_timestamp(timestamp_text)
+            payload["time"] = timestamp.isoformat()
+            payload.setdefault("service", payload.get("service"))
+            payload.setdefault("metric", payload.get("metric"))
+            if not payload.get("service") or not payload.get("metric"):
+                service_slug, metric_slug = _split_metric_key(key)
+                payload.setdefault("service", service_slug)
+                payload.setdefault("metric", metric_slug)
+            results.append(payload)
+
+    results.sort(key=lambda item: item.get("time", ""))
+    return results
+
+
 __all__ = [
     "StreamMessage",
     "PubSubListener",
@@ -562,4 +769,6 @@ __all__ = [
     "ack_stream",
     "get_queue_length",
     "get_stream_metrics",
+    "record_service_metrics",
+    "load_service_metrics",
 ]

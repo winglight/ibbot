@@ -10,9 +10,14 @@ REQUIRED_TABLES: FrozenSet[str] = frozenset(
     {
         "orders",
         "market_prices",
-        "service_metrics",
         "risk_config_snapshots",
         "risk_rule_snapshots",
         "market_events",
+        "risk_rules",
+        "strategies",
+        "historical_data",
+        "config",
+        "sizing_history",
+        "notification_history",
     }
 )

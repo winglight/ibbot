@@ -38,3 +38,10 @@ python diagnose_connection.py
 若脚本提示缺少表结构，请参考 `scripts/sql/20240522_init_mariadb.sql` 初始化数据
 库。所有历史引用 `src.ibbot.db` 的模块都应替换为上述新接口，以避免在运行时
 遇到 `ImportError`。
+
+## 从 SQLite 迁移历史数据
+
+- 先执行 `scripts/sql/20240522_init_mariadb.sql` 创建新的 MariaDB 表结构。
+- 运行 `python scripts/sqlite_to_mariadb.py`（可选 `--sqlite` / `--tables` 参数）
+  将旧版 `data/trading_bot.db` 中的订单、风控、配置等表迁移到 MariaDB。脚本会
+  自动跳过 DOM 与 K 线相关的数据表。

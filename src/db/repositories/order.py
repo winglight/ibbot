@@ -131,11 +131,27 @@ def _normalise_order_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
                     return value
         return None
 
-    order_identifier = _first_nonempty(
-        _lookup("order_id", "orderId", "ib_order_id", "ibOrderId", "permid", "permId"),
-        payload.get("id"),
+    client_identifier = _first_nonempty(
+        payload.get("client_order_id"),
         payload.get("command_id"),
+        payload.get("id"),
+        _lookup("client_order_id", "clientOrderId", "command_id", "commandId", "id"),
     )
+
+    ib_identifier = _first_nonempty(
+        payload.get("ib_order_id"),
+        payload.get("ibOrderId"),
+        payload.get("permid"),
+        payload.get("permId"),
+        _lookup("ib_order_id", "ibOrderId", "permid", "permId"),
+    )
+
+    existing_identifier = _first_nonempty(
+        payload.get("order_id"),
+        _lookup("order_id", "orderId"),
+    )
+
+    order_identifier = client_identifier or existing_identifier or ib_identifier
 
     symbol_value = _first_nonempty(_lookup("symbol", "ticker"))
 
@@ -161,11 +177,19 @@ def _normalise_order_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     if not order_identifier:
         order_identifier = _generate_order_id(symbol_text)
 
+    if client_identifier is None:
+        client_identifier = order_identifier
+
     order_identifier = str(order_identifier)
+    client_identifier = str(client_identifier)
     symbol_value = symbol_text
 
     side_value = _first_nonempty(_lookup("action", "side"))
-    side = str(side_value).upper() if side_value is not None else "UNKNOWN"
+    side_text = _coerce_str(side_value)
+    side = side_text.upper() if side_text else "UNKNOWN"
+
+    action_value = _first_nonempty(payload.get("action"), _lookup("action"), side_text)
+    action_text = _coerce_str(action_value)
 
     exchange_value = _first_nonempty(_lookup("exchange"))
     exchange = _coerce_str(exchange_value)
@@ -212,8 +236,26 @@ def _normalise_order_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     if timestamp_dt is None:
         timestamp_dt = _utc_now()
 
+    order_source_value = _coerce_str(
+        _first_nonempty(payload.get("order_source"), _lookup("order_source", "source"))
+    )
+    strategy_value = _coerce_str(
+        _first_nonempty(
+            payload.get("strategy_name"),
+            payload.get("strategy"),
+            _lookup("strategy_name", "strategy"),
+        )
+    )
+    rule_value = _coerce_str(
+        _first_nonempty(payload.get("rule_id"), _lookup("rule_id"))
+    )
+    parent_value = _coerce_str(
+        _first_nonempty(payload.get("parent_order_id"), _lookup("parent_order_id"))
+    )
+
     normalised: dict[str, Any] = {
         "order_id": str(order_identifier),
+        "client_order_id": client_identifier,
         "symbol": str(symbol_value),
         "side": side,
         "quantity": quantity,
@@ -221,8 +263,20 @@ def _normalise_order_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         "status": status,
         "exchange": exchange,
         "order_timestamp": timestamp_dt,
+        "order_source": order_source_value,
+        "strategy_name": strategy_value,
+        "rule_id": rule_value,
+        "parent_order_id": parent_value,
         "raw_payload": _normalise_raw(payload),
     }
+
+    normalised["strategy"] = strategy_value
+
+    if action_text:
+        normalised["action"] = action_text.upper()
+
+    if ib_identifier is not None:
+        normalised["ib_order_id"] = str(ib_identifier)
 
     float_fields: dict[str, Any] = {
         "filled_quantity": _lookup("filled_quantity", "filled", "filledQuantity"),
@@ -239,6 +293,8 @@ def _normalise_order_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         "realized_pnl": _lookup("realized_pnl", "realizedPnl"),
         "unrealized_pnl": _lookup("unrealized_pnl", "unrealizedPnl"),
         "trigger_price": _lookup("trigger_price"),
+        "fill_price": _lookup("fill_price", "avg_fill_price", "avg_price", "avgPrice"),
+        "pnl": _lookup("pnl", "realized_pnl", "realizedPnl"),
     }
     for field_name, raw_value in float_fields.items():
         coerced = _coerce_float(raw_value)
@@ -251,6 +307,11 @@ def _normalise_order_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         "trigger_type": _lookup("trigger_type"),
         "trigger_status": _lookup("trigger_status", "triggerStatus"),
         "notes": _lookup("notes", "note", "comment"),
+        "order_source": order_source_value,
+        "strategy_name": strategy_value,
+        "strategy": strategy_value,
+        "rule_id": rule_value,
+        "parent_order_id": parent_value,
     }
     for field_name, raw_value in string_fields.items():
         text = _coerce_str(raw_value)
@@ -260,7 +321,6 @@ def _normalise_order_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     tag_fields: dict[str, Any] = {
         "account": _lookup("account"),
         "source": _lookup("source"),
-        "strategy": _lookup("strategy", "strategy_id"),
         "sec_type": _lookup("sec_type", "security_type", "secType"),
     }
     for field_name, raw_value in tag_fields.items():
@@ -287,9 +347,8 @@ class OrderRepository:
         except MariaDBConfigurationError as exc:
             raise OrderRepositoryError(str(exc)) from exc
         except Exception as exc:  # pragma: no cover - log and wrap
-            self._logger.exception(
-                "Failed to upsert order", order_id=normalised.get("order_id")
-            )
+            order_id = normalised.get("order_id")
+            self._logger.exception("Failed to upsert order %s", order_id)
             raise OrderRepositoryError("Failed to upsert order") from exc
 
     def _write_order(self, row: Mapping[str, Any]) -> None:
@@ -305,7 +364,9 @@ class OrderRepository:
             if is_sqlite(connection):
                 placeholders = ", ".join(f":{col}" for col in columns)
                 update_columns = ", ".join(
-                    f"{col}=excluded.{col}" for col in columns if col not in {"order_id"}
+                    f"{col}=excluded.{col}"
+                    for col in columns
+                    if col not in {"order_id", "created_at"}
                 )
                 if update_columns:
                     update_clause = (
@@ -321,7 +382,9 @@ class OrderRepository:
             else:
                 placeholders = ", ".join(f"%({col})s" for col in columns)
                 update_columns = ", ".join(
-                    f"{col}=VALUES({col})" for col in columns if col not in {"order_id"}
+                    f"{col}=VALUES({col})"
+                    for col in columns
+                    if col not in {"order_id", "created_at"}
                 )
                 if update_columns:
                     update_clause = f"{update_columns}, updated_at=NOW()"

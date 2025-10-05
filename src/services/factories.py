@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 from dataclasses import dataclass
 from functools import partial
 from typing import Any, Awaitable, Callable, Iterable, Mapping, Protocol, Sequence
+
+from src.ibbot.redis import DEFAULT_SERVICE_METRICS_TTL, record_service_metrics
 
 __all__ = [
     "ServiceMetricsWriterProtocol",
@@ -80,6 +83,31 @@ class ServiceMetricsWriterAdapter(_RepositoryAdapter):
         metrics: Mapping[str, Any] | Iterable[Mapping[str, Any]],
     ) -> None:
         await _invoke_callable(self._record_metrics, metrics)
+
+
+class RedisServiceMetricWriter:
+    """Lightweight sink that stores metrics in Redis with a 1-day TTL."""
+
+    __slots__ = ("_logger", "_ttl")
+
+    def __init__(
+        self,
+        *,
+        logger_name: str | None = None,
+        ttl_seconds: int = DEFAULT_SERVICE_METRICS_TTL,
+    ) -> None:
+        self._logger = logging.getLogger(logger_name or "services.metrics")
+        self._ttl = ttl_seconds
+
+    async def record_metrics(
+        self,
+        metrics: Mapping[str, Any] | Iterable[Mapping[str, Any]],
+    ) -> None:
+        try:
+            await record_service_metrics(metrics, ttl_seconds=self._ttl)
+        except Exception:
+            self._logger.warning("Failed to record service metrics", exc_info=True)
+            raise
 
 
 class MarketPriceRepositoryAdapter(_RepositoryAdapter):
