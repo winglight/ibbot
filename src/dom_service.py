@@ -48,6 +48,8 @@ from src.utils import get_async_executor, run_in_cpu_executor
 
 DEFAULT_TREND_THRESHOLDS = [0.5, 0.7, 0.85, 0.95]
 
+_CONNECT_RETRY_TIMEOUT_SEC = 10.0
+
 
 TUNER_STATS_WINDOW_ENV = "DOM_TUNER_STATS_WINDOW"
 TUNER_PENALTY_DECAY_ENV = "DOM_TUNER_PENALTY_DECAY"
@@ -771,17 +773,40 @@ class DOMService:
             self._last_start_error_status = 400
             return False
 
-        if not connection_manager.is_connected():
+        ensure_error: Optional[str] = None
+        try:
+            connected = await connection_manager.ensure_connection(
+                timeout=_CONNECT_RETRY_TIMEOUT_SEC
+            )
+        except Exception as exc:
+            ensure_error = str(exc) or exc.__class__.__name__
+            logger.warning(
+                "Unified DOM ensure_connection call failed", error=ensure_error
+            )
+            connected = False
+
+        if not connected:
             reason = "IBKR connection not active"
+            last_error: Optional[str] = None
             try:
                 last_error = connection_manager.get_last_connect_error()
-                if last_error:
-                    reason = f"{reason}: {last_error}"
             except Exception:
-                pass
+                last_error = None
+            if not last_error and ensure_error:
+                last_error = ensure_error
+            if last_error:
+                reason = f"{reason}: {last_error}"
             self._last_start_error = reason
             self._last_start_error_status = 400
             logger.warning("Unified DOM depth stream start rejected", symbol=symbol_key)
+            return False
+
+        if not connection_manager.is_connected():
+            self._last_start_error = "IBKR connection not active after reconnect attempt"
+            self._last_start_error_status = 500
+            logger.error(
+                "Unified DOM depth stream start failed after reconnect", symbol=symbol_key
+            )
             return False
 
         manager = self._ensure_data_layer_manager()
@@ -835,7 +860,17 @@ class DOMService:
         self._last_start_error = None
         self._last_start_error_status = 200
         symbol_key = (symbol or "").upper()
-        if not connection_manager.is_connected():
+        ensure_error: Optional[str] = None
+        try:
+            connected = connection_manager.connect(timeout=_CONNECT_RETRY_TIMEOUT_SEC)
+        except Exception as exc:
+            ensure_error = str(exc) or exc.__class__.__name__
+            logger.warning(
+                "Synchronous DOM ensure_connection call failed", error=ensure_error
+            )
+            connected = False
+
+        if not connected:
             logger.warning(
                 "DOM depth stream start rejected - IBKR is not connected",
                 symbol=symbol_key,
@@ -844,14 +879,28 @@ class DOMService:
                 "Connect to IBKR manually before starting DOM stream", symbol=symbol_key
             )
             reason = "IBKR connection not active"
+            last_error: Optional[str] = None
             try:
                 last_error = connection_manager.get_last_connect_error()
-                if last_error:
-                    reason = f"{reason}: {last_error}"
             except Exception:
-                pass
+                last_error = None
+            if not last_error and ensure_error:
+                last_error = ensure_error
+            if last_error:
+                reason = f"{reason}: {last_error}"
             self._last_start_error = reason
             self._last_start_error_status = 400
+            return False
+
+        if not connection_manager.is_connected():
+            logger.error(
+                "DOM depth stream start failed after reconnect attempt",
+                symbol=symbol_key,
+            )
+            self._last_start_error = (
+                "IBKR connection not active after reconnect attempt"
+            )
+            self._last_start_error_status = 500
             return False
         self._active_symbol = symbol_key or None
         self._active_symbol_original = symbol
