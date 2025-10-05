@@ -109,7 +109,7 @@
 ./scripts/deploy.sh diagnose
 ```
 
-`scripts/diagnose_foundation.py` 会基于 `ConfigProvider` 读取 Redis/MariaDB/日志配置，并给出详细的成功或失败原因（若使用 `--no-diagnose` 可跳过）。
+`scripts/diagnose_foundation.py` 会基于 `ConfigProvider` 读取数据库配置（`config` 表）、Redis 与日志设置，并给出详细的成功或失败原因（若使用 `--no-diagnose` 可跳过）。
 
 阶段 2 及以后可进一步核对：
 
@@ -135,6 +135,23 @@ GitHub Actions `ci.yml` 增加了 Docker Compose 冒烟测试步骤，会在拉�
 | Optimizer UI 无法访问 | 确认 `optimizer_ui/` 目录存在构建产物，并检查宿主机 `4173` 端口是否冲突。 |
 
 如需更深入的依赖说明，请参考 `docs/foundation_libs.md`。
+
+## 7. Redis 配置迁移至 MariaDB
+
+旧版部署将服务配置保存在 Redis `hash:config:<module>` 中。升级到 MariaDB 持久化后，可按以下步骤迁移历史配置：
+
+1. **导出 Redis 配置**：使用 `redis-cli --raw HGETALL hash:config:<module>` 或 `scripts/export_config.py`（如有）导出键值对。
+2. **写入 MariaDB**：对每个键执行：
+   ```sql
+   INSERT INTO config (config_key, config_value, description, created_at, updated_at)
+   VALUES ('<module>:KEY', 'VALUE', NULL, NOW(6), NOW(6))
+   ON DUPLICATE KEY UPDATE config_value = VALUES(config_value), updated_at = VALUES(updated_at);
+   ```
+   可使用 `mysql`/`mariadb` 客户端批量执行，或编写一次性脚本调用 `src.db.repositories.ConfigRepository.save_module()`。
+3. **刷新服务缓存**：完成插入后运行 `scripts/diagnose_foundation.py --module <module>` 或调用 `/api/config/<module>/refresh`（如前端提供）确保各服务加载新配置。
+4. **清理 Redis 备份**：验证服务读取正常后，可删除旧的 `hash:config:<module>`，避免后续写入被误读。
+
+迁移期间 `ConfigProvider` 会优先读取 MariaDB，当数据库不可用时仍会回退到 Redis，因此可以先写入新表再逐步清除 Redis 记录。
 
 ## 更多运维资料
 

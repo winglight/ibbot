@@ -14,12 +14,15 @@ from .mariadb import (
 )
 from .schema import REQUIRED_TABLES
 from .repositories import (
+    ConfigRepository,
+    ConfigRepositoryError,
     AuditLogRepository,
     AuditLogRepositoryError,
     MarketEventRepository,
     MarketEventRepositoryError,
     MarketPriceRepository,
     MarketPriceRepositoryError,
+    ModuleConfigSnapshot,
     OrderRepository,
     OrderRepositoryError,
     RepositoryError,
@@ -31,6 +34,8 @@ from .repositories import (
 __all__ = [
     "DatabaseConfigError",
     "MariaDBConfigurationError",
+    "ConfigRepository",
+    "ConfigRepositoryError",
     "RepositoryError",
     "RepositoryValidationError",
     "AuditLogRepository",
@@ -39,6 +44,7 @@ __all__ = [
     "MarketEventRepositoryError",
     "MarketPriceRepository",
     "MarketPriceRepositoryError",
+    "ModuleConfigSnapshot",
     "OrderRepository",
     "OrderRepositoryError",
     "RiskSnapshotRepository",

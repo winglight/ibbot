@@ -15,7 +15,7 @@
     ];
 
     const DATA_FIELD_GROUPS = [
-        { key: 'configs', title: '配置 (hash:config:*)', emptyText: '暂无配置数据' },
+        { key: 'configs', title: '配置 (config 表)', emptyText: '暂无配置数据' },
         { key: 'orders', title: '订单结果 (hash:ib:result:*)', emptyText: '暂无订单结果数据' },
         { key: 'subscriptions', title: '订阅快照 (hash:market:snapshot:*)', emptyText: '暂无订阅数据' },
     ];

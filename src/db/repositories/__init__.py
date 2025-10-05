@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from .audit import AuditLogRepository, AuditLogRepositoryError
+from .config import ConfigRepository, ConfigRepositoryError, ModuleConfigSnapshot
 from .events import MarketEventRepository, MarketEventRepositoryError
 from .market import MarketPriceRepository, MarketPriceRepositoryError
 from .order import OrderRepository, OrderRepositoryError
@@ -12,12 +13,15 @@ from .base import RepositoryError, RepositoryValidationError
 __all__ = [
     "AuditLogRepository",
     "AuditLogRepositoryError",
+    "ConfigRepository",
+    "ConfigRepositoryError",
     "MarketEventRepository",
     "MarketEventRepositoryError",
     "MarketPriceRepository",
     "MarketPriceRepositoryError",
     "OrderRepository",
     "OrderRepositoryError",
+    "ModuleConfigSnapshot",
     "RiskSnapshotRepository",
     "RiskSnapshotRepositoryError",
     "RepositoryError",

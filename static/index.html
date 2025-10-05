@@ -177,14 +177,14 @@
                                 <i class="fas fa-sync"></i>
                             </button>
                         </div>
-                        <div class="form-text">配置存储在 Redis <code>hash:config:&lt;module&gt;</code> 中。</div>
+                        <div class="form-text">配置存储在数据库 <code>config</code> 表中（键名格式为 <code>&lt;module&gt;:KEY</code>）。</div>
                     </div>
 
                     <div id="configCenterEditor" class="d-none">
                         <div class="mb-3">
                             <label class="form-label">配置内容 (JSON)</label>
                             <textarea id="configCenterTextarea" class="form-control font-monospace" rows="8" spellcheck="false" placeholder="{&#10;  &quot;KEY&quot;: &quot;VALUE&quot;&#10;}"></textarea>
-                            <div class="form-text">保存后会触发 <code>pubsub:config:update</code> 以通知服务热更新。</div>
+                            <div class="form-text">保存后会写入数据库并通知后台进程刷新缓存。</div>
                         </div>
                         <div class="mb-3">
                             <label class="form-label">变更说明</label>
