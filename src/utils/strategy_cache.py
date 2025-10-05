@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from datetime import datetime
@@ -11,12 +12,22 @@ from loguru import logger
 
 from src.cache import ensure_redis
 from src.utils import ensure_local_timezone, now_local, parse_local_datetime, to_local_iso
+from src.routes.service_clients import (
+    OrdersServiceClient,
+    ServiceClientError,
+    ServiceUnavailableError,
+)
 
 MAX_RECENT_ORDERS = int(os.getenv("STRATEGY_CACHE_MAX_RECENT", "200"))
+STRATEGY_CACHE_TTL_SECONDS = int(os.getenv("STRATEGY_CACHE_TTL_SECONDS", "900"))
+STRATEGY_CACHE_REFRESH_PAGE_SIZE = int(os.getenv("STRATEGY_CACHE_REFRESH_PAGE_SIZE", "200"))
+STRATEGY_CACHE_REFRESH_MAX_PAGES = int(os.getenv("STRATEGY_CACHE_REFRESH_MAX_PAGES", "10"))
 
 __all__ = [
     "order_to_snapshot",
     "record_filled_order",
+    "refresh_strategy_cache",
+    "schedule_strategy_cache_refresh",
     "rebuild_strategy_cache",
     "clear_strategy_cache",
     "get_strategy_stats",
@@ -26,6 +37,32 @@ __all__ = [
     "compute_performance_metrics",
     "mark_strategy_cache_stale",
 ]
+
+
+_ORDERS_CLIENT: OrdersServiceClient | None = None
+_REFRESH_LOCKS: Dict[str, asyncio.Lock] = {}
+_REFRESH_LOCKS_GUARD = asyncio.Lock()
+
+
+async def _get_refresh_lock(strategy: str) -> asyncio.Lock:
+    async with _REFRESH_LOCKS_GUARD:
+        lock = _REFRESH_LOCKS.get(strategy)
+        if lock is None:
+            lock = asyncio.Lock()
+            _REFRESH_LOCKS[strategy] = lock
+        return lock
+
+
+def _get_orders_client() -> OrdersServiceClient | None:
+    global _ORDERS_CLIENT
+    if _ORDERS_CLIENT is not None:
+        return _ORDERS_CLIENT
+    try:
+        client = OrdersServiceClient()
+    except Exception:
+        return None
+    _ORDERS_CLIENT = client
+    return client
 
 
 def _base_key(strategy: str) -> str:
@@ -78,33 +115,63 @@ def _normalise_int(value: Any) -> int:
         return 0
 
 
+_MISSING = object()
+
+
+def _extract_from_order(order: Any, *names: str) -> Any:
+    if not names:
+        return None
+    for name in names:
+        value = getattr(order, name, _MISSING)
+        if value is not _MISSING:
+            return value
+        if isinstance(order, Mapping):
+            if name in order:
+                return order[name]
+            for sub_key in ("result", "request", "metadata"):
+                sub_mapping = order.get(sub_key)
+                if isinstance(sub_mapping, Mapping) and name in sub_mapping:
+                    return sub_mapping[name]
+    return None
+
+
 def order_to_snapshot(order: Any, *, strategy_name: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Convert an order object into a serialisable snapshot for Redis."""
 
     if order is None:
         return None
 
-    strategy = strategy_name or getattr(order, "strategy_name", None)
+    strategy = strategy_name or _extract_from_order(order, "strategy_name", "strategy")
     if not strategy:
         return None
 
-    status = getattr(order, "status", None) or getattr(order, "order_status", None)
+    status = _extract_from_order(order, "status", "order_status")
     if not status or str(status).lower() != "filled":
         return None
 
-    order_id = getattr(order, "order_id", None) or getattr(order, "id", None)
+    order_id = _extract_from_order(order, "order_id", "id", "command_id")
     if not order_id:
         return None
 
-    created_raw = getattr(order, "created_at", None)
-    if created_raw is None:
-        created_raw = getattr(order, "timestamp", None)
+    created_raw = _extract_from_order(
+        order,
+        "created_at",
+        "submitted_at",
+        "requested_at",
+        "timestamp",
+    )
     if isinstance(created_raw, str):
         created_at = parse_local_datetime(created_raw)
     else:
         created_at = ensure_local_timezone(created_raw)
 
-    executed_raw = getattr(order, "executed_at", None)
+    executed_raw = _extract_from_order(
+        order,
+        "executed_at",
+        "completed_at",
+        "filled_at",
+        "timestamp",
+    )
     if isinstance(executed_raw, str):
         executed_at = parse_local_datetime(executed_raw)
     else:
@@ -113,11 +180,17 @@ def order_to_snapshot(order: Any, *, strategy_name: Optional[str] = None) -> Opt
     if executed_at is None:
         executed_at = created_at
 
-    quantity = _normalise_int(getattr(order, "quantity", None) or getattr(order, "qty", None))
-    pnl = _normalise_float(getattr(order, "pnl", None))
-    commission = _normalise_float(getattr(order, "commission", None))
-    price = _normalise_float(getattr(order, "price", None))
-    fill_price = _normalise_float(getattr(order, "fill_price", None)) or price
+    quantity = _normalise_int(_extract_from_order(order, "quantity", "qty", "filled_quantity"))
+    pnl = _normalise_float(_extract_from_order(order, "pnl", "realized_pnl"))
+    commission = _normalise_float(_extract_from_order(order, "commission", "commission_paid"))
+    price = _normalise_float(
+        _extract_from_order(order, "price", "limit_price", "requested_price")
+    )
+    fill_price = _normalise_float(
+        _extract_from_order(order, "fill_price", "avg_fill_price", "filled_price")
+    )
+    if not fill_price:
+        fill_price = price
 
     duration = None
     if created_at and executed_at:
@@ -383,6 +456,7 @@ async def _write_strategy_cache(strategy: str, order_map: Mapping[str, Dict[str,
 
     if orders_serialised:
         pipe.hset(_orders_key(strategy), mapping=orders_serialised)
+        pipe.expire(_orders_key(strategy), STRATEGY_CACHE_TTL_SECONDS)
 
     if order_map:
         zset_mapping: Dict[str, float] = {}
@@ -393,18 +467,22 @@ async def _write_strategy_cache(strategy: str, order_map: Mapping[str, Dict[str,
             zset_mapping[order_id] = score
         if zset_mapping:
             pipe.zadd(_orders_zset_key(strategy), zset_mapping)
+            pipe.expire(_orders_zset_key(strategy), STRATEGY_CACHE_TTL_SECONDS)
 
     if stats:
         pipe.hset(_stats_key(strategy), mapping=stats)
+        pipe.expire(_stats_key(strategy), STRATEGY_CACHE_TTL_SECONDS)
 
     if recent_entries:
         pipe.rpush(_recent_key(strategy), *recent_entries)
+        pipe.expire(_recent_key(strategy), STRATEGY_CACHE_TTL_SECONDS)
 
     if daily_map:
         pipe.hset(
             _daily_hash_key(strategy),
             mapping={day: f"{value:.6f}" for day, value in daily_map.items()},
         )
+        pipe.expire(_daily_hash_key(strategy), STRATEGY_CACHE_TTL_SECONDS)
         zset_mapping = {}
         for day, _ in daily_map.items():
             dt = parse_local_datetime(f"{day}T00:00:00")
@@ -417,8 +495,160 @@ async def _write_strategy_cache(strategy: str, order_map: Mapping[str, Dict[str,
             zset_mapping[day] = float(dt.timestamp())
         if zset_mapping:
             pipe.zadd(_daily_zset_key(strategy), zset_mapping)
+            pipe.expire(_daily_zset_key(strategy), STRATEGY_CACHE_TTL_SECONDS)
 
     await pipe.execute()
+
+
+async def _fetch_strategy_orders(strategy: str) -> List[Dict[str, Any]]:
+    client = _get_orders_client()
+    if client is None:
+        return []
+
+    collected: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    offset = 0
+    pages = 0
+
+    while pages < STRATEGY_CACHE_REFRESH_MAX_PAGES:
+        pages += 1
+        try:
+            response = await client.list_orders(limit=STRATEGY_CACHE_REFRESH_PAGE_SIZE, offset=offset)
+        except (ServiceUnavailableError, ServiceClientError) as exc:
+            logger.debug(
+                "Failed to fetch strategy orders from service", strategy=strategy, error=str(exc)
+            )
+            break
+
+        if not isinstance(response, Mapping):
+            break
+
+        raw_orders = response.get("orders")
+        if not isinstance(raw_orders, list) or not raw_orders:
+            break
+
+        matched = 0
+        for entry in raw_orders:
+            if not isinstance(entry, Mapping):
+                continue
+            payload = dict(entry)
+            if not _order_matches_strategy(payload, strategy):
+                continue
+            identifier = str(
+                payload.get("order_id")
+                or payload.get("id")
+                or payload.get("command_id")
+                or len(collected)
+            )
+            if identifier in seen:
+                continue
+            seen.add(identifier)
+            collected.append(payload)
+            matched += 1
+
+        offset += STRATEGY_CACHE_REFRESH_PAGE_SIZE
+        total = response.get("total")
+        if isinstance(total, (int, float)) and offset >= int(total):
+            break
+        if len(raw_orders) < STRATEGY_CACHE_REFRESH_PAGE_SIZE:
+            break
+        if matched == 0 and len(raw_orders) == 0:
+            break
+
+    return collected
+
+
+def _order_matches_strategy(order: Mapping[str, Any], strategy: str) -> bool:
+    target = str(strategy or "").strip().lower()
+    if not target:
+        return False
+
+    def _candidates(source: Mapping[str, Any]) -> Iterable[str]:
+        for key in ("strategy", "strategy_name"):
+            value = source.get(key)
+            if isinstance(value, str) and value.strip():
+                yield value.strip()
+        for sub_key in ("metadata", "request", "result"):
+            nested = source.get(sub_key)
+            if isinstance(nested, Mapping):
+                for key in ("strategy", "strategy_name", "strategy_id"):
+                    value = nested.get(key)
+                    if isinstance(value, str) and value.strip():
+                        yield value.strip()
+
+    for candidate in _candidates(order):
+        if candidate.lower() == target:
+            return True
+    return False
+
+
+async def _refresh_strategy_cache_from_source(
+    strategy: str,
+    *,
+    base_map: Optional[Mapping[str, Dict[str, Any]]] = None,
+    fetch_remote: bool = True,
+) -> bool:
+    order_map: Dict[str, Dict[str, Any]] = {}
+    if base_map:
+        order_map.update({str(key): dict(value) for key, value in base_map.items()})
+
+    remote_orders: Iterable[Mapping[str, Any]] = []
+    if fetch_remote:
+        remote_orders = await _fetch_strategy_orders(strategy)
+
+    for order in remote_orders:
+        snapshot = order_to_snapshot(order, strategy_name=strategy)
+        if snapshot is None:
+            continue
+        order_map[snapshot["order_id"]] = snapshot
+
+    if not order_map:
+        return False
+
+    await _write_strategy_cache(strategy, order_map)
+    return True
+
+
+async def refresh_strategy_cache(strategy: str, *, fetch_remote: bool = True) -> bool:
+    """Rebuild the strategy cache by fetching orders from upstream sources."""
+
+    lock = await _get_refresh_lock(strategy)
+    async with lock:
+        try:
+            return await _refresh_strategy_cache_from_source(strategy, fetch_remote=fetch_remote)
+        except Exception as exc:  # pragma: no cover - defensive guard
+            logger.warning(
+                "Failed to refresh strategy cache", strategy=strategy, error=str(exc)
+            )
+            return False
+
+
+def schedule_strategy_cache_refresh(
+    strategy: str,
+    *,
+    base_map: Optional[Mapping[str, Dict[str, Any]]] = None,
+    fetch_remote: bool = True,
+) -> None:
+    """Schedule an asynchronous refresh of the strategy cache."""
+
+    async def _runner() -> None:
+        lock = await _get_refresh_lock(strategy)
+        async with lock:
+            try:
+                await _refresh_strategy_cache_from_source(
+                    strategy, base_map=base_map, fetch_remote=fetch_remote
+                )
+            except Exception as exc:  # pragma: no cover - defensive guard
+                logger.warning(
+                    "Background refresh failed", strategy=strategy, error=str(exc)
+                )
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        asyncio.run(_runner())
+        return
+    loop.create_task(_runner())
 
 
 async def record_filled_order(order: Any, *, strategy_name: Optional[str] = None) -> None:
@@ -442,11 +672,22 @@ async def record_filled_order(order: Any, *, strategy_name: Optional[str] = None
     order_map[snapshot["order_id"]] = snapshot
 
     try:
-        await _write_strategy_cache(strategy, order_map)
-    except Exception as exc:
-        logger.warning(
-            "Failed to update strategy cache", strategy=strategy, error=str(exc)
-        )
+        await client.hset(_stats_key(strategy), mapping={"stale": "1"})
+    except Exception:
+        logger.debug("Failed to mark strategy cache as stale", strategy=strategy, exc_info=True)
+
+    try:
+        schedule_strategy_cache_refresh(strategy, base_map=order_map, fetch_remote=False)
+    except Exception:
+        # Fallback to synchronous refresh if scheduling fails
+        try:
+            await _refresh_strategy_cache_from_source(
+                strategy, base_map=order_map, fetch_remote=False
+            )
+        except Exception as exc:  # pragma: no cover - defensive guard
+            logger.warning(
+                "Failed to update strategy cache", strategy=strategy, error=str(exc)
+            )
 
 
 async def rebuild_strategy_cache(strategy: str, orders: Iterable[Any]) -> None:
@@ -494,8 +735,12 @@ async def get_strategy_stats(strategy: str) -> Dict[str, Any]:
     if client is None:
         return {}
     raw = await client.hgetall(_stats_key(strategy))
-    if not raw:
-        return {}
+    if not raw or raw.get("stale") == "1":
+        refreshed = await refresh_strategy_cache(strategy)
+        if refreshed:
+            raw = await client.hgetall(_stats_key(strategy))
+        if not raw:
+            return {}
     result: Dict[str, Any] = {}
     for key, value in raw.items():
         if key in {"filled_count", "win_count", "loss_count", "duration_count"}:
@@ -523,6 +768,11 @@ async def get_strategy_orders(strategy: str) -> List[Dict[str, Any]]:
     if client is None:
         return []
     raw = await client.hgetall(_orders_key(strategy))
+    if not raw:
+        refreshed = await refresh_strategy_cache(strategy)
+        if not refreshed:
+            return []
+        raw = await client.hgetall(_orders_key(strategy))
     if not raw:
         return []
     order_map = _prepare_order_map(raw)
@@ -599,6 +849,10 @@ async def get_recent_fills(strategy: str, limit: int = 20) -> List[Dict[str, Any
     if client is None:
         return []
     entries = await client.lrange(_recent_key(strategy), 0, max(limit - 1, 0))
+    if not entries:
+        refreshed = await refresh_strategy_cache(strategy)
+        if refreshed:
+            entries = await client.lrange(_recent_key(strategy), 0, max(limit - 1, 0))
     result: List[Dict[str, Any]] = []
     for entry in entries:
         try:
@@ -616,7 +870,11 @@ async def get_daily_pnl(strategy: str) -> List[Dict[str, Any]]:
         return []
     raw = await client.hgetall(_daily_hash_key(strategy))
     if not raw:
-        return []
+        refreshed = await refresh_strategy_cache(strategy)
+        if refreshed:
+            raw = await client.hgetall(_daily_hash_key(strategy))
+        if not raw:
+            return []
     items = []
     for day, pnl_value in raw.items():
         items.append((day, _normalise_float(pnl_value)))
