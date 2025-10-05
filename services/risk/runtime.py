@@ -28,7 +28,7 @@ except Exception:  # pragma: no cover - redis might be unavailable in CI
     Redis = Any  # type: ignore[misc, assignment]
 
 if TYPE_CHECKING:  # pragma: no cover - typing helpers
-    from src.db import ConfigRepository, RiskSnapshotRepository
+    from src.db import ConfigRepository, RiskRulesRepository, RiskSnapshotRepository
     from src.db.repositories.config import ModuleConfigSnapshot
 
 
@@ -43,13 +43,25 @@ async def _maybe_await(result: Awaitable[Any] | Any) -> Any:
 
 
 class RiskSnapshotRepositoryProtocol(Protocol):
-    async def bulk_upsert_rule_snapshots(
+    """Legacy interface for risk snapshot persistence."""
+
+    async def save_rule_snapshots(
         self,
         *,
         service: str,
-        rules: Mapping[str, Mapping[str, Any]],
+        rules: Mapping[str, Mapping[str, Any]] | Iterable[Mapping[str, Any]],
         updated_at: str | datetime | None = None,
         captured_at: datetime | str | None = None,
+    ) -> None:
+        ...
+
+
+class RiskRulesRepositoryProtocol(Protocol):
+    async def replace_rules(
+        self,
+        rules: Mapping[str, Mapping[str, Any]],
+        *,
+        timestamp: str | datetime | None = None,
     ) -> None:
         ...
 
@@ -62,6 +74,16 @@ RiskSnapshotRepositoryFactoryResult = (
 RiskSnapshotRepositoryFactory = Callable[
     [],
     Awaitable[RiskSnapshotRepositoryFactoryResult] | RiskSnapshotRepositoryFactoryResult,
+]
+
+
+RiskRulesRepositoryFactoryResult = (
+    RiskRulesRepositoryProtocol | Mapping[str, Any] | Sequence[Any] | None
+)
+
+
+RiskRulesRepositoryFactory = Callable[
+    [], Awaitable[RiskRulesRepositoryFactoryResult] | RiskRulesRepositoryFactoryResult
 ]
 
 
@@ -87,14 +109,32 @@ def create_risk_snapshot_repository_factory(
     return _factory
 
 
+def create_risk_rules_repository_factory(
+    *, logger_name: str = "db.risk_rules"
+) -> RiskRulesRepositoryFactory | None:
+    """Return a factory that constructs the DB-API risk rules repository."""
+
+    try:
+        from src.db.repositories.risk import RiskRulesRepository
+    except ModuleNotFoundError:  # pragma: no cover - optional dependency
+        return None
+
+    def _factory() -> RiskRulesRepositoryProtocol:
+        return RiskRulesRepository(logger_name=logger_name)
+
+    return _factory
+
+
 @dataclass(slots=True)
 class RiskRuntime:
     """Orchestrate the risk engine and connect it to external services."""
 
     redis_factory: Callable[[], Awaitable[Redis]]
     risk_snapshot_repository: RiskSnapshotRepositoryProtocol | None = None
+    risk_rules_repository: RiskRulesRepositoryProtocol | None = None
     config_repository: ConfigRepositoryProtocol | None = None
     risk_snapshot_repository_factory: RiskSnapshotRepositoryFactory | None = None
+    risk_rules_repository_factory: RiskRulesRepositoryFactory | None = None
     config_repository_factory: ConfigRepositoryFactory | None = None
     logger_name: str = "risk-service"
     service_name: str = "risk-service"
@@ -148,6 +188,12 @@ class RiskRuntime:
         default=None, init=False, repr=False
     )
     _risk_snapshot_repository_created: bool = field(
+        default=False, init=False, repr=False
+    )
+    _risk_rules_repository_close: Callable[[], Awaitable[None]] | None = field(
+        default=None, init=False, repr=False
+    )
+    _risk_rules_repository_created: bool = field(
         default=False, init=False, repr=False
     )
     _config_repository_created: bool = field(
@@ -798,8 +844,8 @@ class RiskRuntime:
     ) -> None:
         await self._persist_config_snapshot(config_payload, rules_payload, timestamp)
 
-        repository = await self._ensure_risk_snapshot_repository()
-        if repository is None or not rules_payload:
+        repository = await self._ensure_risk_rules_repository()
+        if repository is None:
             return
 
         normalised_rules: dict[str, dict[str, Any]] = {}
@@ -810,11 +856,7 @@ class RiskRuntime:
             payload.setdefault("updated_at", timestamp)
             normalised_rules[symbol_str] = payload
 
-        await repository.bulk_upsert_rule_snapshots(
-            service=self.service_name,
-            rules=normalised_rules,
-            captured_at=timestamp,
-        )
+        await repository.replace_rules(normalised_rules, timestamp=timestamp)
 
     async def refresh_snapshots(self) -> None:
         timestamp = (
@@ -847,6 +889,22 @@ class RiskRuntime:
             self._last_exception_message = str(exc)
             return None
         return self.risk_snapshot_repository
+
+    async def _ensure_risk_rules_repository(
+        self,
+    ) -> RiskRulesRepositoryProtocol | None:
+        if self.risk_rules_repository is not None:
+            return self.risk_rules_repository
+        try:
+            await self._initialise_risk_rules_repository()
+        except Exception as exc:
+            logger = self._logger or get_logger(self.logger_name)
+            logger.warning(
+                "Failed to initialise risk rules repository", exc_info=True
+            )
+            self._last_exception_message = str(exc)
+            return None
+        return self.risk_rules_repository
 
     async def _ensure_config_repository(self) -> ConfigRepositoryProtocol | None:
         if self.config_repository is not None:
@@ -928,6 +986,72 @@ class RiskRuntime:
             repository, *extra_resources
         )
 
+    async def _initialise_risk_rules_repository(self) -> None:
+        if self.risk_rules_repository is not None:
+            return
+        factory = self.risk_rules_repository_factory
+        if factory is None:
+            return
+        repository_candidate = factory()
+        result = await _maybe_await(repository_candidate)
+
+        repository: RiskRulesRepositoryProtocol | None = None
+        extra_resources: list[Any] = []
+
+        if isinstance(result, Mapping):
+            keys_preference = (
+                "repository",
+                "instance",
+                "value",
+                "repo",
+                "object",
+            )
+            for key in keys_preference:
+                candidate = result.get(key)
+                if candidate is not None:
+                    repository = candidate  # type: ignore[assignment]
+                    break
+            for key in ("close", "closer", "shutdown", "cleanup", "teardown"):
+                closer_candidate = result.get(key)
+                if closer_candidate is not None:
+                    extra_resources.append(closer_candidate)
+
+            for key in ("connection", "session", "resource"):
+                resource_candidate = result.get(key)
+                if resource_candidate is not None:
+                    extra_resources.append(resource_candidate)
+
+            for key in ("resources", "connections", "extras", "closers"):
+                resource_candidate = result.get(key)
+                if resource_candidate is None:
+                    continue
+                if isinstance(resource_candidate, Sequence) and not isinstance(
+                    resource_candidate, (str, bytes, bytearray)
+                ):
+                    extra_resources.extend(resource_candidate)
+                else:
+                    extra_resources.append(resource_candidate)
+
+        elif isinstance(result, Sequence) and not isinstance(
+            result, (str, bytes, bytearray)
+        ):
+            if result:
+                repository = result[0]  # type: ignore[assignment]
+                extra_resources.extend(result[1:])
+        else:
+            repository = result  # type: ignore[assignment]
+
+        if repository is None:
+            self._risk_rules_repository_created = False
+            self._risk_rules_repository_close = None
+            return
+
+        self.risk_rules_repository = repository
+        self._risk_rules_repository_created = True
+        self._risk_rules_repository_close = self._resolve_repository_close(
+            repository, *extra_resources
+        )
+
     async def _initialise_config_repository(self) -> None:
         if self.config_repository is not None:
             return
@@ -981,6 +1105,21 @@ class RiskRuntime:
             self.risk_snapshot_repository = None
             self._risk_snapshot_repository_created = False
 
+    async def _shutdown_risk_rules_repository(self) -> None:
+        closer = self._risk_rules_repository_close
+        self._risk_rules_repository_close = None
+        if closer is not None:
+            try:
+                await closer()
+            except Exception:
+                logger = self._logger or get_logger(self.logger_name)
+                logger.debug(
+                    "Failed to close risk rules repository", exc_info=True
+                )
+        if self._risk_rules_repository_created:
+            self.risk_rules_repository = None
+            self._risk_rules_repository_created = False
+
     async def _shutdown_config_repository(self) -> None:
         if not self._config_repository_created:
             return
@@ -1000,7 +1139,9 @@ class RiskRuntime:
 
     def _resolve_repository_close(
         self,
-        repository: RiskSnapshotRepositoryProtocol | None,
+        repository: RiskSnapshotRepositoryProtocol
+        | RiskRulesRepositoryProtocol
+        | None,
         *resources: Any,
     ) -> Callable[[], Awaitable[None]] | None:
         closers: list[Callable[[], Awaitable[Any] | Any]] = []
@@ -1312,8 +1453,17 @@ class RiskRuntime:
             )
             self._last_exception_message = str(exc)
         try:
+            await self._initialise_risk_rules_repository()
+        except Exception as exc:
+            logger = self._logger or get_logger(self.logger_name)
+            logger.warning(
+                "Failed to initialise risk rules repository", exc_info=True
+            )
+            self._last_exception_message = str(exc)
+        try:
             self._redis = await self.redis_factory()
         except Exception:
+            await self._shutdown_risk_rules_repository()
             await self._shutdown_risk_snapshot_repository()
             self._redis = None
             raise
@@ -1350,6 +1500,7 @@ class RiskRuntime:
             )
         self._redis = None
         self._pending_commands.clear()
+        await self._shutdown_risk_rules_repository()
         await self._shutdown_risk_snapshot_repository()
         await self._shutdown_config_repository()
 

@@ -1,0 +1,97 @@
+-- Move persisted risk rule snapshots into risk_rules before dropping the legacy table.
+--
+-- MariaDB / MySQL:
+--
+-- INSERT INTO risk_rules (
+--     symbol,
+--     stop_loss_price,
+--     take_profit_price,
+--     max_loss_percent,
+--     enabled,
+--     max_time_span,
+--     `timestamp`,
+--     auto_trailing,
+--     atr_params,
+--     rule_type
+-- )
+-- SELECT
+--     JSON_UNQUOTE(JSON_EXTRACT(payload, '$.symbol')) AS symbol,
+--     CAST(JSON_UNQUOTE(JSON_EXTRACT(payload, '$.stop_loss_price')) AS DOUBLE),
+--     CAST(JSON_UNQUOTE(JSON_EXTRACT(payload, '$.take_profit_price')) AS DOUBLE),
+--     CAST(JSON_UNQUOTE(JSON_EXTRACT(payload, '$.max_loss_percent')) AS DOUBLE),
+--     IF(JSON_EXTRACT(payload, '$.enabled') IN (true, 1, 'true', '1'), 1, 0) AS enabled,
+--     CAST(JSON_UNQUOTE(JSON_EXTRACT(payload, '$.max_time_span')) AS SIGNED),
+--     COALESCE(JSON_UNQUOTE(JSON_EXTRACT(payload, '$.updated_at')), captured_at) AS `timestamp`,
+--     IF(JSON_EXTRACT(payload, '$.auto_trailing') IN (true, 1, 'true', '1'), 1, 0) AS auto_trailing,
+--     JSON_EXTRACT(payload, '$.atr_params') AS atr_params,
+--     COALESCE(JSON_UNQUOTE(JSON_EXTRACT(payload, '$.rule_type')), 'fixed') AS rule_type
+-- FROM (
+--     SELECT rrs.*,
+--            ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY captured_at DESC, id DESC) AS rn
+--     FROM risk_rule_snapshots AS rrs
+--     WHERE payload IS NOT NULL
+-- ) ranked
+-- WHERE rn = 1
+-- ON DUPLICATE KEY UPDATE
+--     stop_loss_price = VALUES(stop_loss_price),
+--     take_profit_price = VALUES(take_profit_price),
+--     max_loss_percent = VALUES(max_loss_percent),
+--     enabled = VALUES(enabled),
+--     max_time_span = VALUES(max_time_span),
+--     `timestamp` = VALUES(`timestamp`),
+--     auto_trailing = VALUES(auto_trailing),
+--     atr_params = VALUES(atr_params),
+--     rule_type = VALUES(rule_type);
+--
+-- SQLite (version 3.25 or newer for window functions):
+--
+-- INSERT INTO risk_rules (
+--     symbol,
+--     stop_loss_price,
+--     take_profit_price,
+--     max_loss_percent,
+--     enabled,
+--     max_time_span,
+--     timestamp,
+--     auto_trailing,
+--     atr_params,
+--     rule_type
+-- )
+-- SELECT
+--     json_extract(payload, '$.symbol'),
+--     CAST(json_extract(payload, '$.stop_loss_price') AS REAL),
+--     CAST(json_extract(payload, '$.take_profit_price') AS REAL),
+--     CAST(json_extract(payload, '$.max_loss_percent') AS REAL),
+--     CASE
+--         WHEN json_extract(payload, '$.enabled') IN (1, true, 'true', '1') THEN 1
+--         ELSE 0
+--     END,
+--     CAST(json_extract(payload, '$.max_time_span') AS INTEGER),
+--     COALESCE(json_extract(payload, '$.updated_at'), captured_at),
+--     CASE
+--         WHEN json_extract(payload, '$.auto_trailing') IN (1, true, 'true', '1') THEN 1
+--         ELSE 0
+--     END,
+--     json_extract(payload, '$.atr_params'),
+--     COALESCE(json_extract(payload, '$.rule_type'), 'fixed')
+-- FROM (
+--     SELECT rrs.*,
+--            ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY captured_at DESC, id DESC) AS rn
+--     FROM risk_rule_snapshots AS rrs
+--     WHERE payload IS NOT NULL
+-- ) ranked
+-- WHERE rn = 1
+-- ON CONFLICT(symbol) DO UPDATE SET
+--     stop_loss_price=excluded.stop_loss_price,
+--     take_profit_price=excluded.take_profit_price,
+--     max_loss_percent=excluded.max_loss_percent,
+--     enabled=excluded.enabled,
+--     max_time_span=excluded.max_time_span,
+--     timestamp=excluded.timestamp,
+--     auto_trailing=excluded.auto_trailing,
+--     atr_params=excluded.atr_params,
+--     rule_type=excluded.rule_type;
+--
+-- After running the migration the legacy table can be dropped:
+--
+-- DROP TABLE risk_rule_snapshots;

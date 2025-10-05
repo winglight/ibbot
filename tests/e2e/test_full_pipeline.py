@@ -300,20 +300,16 @@ class RecordingSnapshotRepository:
     def __init__(self) -> None:
         self.rule_snapshots: list[dict[str, Any]] = []
 
-    async def bulk_upsert_rule_snapshots(
+    async def replace_rules(
         self,
-        *,
-        service: str,
         rules: Mapping[str, Mapping[str, Any]],
-        updated_at: str | None = None,
-        captured_at: str | datetime | None = None,
+        *,
+        timestamp: str | datetime | None = None,
     ) -> None:
         self.rule_snapshots.append(
             {
-                "service": service,
                 "rules": {symbol: dict(payload) for symbol, payload in rules.items()},
-                "updated_at": updated_at,
-                "captured_at": captured_at,
+                "timestamp": timestamp,
             }
         )
 
@@ -599,7 +595,7 @@ async def _run_market_strategy_risk_flow(monkeypatch: pytest.MonkeyPatch) -> Non
 
     risk_runtime = RiskRuntime(
         redis_factory=redis_factory,
-        risk_snapshot_repository_factory=_risk_repository_factory,
+        risk_rules_repository_factory=_risk_repository_factory,
         config_repository_factory=_config_repository_factory,
         logger_name="tests.risk-service",
         service_name="tests.risk-service",

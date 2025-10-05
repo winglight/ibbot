@@ -11,7 +11,6 @@ REQUIRED_TABLES: FrozenSet[str] = frozenset(
         "orders",
         "market_prices",
         "risk_config_snapshots",
-        "risk_rule_snapshots",
         "market_events",
         "risk_rules",
         "strategies",

@@ -14,20 +14,16 @@ class RecordingRepository:
     def __init__(self) -> None:
         self.rule_snapshots: list[dict[str, Any]] = []
 
-    async def bulk_upsert_rule_snapshots(
+    async def replace_rules(
         self,
-        *,
-        service: str,
         rules: Mapping[str, Mapping[str, Any]],
-        updated_at: str | None = None,
-        captured_at: str | datetime | None = None,
+        *,
+        timestamp: str | datetime | None = None,
     ) -> None:
         self.rule_snapshots.append(
             {
-                "service": service,
                 "rules": {symbol: dict(payload) for symbol, payload in rules.items()},
-                "updated_at": updated_at,
-                "captured_at": captured_at,
+                "timestamp": timestamp,
             }
         )
 
@@ -199,7 +195,7 @@ async def _run_integration(tmp_path: Path, redis: Any) -> None:
 
     runtime = RiskRuntime(
         redis_factory=redis_factory,
-        risk_snapshot_repository_factory=_repository_factory,
+        risk_rules_repository_factory=_repository_factory,
         config_repository_factory=_config_repository_factory,
         logger_name="risk-service-test",
         service_name="risk-service-test",
@@ -241,6 +237,7 @@ async def _run_integration(tmp_path: Path, redis: Any) -> None:
     assert repository.rule_snapshots
     latest_rules = repository.rule_snapshots[-1]
     assert "MNQ" in latest_rules["rules"]
+    assert latest_rules.get("timestamp")
 
     await runtime.start()
     try:
@@ -297,7 +294,7 @@ async def test_config_persistence_across_restart(tmp_path: Path) -> None:
 
     runtime = RiskRuntime(
         redis_factory=_redis_primary,
-        risk_snapshot_repository_factory=_risk_repo_factory,
+        risk_rules_repository_factory=_risk_repo_factory,
         config_repository_factory=_config_repo_factory,
         logger_name="risk-service-test",
         service_name="risk-service-test",
@@ -320,7 +317,7 @@ async def test_config_persistence_across_restart(tmp_path: Path) -> None:
 
     runtime_reloaded = RiskRuntime(
         redis_factory=_redis_secondary,
-        risk_snapshot_repository_factory=None,
+        risk_rules_repository_factory=None,
         config_repository_factory=_config_repo_factory,
         logger_name="risk-service-test",
         service_name="risk-service-test",

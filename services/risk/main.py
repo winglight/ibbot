@@ -8,9 +8,9 @@ from typing import Any, Mapping
 from services.risk import RiskRuntime
 from services.risk.runtime import (
     ConfigRepositoryFactory,
-    RiskSnapshotRepositoryFactory,
+    RiskRulesRepositoryFactory,
     create_config_repository_factory,
-    create_risk_snapshot_repository_factory,
+    create_risk_rules_repository_factory,
 )
 from src.ibbot.config import ConfigProvider
 from src.ibbot.logging import get_logger
@@ -28,8 +28,8 @@ async def run_service() -> None:
 
     initial_config = await provider.get_module(SERVICE_NAME)
 
-    snapshot_repository_factory: RiskSnapshotRepositoryFactory | None = (
-        create_risk_snapshot_repository_factory()
+    snapshot_repository_factory: RiskRulesRepositoryFactory | None = (
+        create_risk_rules_repository_factory()
     )
     config_repository_factory: ConfigRepositoryFactory | None = (
         create_config_repository_factory()
@@ -42,7 +42,7 @@ async def run_service() -> None:
         redis_factory=redis_factory,
         logger_name="risk-service",
         service_name=SERVICE_NAME,
-        risk_snapshot_repository_factory=snapshot_repository_factory,
+        risk_rules_repository_factory=snapshot_repository_factory,
         config_repository_factory=config_repository_factory,
     )
     await runtime.update_config(initial_config)

@@ -15,9 +15,9 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from services.risk import RiskRuntime
 from services.risk.runtime import (
     ConfigRepositoryFactory,
-    RiskSnapshotRepositoryFactory,
+    RiskRulesRepositoryFactory,
     create_config_repository_factory,
-    create_risk_snapshot_repository_factory,
+    create_risk_rules_repository_factory,
 )
 from services.risk.engine import RiskRule
 from src.ibbot import update_service_health
@@ -142,8 +142,8 @@ async def _health_loop(app: FastAPI, interval: float) -> None:
 async def _lifespan(
     app: FastAPI,
     *,
-    runtime_factory: Callable[[Any, RiskSnapshotRepositoryFactory | None], RiskRuntime],
-    snapshot_repository_factory: RiskSnapshotRepositoryFactory | None = None,
+    runtime_factory: Callable[[Any, RiskRulesRepositoryFactory | None], RiskRuntime],
+    rules_repository_factory: RiskRulesRepositoryFactory | None = None,
     config_repository_factory: ConfigRepositoryFactory | None = None,
     initial_config: Mapping[str, Any] | None = None,
     health_interval: float = DEFAULT_HEALTH_INTERVAL,
@@ -163,7 +163,7 @@ async def _lifespan(
         provider = ConfigProvider(redis_client=redis, hash_prefix="hash:config")
         await provider.start()
 
-    snapshot_repository_factory = snapshot_repository_factory or create_risk_snapshot_repository_factory()
+    rules_repository_factory = rules_repository_factory or create_risk_rules_repository_factory()
     config_repository_factory = config_repository_factory or create_config_repository_factory()
 
     try:
@@ -175,12 +175,12 @@ async def _lifespan(
                 logger.warning("Failed to load initial risk config: %s", exc)
                 config_payload = {}
 
-        runtime = runtime_factory(redis, snapshot_repository_factory)
+        runtime = runtime_factory(redis, rules_repository_factory)
         if (
-            runtime.risk_snapshot_repository_factory is None
-            and snapshot_repository_factory is not None
+            runtime.risk_rules_repository_factory is None
+            and rules_repository_factory is not None
         ):
-            runtime.risk_snapshot_repository_factory = snapshot_repository_factory
+            runtime.risk_rules_repository_factory = rules_repository_factory
         if (
             getattr(runtime, "config_repository_factory", None) is None
             and config_repository_factory is not None
@@ -261,7 +261,7 @@ def create_app(
                 redis_factory=lambda: redis,
                 logger_name=SERVICE_NAME,
                 service_name=SERVICE_NAME,
-                risk_snapshot_repository_factory=repository_factory,
+                risk_rules_repository_factory=repository_factory,
             ),
             initial_config=initial_config,
             health_interval=health_interval,
