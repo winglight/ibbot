@@ -270,7 +270,7 @@ npm test
 
 ## 📚 更多资料
 
-- DOM 服务与调优：`docs/dom_optimizer_guide.md`、`src/dom_service.py`。
+- DOM 服务与数据：`docs/dom_optimizer_guide.md`、`src/dom_service.py`。
 - 风险管理设计：`docs/策略级风控模块设计.docx`、`src/risk_manager.py`。
 - 手工测试指引：`docs/tests.md`。
 - 基础依赖配置与诊断：`docs/foundation_libs.md`。

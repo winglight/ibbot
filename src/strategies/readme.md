@@ -61,7 +61,7 @@ Runner 调用的核心接口：
 
 ## 5. 联调建议
 
-- 开发阶段可使用 TWS/IB Gateway 模拟账户或 mock 行情数据（例如通过 `/api/dom/optimize` 生成回放数据）。
+- 开发阶段可使用 TWS/IB Gateway 模拟账户或自建脚本回放 DOM 数据（可从 `/api/dom/history/{symbol}` 导出样本）。
 - 使用 Web UI 的日志与队列面板观察策略执行情况，必要时可以在 `data/queue_tasks.json` 中查看持久化任务。
 - 若策略频繁触发风控，可在 `/api/risk_rules` 或 `/api/strategy/{name}/risk-settings` 调整阈值。
 
