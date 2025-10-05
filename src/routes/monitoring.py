@@ -8,17 +8,12 @@ import logging
 import os
 import re
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Iterable, Mapping, Sequence
 
 from fastapi import APIRouter, HTTPException, Query
 
-from src.db import (
-    MariaDBConfigurationError,
-    get_service_metrics_columns,
-    run_sql_query,
-)
 from src.ibbot.redis import (
     DEFAULT_COMMAND_QUEUE,
     DEFAULT_MARKET_STREAM,
@@ -27,6 +22,7 @@ from src.ibbot.redis import (
     get_queue_length,
     get_redis_client,
     get_stream_metrics,
+    load_service_metrics,
 )
 
 router = APIRouter()
@@ -669,51 +665,58 @@ def _coerce_datetime(value: Any) -> datetime | None:
     return None
 
 
-def _aggregate_metric_rows(
-    rows: Iterable[Mapping[str, Any]],
-    *,
-    aggregate: str,
-    has_service: bool,
-    has_metric: bool,
-    has_queue: bool,
-    has_stream: bool,
-    has_group: bool,
+def _parse_metric_time(value: Any) -> datetime:
+    timestamp = _coerce_datetime(value)
+    if timestamp is not None:
+        if timestamp.tzinfo is None:
+            return timestamp.replace(tzinfo=timezone.utc)
+        return timestamp.astimezone(timezone.utc)
+    if isinstance(value, (int, float)):
+        numeric = float(value)
+        if numeric > 10_000_000_000:
+            numeric /= 1000.0
+        return datetime.fromtimestamp(numeric, tz=timezone.utc)
+    return datetime.now(timezone.utc)
+
+
+def _aggregate_metric_entries(
+    entries: Iterable[Mapping[str, Any]], *, aggregate: str
 ) -> list[dict[str, Any]]:
     buckets: dict[tuple[Any, ...], list[float]] = defaultdict(list)
+    has_service = False
+    has_metric = False
+    has_queue = False
+    has_stream = False
+    has_group = False
 
-    for row in rows:
-        timestamp_value = row.get("bucket_time")
-        bucket_time = _coerce_datetime(timestamp_value)
-        if bucket_time is None:
-            continue
-        bucket_time = bucket_time.replace(second=0, microsecond=0)
-
-        raw_value = row.get("metric_value")
+    for entry in entries:
         try:
-            numeric = float(raw_value)
+            numeric = float(entry.get("value"))
         except (TypeError, ValueError):
             continue
 
-        meta: dict[str, Any] = {}
-        if has_service:
-            meta["service"] = row.get("service")
-        if has_metric:
-            meta["metric"] = row.get("metric")
-        if has_queue:
-            meta["queue_key"] = row.get("queue_key")
-        if has_stream:
-            meta["stream_key"] = row.get("stream_key")
-        if has_group:
-            meta["group"] = row.get("group_name")
+        bucket_time = _parse_metric_time(entry.get("time") or entry.get("timestamp"))
+        service = entry.get("service") or None
+        metric = entry.get("metric") or None
+        queue_key = entry.get("queue_key") or None
+        stream_key = entry.get("stream_key") or None
+        group = entry.get("group") or entry.get("group_name") or None
 
-        key = (
-            bucket_time,
-            meta.get("service"),
-            meta.get("metric"),
-            meta.get("queue_key"),
-            meta.get("stream_key"),
-            meta.get("group"),
-        )
+        details = entry.get("details") if isinstance(entry.get("details"), Mapping) else {}
+        if queue_key is None:
+            queue_key = details.get("queue_key")
+        if stream_key is None:
+            stream_key = details.get("stream_key")
+        if group is None:
+            group = details.get("group")
+
+        has_service = has_service or service is not None
+        has_metric = has_metric or metric is not None
+        has_queue = has_queue or queue_key is not None
+        has_stream = has_stream or stream_key is not None
+        has_group = has_group or group is not None
+
+        key = (bucket_time, service, metric, queue_key, stream_key, group)
         buckets[key].append(numeric)
 
     def _apply(values: list[float]) -> float | None:
@@ -731,7 +734,7 @@ def _aggregate_metric_rows(
             return float(len(values))
         return None
 
-    entries: list[dict[str, Any]] = []
+    entries_out: list[dict[str, Any]] = []
     for key, values in buckets.items():
         bucket_time, service, metric, queue_key, stream_key, group = key
         aggregated = _apply(values)
@@ -748,9 +751,9 @@ def _aggregate_metric_rows(
             entry["stream_key"] = stream_key
         if has_group:
             entry["group"] = group
-        entries.append(entry)
+        entries_out.append(entry)
 
-    entries.sort(
+    entries_out.sort(
         key=lambda item: (
             item.get("time", ""),
             item.get("service") or "",
@@ -759,13 +762,13 @@ def _aggregate_metric_rows(
             item.get("stream_key") or "",
         )
     )
-    return entries
+    return entries_out
 
 
-def build_metric_series_payload(
+async def build_metric_series_payload(
     *, window: str, service: str | None, metric: str | None, aggregate: str
 ) -> Mapping[str, Any]:
-    """Return the write rate payload used by both HTTP and websocket handlers."""
+    """Return the write rate payload sourced from Redis service metrics."""
 
     query_meta = {
         "window": window,
@@ -774,9 +777,17 @@ def build_metric_series_payload(
         "aggregate": aggregate,
     }
 
+    normalised_aggregate = _normalise_aggregate(aggregate)
+    window_delta = _parse_window(window)
+    end = datetime.now(timezone.utc)
+    start = end - window_delta
+
     try:
-        columns = get_service_metrics_columns()
-    except MariaDBConfigurationError as exc:
+        raw_entries = await load_service_metrics(
+            start=start, end=end, service=service, metric=metric
+        )
+    except (RedisError, ConnectionError) as exc:
+        logger.warning("Failed to load service metrics from Redis", exc_info=True)
         return {
             "success": False,
             "error": str(exc),
@@ -784,98 +795,10 @@ def build_metric_series_payload(
             "summary": {},
             "query": query_meta,
         }
+    except Exception as exc:  # pragma: no cover - defensive guard
+        raise HTTPException(status_code=502, detail=f"Failed to load Redis metrics: {exc}") from exc
 
-    def _resolve(*candidates: str) -> str | None:
-        for candidate in candidates:
-            if candidate in columns:
-                return candidate
-        return None
-
-    timestamp_col = _resolve("recorded_at", "timestamp", "created_at")
-    value_col = _resolve("value", "metric_value", "count")
-    service_col = _resolve("service", "service_name")
-    metric_col = _resolve("metric", "metric_name")
-    queue_col = _resolve("queue_key", "queue")
-    stream_col = _resolve("stream_key", "stream")
-    group_col = _resolve("group_name", "group")
-
-    if not timestamp_col or not value_col:
-        return {
-            "success": False,
-            "error": "service_metrics table is missing timestamp or value columns",
-            "series": [],
-            "summary": {},
-            "query": query_meta,
-        }
-
-    def _column(name: str) -> str:
-        return f"`{name}`"
-
-    select_parts = [
-        f"{_column(timestamp_col)} AS bucket_time",
-        f"{_column(value_col)} AS metric_value",
-    ]
-    if service_col:
-        select_parts.append(f"{_column(service_col)} AS service")
-    if metric_col:
-        select_parts.append(f"{_column(metric_col)} AS metric")
-    if queue_col:
-        select_parts.append(f"{_column(queue_col)} AS queue_key")
-    if stream_col:
-        select_parts.append(f"{_column(stream_col)} AS stream_key")
-    if group_col:
-        select_parts.append(f"{_column(group_col)} AS group_name")
-
-    where_clauses = [f"{_column(timestamp_col)} >= :start"]
-    params: dict[str, Any] = {
-        "start": datetime.utcnow() - _parse_window(window),
-    }
-
-    if service:
-        if not service_col:
-            raise HTTPException(status_code=400, detail="service filter is not supported")
-        where_clauses.append(f"{_column(service_col)} = :service")
-        params["service"] = service
-
-    if metric:
-        if not metric_col:
-            raise HTTPException(status_code=400, detail="metric filter is not supported")
-        where_clauses.append(f"{_column(metric_col)} = :metric")
-        params["metric"] = metric
-
-    sql = " ".join(
-        [
-            "SELECT",
-            ", ".join(select_parts),
-            "FROM service_metrics",
-            "WHERE",
-            " AND ".join(where_clauses),
-            f"ORDER BY {_column(timestamp_col)} ASC",
-        ]
-    )
-
-    try:
-        rows = run_sql_query(sql, params)
-    except MariaDBConfigurationError as exc:
-        return {
-            "success": False,
-            "error": str(exc),
-            "series": [],
-            "summary": {},
-            "query": query_meta,
-        }
-    except Exception as exc:  # pragma: no cover - depends on DB driver
-        raise HTTPException(status_code=502, detail=f"Failed to query MariaDB: {exc}") from exc
-
-    series = _aggregate_metric_rows(
-        rows,
-        aggregate=_normalise_aggregate(aggregate),
-        has_service=service_col is not None,
-        has_metric=metric_col is not None,
-        has_queue=queue_col is not None,
-        has_stream=stream_col is not None,
-        has_group=group_col is not None,
-    )
+    series = _aggregate_metric_entries(raw_entries, aggregate=normalised_aggregate)
 
     grouped: dict[str, dict[str, Any]] = defaultdict(lambda: {"points": 0, "sum": 0.0})
     for entry in series:
@@ -905,9 +828,9 @@ async def get_metrics_write_rate(
     metric: str | None = Query(default=None),
     aggregate: str = Query(default="sum"),
 ) -> Mapping[str, Any]:
-    """Query MariaDB for service metric write rates."""
+    """Query Redis for service metric write rates."""
 
-    return build_metric_series_payload(
+    return await build_metric_series_payload(
         window=window, service=service, metric=metric, aggregate=aggregate
     )
 
@@ -921,7 +844,7 @@ async def get_metrics_write_rate_legacy(
 ) -> Mapping[str, Any]:
     """Backward compatible alias for legacy influx write-rate endpoint."""
 
-    payload = build_metric_series_payload(
+    payload = await build_metric_series_payload(
         window=window, service=service, metric=metric, aggregate=aggregate
     )
     if isinstance(payload, dict):

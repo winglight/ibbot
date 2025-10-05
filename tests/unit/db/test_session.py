@@ -11,29 +11,29 @@ async def test_connect_uses_injected_engine(sqlite_db) -> None:
 
     with connect() as connection:
         connection.execute(
-            "INSERT INTO service_metrics (service, metric, value, recorded_at) VALUES (?, ?, ?, ?)",
-            ("analytics", "jobs", 2.0, timestamp),
+            "INSERT INTO market_events (event_type, topic, recorded_at, ingested_at) VALUES (?, ?, ?, ?)",
+            ("test.event", "topic", timestamp, timestamp),
         )
         connection.commit()
 
     row = sqlite_db.execute(
-        "SELECT service, metric, value FROM service_metrics WHERE service = ?",
-        ("analytics",),
+        "SELECT event_type, topic FROM market_events WHERE event_type = ?",
+        ("test.event",),
     ).fetchone()
-    assert tuple(row) == ("analytics", "jobs", 2.0)
+    assert tuple(row) == ("test.event", "topic")
 
 
 @pytest.mark.asyncio
 async def test_run_sql_query_returns_dicts(sqlite_db) -> None:
     timestamp = datetime.now(timezone.utc).isoformat()
     sqlite_db.execute(
-        "INSERT INTO service_metrics (service, metric, value, recorded_at) VALUES (?, ?, ?, ?)",
-        ("queue-monitor", "queue-length", 3.0, timestamp),
+        "INSERT INTO market_events (event_type, topic, recorded_at, ingested_at) VALUES (?, ?, ?, ?)",
+        ("queue-monitor", "queue-length", timestamp, timestamp),
     )
     sqlite_db.commit()
 
     rows = run_sql_query(
-        "SELECT service, metric, value FROM service_metrics WHERE service = :service",
-        {"service": "queue-monitor"},
+        "SELECT event_type, topic FROM market_events WHERE event_type = :event_type",
+        {"event_type": "queue-monitor"},
     )
-    assert rows == [{"service": "queue-monitor", "metric": "queue-length", "value": 3.0}]
+    assert rows == [{"event_type": "queue-monitor", "topic": "queue-length"}]

@@ -1,101 +1,69 @@
-import asyncio
 import datetime
-import sqlite3
-import time
 from typing import Any
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from src.db import set_engine
 from src.routes import monitoring as monitoring_module
 from src.ibbot.redis import RedisConnectionError
 
 
 @pytest.fixture()
-def metrics_app() -> FastAPI:
+def metrics_app(monkeypatch: pytest.MonkeyPatch) -> FastAPI:
     app = FastAPI()
     app.include_router(monitoring_module.router)
-    yield app
-    set_engine(None)
-
-
-def _prepare_metrics_table(connection: sqlite3.Connection) -> None:
-    cursor = connection.cursor()
-    cursor.execute(
-        """
-        CREATE TABLE service_metrics (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            recorded_at DATETIME NOT NULL,
-            service TEXT,
-            metric TEXT,
-            queue_key TEXT,
-            stream_key TEXT,
-            group_name TEXT,
-            value REAL
-        )
-        """
-    )
-
-    base_time = datetime.datetime.utcnow().replace(second=0, microsecond=0)
-    rows: list[tuple[Any, ...]] = [
-        (
-            base_time - datetime.timedelta(minutes=5),
-            "queue-monitor",
-            "queue-length",
-            "queue:ib:commands",
-            None,
-            None,
-            3.0,
-        ),
-        (
-            base_time - datetime.timedelta(minutes=5) + datetime.timedelta(seconds=30),
-            "queue-monitor",
-            "queue-length",
-            "queue:ib:commands",
-            None,
-            None,
-            2.0,
-        ),
-        (
-            base_time - datetime.timedelta(minutes=3),
-            "market-data",
-            "throughput",
-            None,
-            "stream:market",
-            "market-group",
-            5.0,
-        ),
+    base_time = datetime.datetime.now(datetime.timezone.utc).replace(second=0, microsecond=0)
+    samples: list[dict[str, Any]] = [
+        {
+            "time": (base_time - datetime.timedelta(minutes=5)).isoformat(),
+            "service": "queue-monitor",
+            "metric": "queue-length",
+            "queue_key": "queue:ib:commands",
+            "value": 3.0,
+        },
+        {
+            "time": (base_time - datetime.timedelta(minutes=5)).isoformat(),
+            "service": "queue-monitor",
+            "metric": "queue-length",
+            "queue_key": "queue:ib:commands",
+            "value": 2.0,
+        },
+        {
+            "time": (base_time - datetime.timedelta(minutes=3)).isoformat(),
+            "service": "market-data",
+            "metric": "throughput",
+            "stream_key": "stream:market",
+            "group": "market-group",
+            "value": 5.0,
+        },
     ]
-    cursor.executemany(
-        """
-        INSERT INTO service_metrics (
-            recorded_at,
-            service,
-            metric,
-            queue_key,
-            stream_key,
-            group_name,
-            value
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
-        """,
-        rows,
-    )
-    connection.commit()
-    cursor.close()
+
+    async def fake_load_service_metrics(
+        start: datetime.datetime,
+        end: datetime.datetime | None = None,
+        *,
+        service: str | None = None,
+        metric: str | None = None,
+        redis: Any | None = None,
+    ) -> list[dict[str, Any]]:
+        _ = (start, end, redis)
+        filtered: list[dict[str, Any]] = []
+        for entry in samples:
+            if service and entry.get("service") != service:
+                continue
+            if metric and entry.get("metric") != metric:
+                continue
+            filtered.append(dict(entry))
+        return filtered
+
+    monkeypatch.setattr(monitoring_module, "load_service_metrics", fake_load_service_metrics)
+    return app
 
 
 def test_metrics_route_returns_series(metrics_app: FastAPI) -> None:
-    connection = sqlite3.connect(":memory:", check_same_thread=False)
-    connection.row_factory = sqlite3.Row
-    set_engine(connection)
-    _prepare_metrics_table(connection)
-
     with TestClient(metrics_app) as client:
         response = client.get("/api/monitoring/metrics/write-rate", params={"window": "1h"})
-
-    connection.close()
     assert response.status_code == 200
     payload = response.json()
     assert payload["success"] is True
@@ -113,16 +81,9 @@ def test_metrics_route_returns_series(metrics_app: FastAPI) -> None:
 
 
 def test_metrics_legacy_influx_route_alias(metrics_app: FastAPI) -> None:
-    connection = sqlite3.connect(":memory:", check_same_thread=False)
-    connection.row_factory = sqlite3.Row
-    set_engine(connection)
-    _prepare_metrics_table(connection)
-
     with TestClient(metrics_app) as client:
         response = client.get("/api/monitoring/influx/write-rate", params={"window": "1h"})
         secondary = client.get("/monitoring/influx/write-rate", params={"window": "1h"})
-
-    connection.close()
     assert response.status_code == 200
     assert secondary.status_code == 200
 
@@ -137,18 +98,11 @@ def test_metrics_legacy_influx_route_alias(metrics_app: FastAPI) -> None:
 
 
 def test_metrics_route_filters_by_service(metrics_app: FastAPI) -> None:
-    connection = sqlite3.connect(":memory:", check_same_thread=False)
-    connection.row_factory = sqlite3.Row
-    set_engine(connection)
-    _prepare_metrics_table(connection)
-
     with TestClient(metrics_app) as client:
         response = client.get(
             "/api/monitoring/metrics/write-rate",
             params={"window": "1h", "service": "market-data"},
         )
-
-    connection.close()
     assert response.status_code == 200
     payload = response.json()
     assert payload["success"] is True
@@ -159,34 +113,20 @@ def test_metrics_route_filters_by_service(metrics_app: FastAPI) -> None:
 
 
 def test_metrics_route_rejects_invalid_aggregate(metrics_app: FastAPI) -> None:
-    connection = sqlite3.connect(":memory:", check_same_thread=False)
-    connection.row_factory = sqlite3.Row
-    set_engine(connection)
-    _prepare_metrics_table(connection)
-
     with TestClient(metrics_app) as client:
         response = client.get(
             "/api/monitoring/metrics/write-rate",
             params={"window": "1h", "aggregate": "median"},
         )
-
-    connection.close()
     assert response.status_code == 400
 
 
 def test_metrics_route_rejects_invalid_window(metrics_app: FastAPI) -> None:
-    connection = sqlite3.connect(":memory:", check_same_thread=False)
-    connection.row_factory = sqlite3.Row
-    set_engine(connection)
-    _prepare_metrics_table(connection)
-
     with TestClient(metrics_app) as client:
         response = client.get(
             "/api/monitoring/metrics/write-rate",
             params={"window": "abc"},
         )
-
-    connection.close()
     assert response.status_code == 400
 
 

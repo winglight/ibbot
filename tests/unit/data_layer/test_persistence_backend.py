@@ -5,6 +5,7 @@ import pytest
 
 from src.data_layer.event_bus import EventEnvelope
 from src.data_layer.persistence import MariaDbPersistenceBackend
+from src.services.factories import ServiceMetricsWriterAdapter
 
 
 class _SyncEventRepository:
@@ -15,7 +16,7 @@ class _SyncEventRepository:
         self.calls.append(threading.get_ident())
 
 
-class _SyncMetricRepository:
+class _SyncMetricWriter:
     def __init__(self) -> None:
         self.calls: list[int] = []
 
@@ -31,7 +32,7 @@ class _AsyncEventRepository:
         self.calls.append(threading.get_ident())
 
 
-class _AsyncMetricRepository:
+class _AsyncMetricWriter:
     def __init__(self) -> None:
         self.calls: list[int] = []
 
@@ -42,10 +43,10 @@ class _AsyncMetricRepository:
 @pytest.mark.asyncio
 async def test_mariadb_backend_offloads_sync_repositories() -> None:
     event_repo = _SyncEventRepository()
-    metric_repo = _SyncMetricRepository()
+    metric_writer = ServiceMetricsWriterAdapter(_SyncMetricWriter())
     backend = MariaDbPersistenceBackend(
         repository=event_repo,
-        metric_repository=metric_repo,
+        metric_writer=metric_writer,
     )
 
     envelope = EventEnvelope(event_type="test", topic="events.test")
@@ -56,16 +57,18 @@ async def test_mariadb_backend_offloads_sync_repositories() -> None:
 
     main_thread = threading.get_ident()
     assert event_repo.calls and all(thread_id != main_thread for thread_id in event_repo.calls)
-    assert metric_repo.calls and all(thread_id != main_thread for thread_id in metric_repo.calls)
+    assert metric_writer.wrapped.calls and all(
+        thread_id != main_thread for thread_id in metric_writer.wrapped.calls
+    )
 
 
 @pytest.mark.asyncio
 async def test_mariadb_backend_handles_async_repositories() -> None:
     event_repo = _AsyncEventRepository()
-    metric_repo = _AsyncMetricRepository()
+    metric_writer = _AsyncMetricWriter()
     backend = MariaDbPersistenceBackend(
         repository=event_repo,
-        metric_repository=metric_repo,
+        metric_writer=metric_writer,
     )
 
     envelope = EventEnvelope(event_type="test", topic="events.test")
@@ -76,4 +79,4 @@ async def test_mariadb_backend_handles_async_repositories() -> None:
 
     main_thread = threading.get_ident()
     assert event_repo.calls == [main_thread]
-    assert metric_repo.calls == [main_thread]
+    assert metric_writer.calls == [main_thread]

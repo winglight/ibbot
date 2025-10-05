@@ -180,25 +180,11 @@ async def create_service_metrics_writer(
     *,
     logger_name: str | None = None,
 ) -> ServiceMetricsWriterAdapter | None:
-    """Instantiate a service metrics writer adapter.
-
-    The function resolves the repository factory lazily, defaulting to the
-    :func:`src.db.service_metric_writer` helper when available. Any synchronous
-    repository implementation is wrapped so writes execute outside the running
-    event loop to avoid blocking service tasks.
-    """
+    """Instantiate a service metrics writer adapter backed by Redis."""
 
     repository_factory = factory
     if repository_factory is None:
-        try:
-            from src.db import service_metric_writer as default_factory
-        except ModuleNotFoundError:
-            return None
-
-        if logger_name is not None:
-            repository_factory = lambda: default_factory(logger_name=logger_name)
-        else:
-            repository_factory = default_factory
+        repository_factory = lambda: RedisServiceMetricWriter(logger_name=logger_name)
 
     repository = repository_factory()
     if inspect.isawaitable(repository):

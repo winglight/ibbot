@@ -43,7 +43,7 @@
 | 阶段 | 核对项 |
 | --- | --- |
 | 阶段 1 | `python scripts/diagnose_foundation.py` 返回全绿；`data/logs/` 写入权限正常。 |
-| 阶段 2 | Redis 中存在服务配置键（`hash:config:<service>`）；`services/<name>/main.py` 日志无异常；MariaDB `service_metrics` 出现对应服务写入。 |
+| 阶段 2 | Redis 中存在服务配置键（`hash:config:<service>`）；`services/<name>/main.py` 日志无异常；Redis 指标集合（`zset:service_metrics:*`）出现对应服务写入。 |
 | 阶段 3 | 访问主站 `/rapidoc`、`/api/monitoring/metrics/write-rate` 成功；前端监控卡片可展示队列和写入速率指标。 |
 | 阶段 4 | `pytest tests`、`pytest tests/e2e`、`pytest tests/perf`、`pytest tests/failover` 全部通过；`./scripts/deploy.sh up --env production` 能在目标环境跑通。 |
 
@@ -53,7 +53,7 @@
 
 | 指标 | 来源 | 说明 |
 | --- | --- | --- |
-| `service_metrics` 表 | 所有服务通过 `src.db.mariadb.run_sql_query` 或 SQLAlchemy 会话写入 | 统一包含 `service`、`metric`、`value` 字段，监控吞吐、延迟、队列深度等。 |
+| Redis 指标集合 | 所有服务通过 `src.ibbot.redis.record_service_metrics` 写入 | 键名形如 `zset:service_metrics:<service>:<metric>`，统一记录 `service`、`metric`、`value` 等字段，默认保留 24 小时。 |
 | `hash:service:queue-monitor` | Queue Monitor 服务 (`services/queue_monitor/main.py`) | 保存最近一次队列/Stream 指标快照，可用 `redis-cli HGETALL` 查看。 |
 | `stream:market-service` | Market Data 服务 | 累积行情快照，Risk/策略消费并统计延迟。 |
 | `stream:ib:results` | IB Command/风险服务 | 存储指令执行结果、风控触发记录。 |
@@ -61,7 +61,7 @@
 
 ### 2.2 常用监控命令
 
-- **写入速率（MariaDB `service_metrics`）**：
+- **写入速率（Redis 指标集合）**：
   ```bash
   curl "http://localhost:8000/api/monitoring/metrics/write-rate?service=market-data-service&aggregate=sum"
   ```
@@ -137,11 +137,11 @@
 
 ### 3.5 性能阈值不达标
 
-- **现象**：性能测试失败或 `service_metrics` 中 throughput/latency 超限。
+- **现象**：性能测试失败或 Redis 指标集合中的 throughput/latency 超限。
 - **定位**：
   1. 执行基准：`pytest tests/perf -k benchmark`。
   2. 查看 `tests/perf/benchmark.py` 设置的阈值，确认瓶颈类别。
-  3. 检查 `service_metrics` 中 `metric=throughput`、`metric=latency` 的实际值。
+  3. 检查 Redis 指标集合中 `metric=throughput`、`metric=latency` 的实际值。
 - **恢复**：考虑增大 Redis 连接池、调整 `services/market_data` 的 `metrics_interval` 或减少订阅标的；必要时扩容容器资源。
 
 ## 4. 交付前检查清单

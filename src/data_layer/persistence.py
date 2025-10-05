@@ -12,7 +12,8 @@ from .event_bus import EventEnvelope
 from src.ibbot.storage.parquet_writer import MarketDataParquetWriter, get_market_data_writer
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from src.db import MarketEventRepository, ServiceMetricRepository
+    from src.db import MarketEventRepository
+    from src.services.factories import ServiceMetricsWriterProtocol
 
 __all__ = [
     "PersistenceBackend",
@@ -47,10 +48,11 @@ class MariaDbPersistenceBackend(PersistenceBackend):
             Callable[[], Awaitable["MarketEventRepository"] | "MarketEventRepository"]
             | None
         ) = None,
-        metric_repository: "ServiceMetricRepository" | None = None,
-        metric_repository_factory: (
-            Callable[[], Awaitable["ServiceMetricRepository"] | "ServiceMetricRepository"]
-            | None
+        metric_writer: "ServiceMetricsWriterProtocol" | None = None,
+        metric_writer_factory: (
+            Callable[[], Awaitable["ServiceMetricsWriterProtocol" | None]
+            | "ServiceMetricsWriterProtocol"
+            | None]
         ) = None,
     ) -> None:
         if repository is None and repository_factory is None:
@@ -58,8 +60,8 @@ class MariaDbPersistenceBackend(PersistenceBackend):
 
         self._repository = repository
         self._repository_factory = repository_factory
-        self._metric_repository = metric_repository
-        self._metric_repository_factory = metric_repository_factory
+        self._metric_writer = metric_writer
+        self._metric_writer_factory = metric_writer_factory
 
     async def _persist(self, envelope: EventEnvelope) -> None:
         repository = await self._get_event_repository()
@@ -86,12 +88,11 @@ class MariaDbPersistenceBackend(PersistenceBackend):
     async def _persist_metrics(
         self, metrics: Mapping[str, object] | Iterable[Mapping[str, object]]
     ) -> None:
-        repository = await self._get_metric_repository()
-        await self._invoke_repository(
-            repository,
-            ("record_metrics", "write_metrics", "record"),
-            metrics,
-        )
+        writer = await self._get_metric_writer()
+        if writer is None:
+            logger.warning("Service metrics writer is not configured; skipping metrics flush")
+            return
+        await writer.record_metrics(metrics)
 
     def record_service_metrics(
         self, metrics: Mapping[str, object] | Iterable[Mapping[str, object]]
@@ -108,7 +109,7 @@ class MariaDbPersistenceBackend(PersistenceBackend):
 
     async def _resolve_repository(
         self,
-        repository: "MarketEventRepository | ServiceMetricRepository | None",
+        repository: Any,
         factory: Callable[[], Awaitable[Any] | Any] | None,
     ) -> Any:
         if repository is not None:
@@ -123,10 +124,18 @@ class MariaDbPersistenceBackend(PersistenceBackend):
     async def _get_event_repository(self) -> "MarketEventRepository":
         return await self._resolve_repository(self._repository, self._repository_factory)
 
-    async def _get_metric_repository(self) -> "ServiceMetricRepository":
-        return await self._resolve_repository(
-            self._metric_repository, self._metric_repository_factory
-        )
+    async def _get_metric_writer(self) -> "ServiceMetricsWriterProtocol | None":
+        writer = self._metric_writer
+        if writer is not None:
+            return writer
+        factory = self._metric_writer_factory
+        if factory is None:
+            return None
+        instance = factory()
+        if inspect.isawaitable(instance):
+            instance = await instance
+        self._metric_writer = instance
+        return instance
 
     async def _invoke_repository(
         self, repository: Any, method_names: Sequence[str], *args: Any

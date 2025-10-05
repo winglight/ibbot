@@ -26,8 +26,6 @@ from .repositories import (
     RepositoryValidationError,
     RiskSnapshotRepository,
     RiskSnapshotRepositoryError,
-    ServiceMetricRepository,
-    ServiceMetricRepositoryError,
 )
 
 __all__ = [
@@ -45,8 +43,6 @@ __all__ = [
     "OrderRepositoryError",
     "RiskSnapshotRepository",
     "RiskSnapshotRepositoryError",
-    "ServiceMetricRepository",
-    "ServiceMetricRepositoryError",
     "audit_log_writer",
     "connect",
     "get_database_url",
@@ -59,7 +55,6 @@ __all__ = [
     "risk_snapshot_repository",
     "run_in_thread",
     "run_sql_query",
-    "service_metric_writer",
     "set_engine",
 ]
 
@@ -74,12 +69,6 @@ def market_price_writer(*, logger_name: str = "db.market") -> MarketPriceReposit
     """Return a :class:`MarketPriceRepository` instance."""
 
     return MarketPriceRepository(logger_name=logger_name)
-
-
-def service_metric_writer(*, logger_name: str = "db.metrics") -> ServiceMetricRepository:
-    """Return a :class:`ServiceMetricRepository` instance."""
-
-    return ServiceMetricRepository(logger_name=logger_name)
 
 
 def risk_snapshot_repository(*, logger_name: str = "db.risk") -> RiskSnapshotRepository:
