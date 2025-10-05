@@ -9,7 +9,7 @@ import signal
 from contextlib import AsyncExitStack, suppress
 from typing import Any, Mapping
 
-from services.strategy import StrategyAdapter, StrategyTaskConsumer, sync_strategy_metadata
+from services.strategy import StrategyAdapter, StrategyTaskConsumer
 from src.ibbot import update_service_health
 from src.ibbot.config import ConfigProvider
 from src.ibbot.logging import get_logger
@@ -78,16 +78,6 @@ async def run_service() -> None:
     poll_timeout = float(config.get("poll_timeout", 1.0))
 
     strategies = _parse_strategies(config)
-    strategy_path = config.get("strategy_path")
-    try:
-        strategies = await sync_strategy_metadata(
-            redis,
-            strategies,
-            logger=logger,
-            strategy_path=strategy_path,
-        )
-    except Exception:  # pragma: no cover - defensive guard
-        logger.warning("Failed to synchronise strategy metadata", exc_info=True)
     consumer: StrategyTaskConsumer | None = None
     consumer_task: asyncio.Task[None] | None = None
     idle_health_task: asyncio.Task[None] | None = None

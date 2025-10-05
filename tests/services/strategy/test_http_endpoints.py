@@ -11,7 +11,6 @@ from typing import Any, Mapping
 import pytest
 from fastapi.testclient import TestClient
 
-from services.strategy.discovery import sync_strategy_metadata
 from services.strategy.http import (
     DEFAULT_SETTINGS,
     StrategyRuntime,
@@ -56,6 +55,28 @@ def _build_client(redis: InMemoryRedis) -> TestClient:
     return client
 
 
+def _seed_strategy_metadata(
+    redis: InMemoryRedis,
+    entries: Mapping[str, Mapping[str, Any]],
+) -> None:
+    index: list[str] = []
+    for name, payload in entries.items():
+        now = datetime.now(timezone.utc).isoformat()
+        document = {
+            "name": name,
+            "factory": payload.get("factory"),
+            "params": dict(payload.get("params", {})),
+            "metadata": dict(payload.get("metadata", {})),
+            "description": payload.get("description"),
+            "enabled": bool(payload.get("enabled", True)),
+            "created_at": payload.get("created_at", now),
+            "updated_at": payload.get("updated_at", now),
+        }
+        asyncio.run(redis.set(f"json:strategy:{name}", json.dumps(document)))
+        index.append(name)
+    asyncio.run(redis.set("json:strategy:index", json.dumps(index)))
+
+
 def _read_metadata(redis: InMemoryRedis, name: str) -> dict[str, object]:
     raw = asyncio.run(redis.get(f"json:strategy:{name}"))
     if not raw:
@@ -96,8 +117,17 @@ def _prepare_recent_fills(redis: InMemoryRedis, name: str, fills: list[dict[str,
         asyncio.run(redis.rpush(key, json.dumps(fill)))
 
 
-def test_discovered_strategy_available_on_start(redis_client: InMemoryRedis) -> None:
-    asyncio.run(sync_strategy_metadata(redis_client, {}))
+def test_seeded_strategy_available_on_start(redis_client: InMemoryRedis) -> None:
+    _seed_strategy_metadata(
+        redis_client,
+        {
+            "BuyTheDipStrategy": {
+                "factory": "tests.services.strategy.sample:factory",
+                "metadata": {"file": "src/strategies/buy_the_dip_strategy.py"},
+                "description": "Sample",
+            }
+        },
+    )
     client = _build_client(redis_client)
 
     with client:
@@ -109,7 +139,7 @@ def test_discovered_strategy_available_on_start(redis_client: InMemoryRedis) -> 
     assert any(entry.get("name") == "BuyTheDipStrategy" for entry in payload)
 
 
-def test_filesystem_strategies_exposed_via_file_listing_only(
+def test_strategy_files_listing_requires_metadata(
     redis_client: InMemoryRedis, tmp_path: Path
 ) -> None:
     strategy_dir = tmp_path / "strategies"
@@ -127,13 +157,28 @@ def test_filesystem_strategies_exposed_via_file_listing_only(
         assert files_response.status_code == 200
         files_payload = files_response.json()
         assert files_payload["success"] is True
-        assert "filesystem_alpha.py" in files_payload["files"]
+        assert files_payload["files"] == []
+
+        _seed_strategy_metadata(
+            redis_client,
+            {
+                "FilesystemAlpha": {
+                    "factory": "tests.services.strategy.sample:factory",
+                    "metadata": {"file": "filesystem_alpha.py"},
+                }
+            },
+        )
+
+        updated_response = client.get("/strategy/files")
+        assert updated_response.status_code == 200
+        updated_payload = updated_response.json()
+        assert updated_payload["files"] == ["filesystem_alpha.py"]
 
         strategies_response = client.get("/strategy")
         assert strategies_response.status_code == 200
         strategies = strategies_response.json()
         names = [entry["name"] for entry in strategies]
-        assert "FilesystemAlpha" not in names
+        assert "FilesystemAlpha" in names
 
 
 def test_strategy_crud_lifecycle(redis_client: InMemoryRedis) -> None:
@@ -677,7 +722,7 @@ def test_strategy_rename_endpoint_rewrites_metadata(redis_client: InMemoryRedis)
     assert json.loads(risk_state)["max_positions"] == 2
 
 
-def test_strategy_files_endpoint_merges_sources(
+def test_strategy_files_endpoint_returns_metadata_files(
     redis_client: InMemoryRedis, tmp_path: Path
 ) -> None:
     client = _build_client(redis_client)
@@ -694,7 +739,10 @@ def test_strategy_files_endpoint_merges_sources(
     payload = {
         "name": "manual",
         "factory": "tests.services.strategy.sample:factory",
-        "metadata": {"file": "legacy.py"},
+        "metadata": {
+            "files": ["legacy.py", "nested/beta.py", "legacy.py"],
+            "scripts": {"primary": "alpha.py"},
+        },
     }
 
     with client:
@@ -705,17 +753,15 @@ def test_strategy_files_endpoint_merges_sources(
         data = response.json()
         assert data["success"] is True
         files = data["files"]
-        assert "alpha.py" in files
-        assert "nested/beta.py" in files
-        assert "legacy.py" in files
+        assert files == sorted(["alpha.py", "legacy.py", "nested/beta.py"])
 
         (strategy_root / "gamma.py").write_text("# gamma\n")
         response = client.get("/strategy/files")
         files = response.json()["files"]
-        assert "gamma.py" in files
+        assert "gamma.py" not in files
 
 
-def test_strategy_file_auto_discovery_during_runtime(
+def test_strategy_filesystem_changes_do_not_autoregister(
     redis_client: InMemoryRedis, tmp_path: Path
 ) -> None:
     strategy_dir = tmp_path / "strategies"
@@ -730,7 +776,7 @@ def test_strategy_file_auto_discovery_during_runtime(
         response = client.get("/strategy/files")
         assert response.status_code == 200
         initial_files = response.json()["files"]
-        assert "omega.py" not in initial_files
+        assert initial_files == []
 
         file_path = strategy_dir / "omega.py"
         file_path.write_text("print('omega')\n", encoding="utf-8")
@@ -738,16 +784,12 @@ def test_strategy_file_auto_discovery_during_runtime(
         files_response = client.get("/strategy/files")
         assert files_response.status_code == 200
         files_payload = files_response.json()
-        assert "omega.py" in files_payload["files"]
+        assert files_payload["files"] == []
 
         strategies_response = client.get("/strategy")
         assert strategies_response.status_code == 200
         strategies = strategies_response.json()
-        assert any(entry["name"] == "Omega" for entry in strategies)
-        omega_entry = next(entry for entry in strategies if entry["name"] == "Omega")
-        assert omega_entry["metadata"].get("file") == "omega.py"
-        assert omega_entry["metadata"].get("source") == "filesystem"
-        assert omega_entry["metadata"].get("normalised_name") == "Omega"
+        assert strategies == []
 
 
 def test_strategy_executions_endpoint_returns_recent_fills(
