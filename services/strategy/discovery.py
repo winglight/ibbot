@@ -7,6 +7,7 @@ import inspect
 import json
 import os
 import pkgutil
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -94,10 +95,15 @@ def discover_builtin_strategies(package: str = "src.strategies") -> dict[str, st
     discovered: dict[str, str] = {}
     prefix = f"{package}."
 
+    seen_modules: set[str] = set()
+
     for module_info in pkgutil.walk_packages(package_paths, prefix=prefix):
         if module_info.ispkg:
             continue
         module_name = module_info.name
+        if module_name in seen_modules:
+            continue
+        seen_modules.add(module_name)
         module_basename = module_name.rsplit(".", 1)[-1]
         if module_basename in _SKIPPED_MODULE_BASENAMES:
             continue
@@ -260,6 +266,16 @@ def _build_metadata(
     if discovered:
         metadata_payload.setdefault("source", "builtin")
 
+    if "normalised_name" not in metadata_payload:
+        for key in _FILESYSTEM_METADATA_KEYS:
+            value = metadata_payload.get(key)
+            if isinstance(value, str) and value:
+                candidate = value.rsplit(".", 1)[0]
+                normalised_candidate = _to_camel_case(candidate)
+                if normalised_candidate:
+                    metadata_payload["normalised_name"] = normalised_candidate
+                break
+
     description_value = description if description is not None else base_metadata.get("description")
     enabled_value = (
         bool(enabled)
@@ -315,6 +331,19 @@ def _iter_strategy_files(base: Path) -> Iterable[Path]:
             yield base
 
 
+_IDENTIFIER_RE = re.compile(r"[^0-9A-Za-z]+")
+
+
+def _to_camel_case(value: str) -> str:
+    parts = [segment for segment in _IDENTIFIER_RE.split(value) if segment]
+    if not parts:
+        return ""
+    camel = "".join(segment[:1].upper() + segment[1:] for segment in parts)
+    if camel and camel[0].isdigit():
+        camel = f"_{camel}"
+    return camel
+
+
 def _derive_strategy_name(candidate: Path, *, base: Path | None) -> str:
     relative: str
     if base is not None and base.exists():
@@ -325,7 +354,9 @@ def _derive_strategy_name(candidate: Path, *, base: Path | None) -> str:
     else:
         relative = candidate.name
     without_suffix = relative.rsplit(".", 1)[0]
-    normalised = without_suffix.replace("/", "_").replace("\\", "_")
+    normalised = _to_camel_case(without_suffix)
+    if not normalised:
+        normalised = _to_camel_case(candidate.stem)
     return normalised or candidate.stem or candidate.name
 
 
@@ -339,7 +370,16 @@ def discover_filesystem_strategies(
     base_dir = resolved if resolved.is_dir() else resolved.parent if resolved.parent != resolved else resolved
     discovered: dict[str, Mapping[str, Any]] = {}
 
+    seen_files: set[Path] = set()
+
     for candidate in _iter_strategy_files(resolved):
+        try:
+            resolved_candidate = candidate.resolve()
+        except OSError:
+            resolved_candidate = candidate
+        if resolved_candidate in seen_files:
+            continue
+        seen_files.add(resolved_candidate)
         if resolved.is_dir():
             try:
                 relative_path = candidate.relative_to(resolved).as_posix()
@@ -355,6 +395,7 @@ def discover_filesystem_strategies(
         metadata = {
             "source": "filesystem",
             "file": relative_path,
+            "normalised_name": strategy_name,
         }
         spec: dict[str, Any] = {
             "factory": None,
