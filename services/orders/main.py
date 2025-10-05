@@ -22,6 +22,12 @@ from src.ibbot.redis import DEFAULT_COMMAND_QUEUE, enqueue_ib_command, get_redis
 
 @runtime_checkable
 class OrderRepositoryProtocol(Protocol):
+    async def insert_order(self, payload: Mapping[str, Any]) -> int:
+        ...
+
+    async def update_order(self, payload: Mapping[str, Any]) -> None:
+        ...
+
     async def upsert_order(
         self, payload: Mapping[str, Any], *, allow_insert: bool = True
     ) -> int | None:
@@ -1539,11 +1545,19 @@ def create_app(runtime: OrdersRuntime | None = None, *, enable_events: bool = Tr
         def _default_order_repository() -> OrderRepositoryProtocol:
             repository = order_repository()
 
-            upsert_callable = getattr(repository, "upsert_order", None)
-            if not callable(upsert_callable):
-                return repository
+            method_names = ("insert_order", "update_order", "upsert_order")
+            method_map: dict[str, Callable[..., Any]] = {}
+            for name in method_names:
+                candidate = getattr(repository, name, None)
+                if callable(candidate):
+                    method_map[name] = candidate
 
-            if inspect.iscoroutinefunction(upsert_callable):
+            has_sync_methods = any(
+                not inspect.iscoroutinefunction(callable_candidate)
+                for callable_candidate in method_map.values()
+            )
+
+            if not has_sync_methods:
                 return repository
 
             try:
@@ -1553,23 +1567,121 @@ def create_app(runtime: OrdersRuntime | None = None, *, enable_events: bool = Tr
                     return await asyncio.to_thread(func, *args, **kwargs)
 
             class _AsyncOrderRepository(OrderRepositoryProtocol):
-                __slots__ = ("_repository", "_upsert", "_close")
+                __slots__ = (
+                    "_repository",
+                    "_insert_sync",
+                    "_insert_async",
+                    "_update_sync",
+                    "_update_async",
+                    "_upsert_sync",
+                    "_upsert_async",
+                    "_close_sync",
+                    "_close_async",
+                )
 
                 def __init__(self, repo: Any) -> None:
                     self._repository = repo
-                    self._upsert = getattr(repo, "upsert_order")
-                    self._close = getattr(repo, "close", None)
+                    insert_candidate = getattr(repo, "insert_order", None)
+                    if callable(insert_candidate) and inspect.iscoroutinefunction(
+                        insert_candidate
+                    ):
+                        self._insert_async = insert_candidate
+                        self._insert_sync = None
+                    elif callable(insert_candidate):
+                        self._insert_sync = insert_candidate
+                        self._insert_async = None
+                    else:
+                        self._insert_sync = None
+                        self._insert_async = None
+
+                    update_candidate = getattr(repo, "update_order", None)
+                    if callable(update_candidate) and inspect.iscoroutinefunction(
+                        update_candidate
+                    ):
+                        self._update_async = update_candidate
+                        self._update_sync = None
+                    elif callable(update_candidate):
+                        self._update_sync = update_candidate
+                        self._update_async = None
+                    else:
+                        self._update_sync = None
+                        self._update_async = None
+
+                    upsert_candidate = getattr(repo, "upsert_order", None)
+                    if callable(upsert_candidate) and inspect.iscoroutinefunction(
+                        upsert_candidate
+                    ):
+                        self._upsert_async = upsert_candidate
+                        self._upsert_sync = None
+                    elif callable(upsert_candidate):
+                        self._upsert_sync = upsert_candidate
+                        self._upsert_async = None
+                    else:
+                        self._upsert_sync = None
+                        self._upsert_async = None
+
+                    close_candidate = getattr(repo, "close", None)
+                    if callable(close_candidate) and inspect.iscoroutinefunction(
+                        close_candidate
+                    ):
+                        self._close_async = close_candidate
+                        self._close_sync = None
+                    elif callable(close_candidate):
+                        self._close_sync = close_candidate
+                        self._close_async = None
+                    else:
+                        self._close_sync = None
+                        self._close_async = None
+
+                async def insert_order(self, payload: Mapping[str, Any]) -> int:
+                    if self._insert_async is not None:
+                        return await self._insert_async(payload)
+                    if self._insert_sync is not None:
+                        return await _run_in_thread(self._insert_sync, payload)
+                    insert_callable = getattr(self._repository, "insert_order", None)
+                    if not callable(insert_callable):
+                        raise AttributeError("insert_order")
+                    result = insert_callable(payload)
+                    return await _maybe_await(result)
+
+                async def update_order(self, payload: Mapping[str, Any]) -> None:
+                    if self._update_async is not None:
+                        await self._update_async(payload)
+                        return
+                    if self._update_sync is not None:
+                        await _run_in_thread(self._update_sync, payload)
+                        return
+                    update_callable = getattr(self._repository, "update_order", None)
+                    if not callable(update_callable):
+                        raise AttributeError("update_order")
+                    await _maybe_await(update_callable(payload))
 
                 async def upsert_order(
                     self, payload: Mapping[str, Any], *, allow_insert: bool = True
                 ) -> int | None:
-                    return await _run_in_thread(
-                        self._upsert, payload, allow_insert=allow_insert
-                    )
+                    if self._upsert_async is not None:
+                        return await self._upsert_async(
+                            payload, allow_insert=allow_insert
+                        )
+                    if self._upsert_sync is not None:
+                        return await _run_in_thread(
+                            self._upsert_sync, payload, allow_insert=allow_insert
+                        )
+                    try:
+                        await self.update_order(payload)
+                    except Exception as exc:
+                        if exc.__class__.__name__ != "OrderNotFoundError":
+                            raise
+                        if not allow_insert:
+                            return None
+                        return await self.insert_order(payload)
+                    return None
 
                 async def aclose(self) -> None:
-                    if callable(self._close):
-                        await _run_in_thread(self._close)
+                    if self._close_async is not None:
+                        await self._close_async()
+                    elif self._close_sync is not None:
+                        await _run_in_thread(self._close_sync)
 
                 async def close(self) -> None:  # pragma: no cover - compatibility shim
                     await self.aclose()

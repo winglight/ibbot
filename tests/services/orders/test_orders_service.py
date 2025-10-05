@@ -75,6 +75,41 @@ class RecordingRepository:
         self.closed = True
 
 
+class OrderNotFoundError(Exception):
+    pass
+
+
+class SyncRepository:
+    def __init__(self) -> None:
+        self.records: dict[str, dict[str, Any]] = {}
+        self.insert_calls = 0
+        self.update_calls = 0
+        self.closed = False
+        self._next_id = 1
+
+    def insert_order(self, payload: Mapping[str, Any]) -> int:
+        self.insert_calls += 1
+        record = dict(payload)
+        command_id = _coerce_str(record.get("command_id"))
+        if not command_id:
+            raise ValueError("missing command_id")
+        record_id = self._next_id
+        self._next_id += 1
+        self.records[command_id] = record
+        return record_id
+
+    def update_order(self, payload: Mapping[str, Any]) -> None:
+        self.update_calls += 1
+        command_id = _coerce_str(payload.get("command_id"))
+        if not command_id or command_id not in self.records:
+            raise OrderNotFoundError()
+        existing = self.records[command_id]
+        existing.update(dict(payload))
+
+    def close(self) -> None:
+        self.closed = True
+
+
 async def _create_runtime(
     *,
     order_repository_factory: Callable[[], Awaitable[Any] | Any] | None = None,
@@ -824,3 +859,36 @@ def test_repository_failures_are_logged(caplog: pytest.LogCaptureFixture) -> Non
     asyncio.run(_scenario())
     messages = [record.getMessage() for record in caplog.records]
     assert any("repository" in message.lower() for message in messages)
+
+
+def test_sync_repository_wrapper_supports_insert_and_update() -> None:
+    async def _scenario() -> None:
+        repo = SyncRepository()
+
+        runtime, _, _ = await _create_runtime(
+            order_repository_factory=lambda: repo
+        )
+        try:
+            submission = OrderSubmission(
+                symbol="ES",
+                quantity=1,
+                action="BUY",
+                order_type="MARKET",
+            )
+            command_id = await runtime.submit_order(submission)
+            assert repo.insert_calls == 1
+            assert repo.update_calls >= 1
+
+            await runtime.update_fill_metrics(
+                command_id,
+                {"filled_quantity": 1, "remaining_quantity": 0},
+            )
+            assert repo.update_calls >= 2
+            assert command_id in repo.records
+            assert repo.records[command_id]["filled_quantity"] == 1
+        finally:
+            await runtime.stop()
+
+        assert repo.closed
+
+    asyncio.run(_scenario())
