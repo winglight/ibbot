@@ -83,7 +83,7 @@ def test_submit_task_records_progress_and_result() -> None:
         submission = TaskSubmission(
             task_id="task-1",
             strategy_id="demo",
-            training_query="SELECT value FROM market_events",
+            training_query="parquet://market-data/candles",
         )
 
         result = await service.submit_task(submission)
@@ -162,7 +162,7 @@ def test_fastapi_endpoints_submit_and_read_results() -> None:
         json={
             "task_id": "task-api",
             "strategy_id": "api",
-            "training_query": "SELECT value FROM market_events",
+            "training_query": "parquet://market-data/candles",
         },
     )
     assert response.status_code == 200

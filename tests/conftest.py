@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from src.db import market_event_writer, order_repository, set_engine
+from src.db import order_repository, set_engine
 from tests.services.redis_utils import InMemoryRedis
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -78,19 +78,6 @@ CREATE INDEX ix_orders_strategy_name ON orders(strategy_name);
 CREATE INDEX ix_orders_parent ON orders(parent_order_id);
 CREATE INDEX ix_orders_created ON orders(created_at);
 
-CREATE TABLE market_events (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    event_type TEXT NOT NULL,
-    topic TEXT NOT NULL,
-    symbol TEXT,
-    source TEXT,
-    payload TEXT,
-    meta TEXT,
-    ts_ns INTEGER,
-    recorded_at TEXT NOT NULL,
-    ingested_at TEXT NOT NULL
-);
-
 CREATE TABLE risk_rules (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     symbol TEXT UNIQUE NOT NULL,
@@ -119,20 +106,6 @@ CREATE TABLE strategies (
     updated_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE historical_data (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    symbol TEXT NOT NULL,
-    date TEXT NOT NULL,
-    time TEXT,
-    open REAL NOT NULL,
-    high REAL NOT NULL,
-    low REAL NOT NULL,
-    close REAL NOT NULL,
-    volume INTEGER NOT NULL,
-    interval TEXT NOT NULL,
-    adj_close REAL
-);
-
 CREATE TABLE config (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     config_key TEXT UNIQUE NOT NULL,
@@ -140,45 +113,6 @@ CREATE TABLE config (
     description TEXT,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE sizing_history (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    symbol TEXT NOT NULL,
-    action TEXT NOT NULL,
-    suggested_quantity REAL NOT NULL,
-    current_price REAL,
-    account_value REAL,
-    position_size REAL,
-    risk_percent REAL,
-    sizing_method TEXT NOT NULL,
-    calculation_details TEXT,
-    g_rules_checked TEXT,
-    timestamp TEXT DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE notification_history (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    channel TEXT NOT NULL,
-    event_type TEXT NOT NULL,
-    message TEXT NOT NULL,
-    status TEXT DEFAULT 'pending',
-    retry_count INTEGER DEFAULT 0,
-    error_message TEXT,
-    sent_at TEXT,
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE market_prices (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    symbol TEXT NOT NULL,
-    bid REAL,
-    ask REAL,
-    bid_size REAL,
-    ask_size REAL,
-    source TEXT,
-    observed_at TEXT NOT NULL,
-    extra TEXT
 );
 """
 
@@ -222,15 +156,6 @@ def order_repository_factory(sqlite_db: sqlite3.Connection) -> Callable[[], Awai
     """Return an async-compatible factory for the order repository."""
 
     return _async_factory(order_repository)
-
-
-@pytest.fixture()
-def market_event_repository_factory(
-    sqlite_db: sqlite3.Connection,
-) -> Callable[[], Awaitable[Any] | Any]:
-    """Return an async-compatible factory for the market event repository."""
-
-    return _async_factory(market_event_writer)
 
 
 @pytest.fixture(scope="session")

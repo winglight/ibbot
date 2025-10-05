@@ -25,21 +25,18 @@ if str(SRC_PATH) not in sys.path:
 
 from src.db.mariadb import MariaDBConfigurationError, connect
 
-_TABLES = ("orders", "risk_rules", "strategies", "config", "sizing_history", "notification_history")
+_TABLES = ("orders", "risk_rules", "strategies", "config")
 
 _DATETIME_COLUMNS: dict[str, set[str]] = {
     "orders": {"created_at", "updated_at", "executed_at", "order_timestamp"},
     "risk_rules": {"timestamp", "created_at", "updated_at"},
     "strategies": {"created_at", "updated_at"},
     "config": {"created_at", "updated_at"},
-    "sizing_history": {"timestamp"},
-    "notification_history": {"sent_at", "created_at"},
 }
 
 _JSON_COLUMNS: dict[str, set[str]] = {
     "orders": {"raw_payload"},
     "risk_rules": {"atr_params"},
-    "sizing_history": {"calculation_details", "g_rules_checked"},
 }
 
 _PRIMARY_KEYS: dict[str, tuple[str, ...]] = {
@@ -47,8 +44,6 @@ _PRIMARY_KEYS: dict[str, tuple[str, ...]] = {
     "risk_rules": ("id", "symbol"),
     "strategies": ("id", "name"),
     "config": ("id", "config_key"),
-    "sizing_history": ("id",),
-    "notification_history": ("id",),
 }
 
 _SKIP_UPDATE_COLUMNS: dict[str, set[str]] = {
@@ -56,8 +51,6 @@ _SKIP_UPDATE_COLUMNS: dict[str, set[str]] = {
     "risk_rules": {"created_at"},
     "strategies": {"created_at"},
     "config": {"created_at"},
-    "sizing_history": {"id"},
-    "notification_history": {"id"},
 }
 
 @dataclass

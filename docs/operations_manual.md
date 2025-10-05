@@ -69,10 +69,10 @@
   ```bash
   redis-cli HGETALL hash:service:queue-monitor
   ```
-- **行情写入快照**（MariaDB `market_events` 表）：
+- **行情写入快照**（Parquet `data/market-data` 目录）：
   ```bash
-  docker exec -it mariadb mariadb -u"${IBBOT_DB_USER:-ibbot}" -p"${IBBOT_DB_PASSWORD:-ibbot-password}" "${IBBOT_DB_NAME:-ibbot}" \
-    -e "SELECT event_type, symbol, ingested_at FROM market_events ORDER BY ingested_at DESC LIMIT 5;"
+  ls -ltr data/market-data | tail
+  parquet-tools meta data/market-data/<symbol>/<interval>.parquet
   ```
 - **策略事件流积压**：
   ```bash
@@ -102,7 +102,7 @@
 - **现象**：前端行情卡片不刷新、策略无触发。
 - **定位**：
   1. 检查 `redis-cli PUBSUB CHANNELS "pubsub:ib:price*"` 是否存在频道；若无，确认 `services/ib_feed` 是否运行且订阅列表正确。
-  2. 使用上文的 MariaDB 查询命令确认 `market_events` 在最近 5 分钟内有写入。
+  2. 使用上文的 Parquet 检查命令确认行情文件在最近 5 分钟内有更新。
   3. 查看 `services/ib_feed` 日志（`docker logs` 或 `tail -f data/logs/ib-feed.log`）。
 - **恢复**：更新配置（数据库 `config` 表中 `ib-feed:` 前缀的订阅列表），重启 `ib-feed` 与 `market-data`。
 

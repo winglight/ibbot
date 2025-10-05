@@ -1,4 +1,4 @@
-"""Repository helpers for persisting market events via DB-API."""
+"""Repository helpers for persisting market events to parquet storage."""
 
 from __future__ import annotations
 
@@ -7,10 +7,10 @@ from datetime import datetime, timezone
 from typing import Any, Mapping
 
 from src.db.async_support import run_in_thread
-from src.db.mariadb import MariaDBConfigurationError
 from src.ibbot.logging import get_logger
+from src.ibbot.storage.parquet_writer import MarketDataParquetWriter, get_market_data_writer
 
-from .base import RepositoryError, RepositoryValidationError, execute_write, is_sqlite, json_dumps, use_connection
+from .base import RepositoryError, RepositoryValidationError
 
 __all__ = ["MarketEventRepository", "MarketEventRepositoryError"]
 
@@ -96,8 +96,14 @@ def _normalise_ts_ns(value: Any) -> int | None:
 class MarketEventRepository:
     """Persist market events emitted by the data layer."""
 
-    def __init__(self, *, logger_name: str = "db.events") -> None:
+    def __init__(
+        self,
+        *,
+        logger_name: str = "db.events",
+        writer: MarketDataParquetWriter | None = None,
+    ) -> None:
         self._logger = get_logger(logger_name)
+        self._writer = writer or get_market_data_writer()
 
     async def insert_event(self, event: Mapping[str, Any] | Any) -> None:
         data = _ensure_mapping(event)
@@ -109,47 +115,76 @@ class MarketEventRepository:
             or _parse_timestamp(data.get("timestamp"), ts_ns)
             or _utc_now()
         )
-        row = {
-            "event_type": str(data.get("event_type") or ""),
-            "topic": str(data.get("topic") or ""),
-            "symbol": data.get("symbol"),
-            "source": data.get("source"),
-            "payload": payload,
-            "meta": meta,
-            "recorded_at": timestamp,
-            "ts_ns": ts_ns,
-            "ingested_at": _utc_now(),
-        }
-        if not row["event_type"] or not row["topic"]:
+        event_type = str(data.get("event_type") or "")
+        topic = str(data.get("topic") or "")
+        if not event_type or not topic:
             raise RepositoryValidationError("Event must provide event_type and topic")
 
         try:
-            await run_in_thread(self._write_event, row)
+            await run_in_thread(
+                self._persist_event,
+                data,
+                payload,
+                meta,
+                timestamp,
+                ts_ns,
+                event_type,
+            )
         except RepositoryValidationError:
             raise
-        except MariaDBConfigurationError as exc:
-            raise MarketEventRepositoryError(str(exc)) from exc
         except Exception as exc:  # pragma: no cover - log and wrap
             self._logger.exception(
-                "Failed to persist market event", event_type=row["event_type"], topic=row["topic"]
+                "Failed to persist market event",
+                event_type=event_type,
+                topic=topic,
             )
             raise MarketEventRepositoryError("Failed to persist market event") from exc
 
-    def _write_event(self, row: Mapping[str, Any]) -> None:
-        with use_connection() as connection:
-            payload = dict(row)
-            if payload.get("payload") is not None:
-                payload["payload"] = json_dumps(payload["payload"])
-            if payload.get("meta") is not None:
-                payload["meta"] = json_dumps(payload["meta"])
+    def _persist_event(
+        self,
+        data: Mapping[str, Any],
+        payload: Mapping[str, Any],
+        meta: Mapping[str, Any] | None,
+        timestamp: datetime,
+        ts_ns: int | None,
+        event_type: str,
+    ) -> None:
+        if event_type == "market.candle":
+            self._persist_candle_event(data, payload, meta, timestamp, ts_ns)
+            return
 
-            columns = list(payload.keys())
-            placeholders = (
-                ", ".join(f":{col}" for col in columns)
-                if is_sqlite(connection)
-                else ", ".join(f"%({col})s" for col in columns)
-            )
-            sql = "INSERT INTO market_events ({cols}) VALUES ({values})".format(
-                cols=", ".join(columns), values=placeholders
-            )
-            execute_write(connection, sql, payload)
+        self._logger.debug(
+            "No persistence backend configured for event type", event_type=event_type
+        )
+
+    def _persist_candle_event(
+        self,
+        data: Mapping[str, Any],
+        payload: Mapping[str, Any],
+        meta: Mapping[str, Any] | None,
+        timestamp: datetime,
+        ts_ns: int | None,
+    ) -> None:
+        writer = self._writer
+        if writer is None:
+            raise RepositoryValidationError("Parquet writer is not available")
+
+        symbol = (
+            data.get("symbol")
+            or payload.get("symbol")
+            or (meta or {}).get("symbol")
+        )
+        interval = payload.get("interval") or (meta or {}).get("interval")
+        if not symbol or not interval:
+            raise RepositoryValidationError("Candle event requires symbol and interval")
+
+        enriched_payload = dict(payload)
+        enriched_payload.setdefault("recorded_at", timestamp.isoformat())
+        enriched_payload.setdefault("ingested_at", _utc_now().isoformat())
+
+        writer.append_candle(
+            str(symbol),
+            str(interval),
+            enriched_payload,
+            timestamp_ns=ts_ns,
+        )
