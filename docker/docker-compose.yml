@@ -1,79 +1,78 @@
 name: algo-trader
+
+x-app-env: &default-environment
+  env_file:
+    - ../.env
+  environment:
+    REDIS_HOST: redis
+    REDIS_PORT: 6379
+    REDIS_URL: redis://redis:6379/0
+    DATA_LAYER_REDIS_URL: redis://redis:6379/0
+    IBBOT_DB_URL: ${IBBOT_DB_URL:-mysql+asyncmy://${IBBOT_DB_USER:-ibbot}:${IBBOT_DB_PASSWORD:-ibbot-password}@mariadb:3306/${IBBOT_DB_NAME:-ibbot}?charset=utf8mb4}
+    DATA_LAYER_DB_URL: ${DATA_LAYER_DB_URL:-mysql+asyncmy://${IBBOT_DB_USER:-ibbot}:${IBBOT_DB_PASSWORD:-ibbot-password}@mariadb:3306/${IBBOT_DB_NAME:-ibbot}?charset=utf8mb4}
+    IBBOT_DB_USER: ${IBBOT_DB_USER:-ibbot}
+    IBBOT_DB_PASSWORD: ${IBBOT_DB_PASSWORD:-ibbot-password}
+    IBBOT_DB_NAME: ${IBBOT_DB_NAME:-ibbot}
+    MARKET_DATA_SERVICE_URL: http://market-data:8010
+    MARKET_DATA_SERVICE_WS_URL: ws://market-data:8010/ws/market
+    ACCOUNT_SERVICE_URL: http://account:8020
+    ORDERS_SERVICE_URL: http://orders:8050
+    RISK_SERVICE_URL: http://risk:8030
+    STRATEGY_SERVICE_URL: http://strategy:8045
+    NOTIFICATION_SERVICE_URL: http://notification:8055
+    NOTIFICATION_SERVICE_TIMEOUT: 10
+
 services:
-  # Main IBKR Trading Bot Application
   ibbot:
+    <<: *default-environment
     build:
       context: ..
       dockerfile: docker/Dockerfile
     container_name: ibbot-main
     ports:
       - "8000:8000"
-    env_file:
-      - ../.env
     environment:
-      - USE_LEGACY=1
-      # Server Configuration
-      - WEB_HOST=0.0.0.0
-      - WEB_PORT=8000
-      
-      # IBKR Configuration  
-      - IBKR_HOST=ib-gateway
-      - IBKR_PORT=4002
-      
-      # Authentication
-      - ADMIN_USERNAME=${ADMIN_USERNAME}
-      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
-      - VISITOR_USERNAME=${VISITOR_USERNAME}
-      - VISITOR_PASSWORD=${VISITOR_PASSWORD}
-      - JWT_SECRET=${JWT_SECRET}
-      - JWT_ALGORITHM=HS256
-      - JWT_EXPIRE_DAYS=1
-      
-      # Features
-      - IBKR_CLIENT_ID=10
-      - IBKR_PAPER_TRADING=True
-      - AUTO_CONNECT=True
-      - IBKR_MARKET_DATA_TYPE=1
-      - IBKR_TRY_REALTIME_FALLBACK=False
-      # Restart after repeated IBKR connection retries
-      - IBKR_MAX_CONNECT_RETRIES=5
-      - IBKR_RESTART_DELAY_SEC=1.0
-      # Risk Management
-      - LOSS_THRESHOLD_1=0.05
-      - LOSS_THRESHOLD_2=0.10
-      - CHECK_INTERVAL=5
-      - STOP_LOSS_RATIO=0.025
-      - TAKE_PROFIT_RATIO=0.025
-      - PRICE_THRESHOLD=0.1
-      - LEVERAGE_MNQ=10
-      # DOM & Signal Evaluation (optional)
-      - DOM_SIGNAL_OUTCOME_DELAY_SECONDS=300
-      - DOM_SIGNAL_OUTCOME_THRESHOLD=0.005
-      - DOM_CACHE_RETENTION_DAYS=7
-      - DOM_AUTOMATION_DEFAULT_INTERVAL_MINUTES=60
-      - DOM_AUTOMATION_DEFAULT_LOOKBACK_MINUTES=240
-      - DOM_AUTOMATION_DEFAULT_MIN_SIGNALS=20
-      - DOM_AUTOMATION_DEFAULT_APPLY_UPDATES=true
-      - DOM_AUTOMATION_DEFAULT_SYMBOL=MNQ
-      - DOM_AUTOMATION_DEFAULT_LIMIT=500
-      - ACCOUNT_SERVICE_URL=http://account:8020
-      - ORDERS_SERVICE_URL=http://orders:8050
-      - RISK_SERVICE_URL=http://risk:8030
-      - STRATEGY_SERVICE_URL=http://strategy:8045
-      - NOTIFICATION_SERVICE_URL=http://notification:8055
-      - NOTIFICATION_SERVICE_TIMEOUT=10
-
+      USE_LEGACY: "1"
+      WEB_HOST: 0.0.0.0
+      WEB_PORT: 8000
+      IBKR_HOST: ib-gateway
+      IBKR_PORT: 4002
+      IBKR_CLIENT_ID: 10
+      IBKR_PAPER_TRADING: "true"
+      AUTO_CONNECT: "true"
+      IBKR_MARKET_DATA_TYPE: 1
+      IBKR_TRY_REALTIME_FALLBACK: "false"
+      IBKR_MAX_CONNECT_RETRIES: 5
+      IBKR_RESTART_DELAY_SEC: 1.0
+      LOSS_THRESHOLD_1: 0.05
+      LOSS_THRESHOLD_2: 0.10
+      CHECK_INTERVAL: 5
+      STOP_LOSS_RATIO: 0.025
+      TAKE_PROFIT_RATIO: 0.025
+      PRICE_THRESHOLD: 0.1
+      LEVERAGE_MNQ: 10
+      DOM_SIGNAL_OUTCOME_DELAY_SECONDS: 300
+      DOM_SIGNAL_OUTCOME_THRESHOLD: 0.005
+      DOM_CACHE_RETENTION_DAYS: 7
+      DOM_AUTOMATION_DEFAULT_INTERVAL_MINUTES: 60
+      DOM_AUTOMATION_DEFAULT_LOOKBACK_MINUTES: 240
+      DOM_AUTOMATION_DEFAULT_MIN_SIGNALS: 20
+      DOM_AUTOMATION_DEFAULT_APPLY_UPDATES: "true"
+      DOM_AUTOMATION_DEFAULT_SYMBOL: MNQ
+      DOM_AUTOMATION_DEFAULT_LIMIT: 500
     volumes:
       - ../data/logs:/app/logs
       - ../data:/app/data
       - ../src/strategies:/app/src/strategies
     depends_on:
-      - redis
       - account
       - orders
       - risk
       - strategy
       - notification
+      - market-data
+      - ib-command
+      - ib-feed
       - ib-gateway
     networks:
       - ibbot-network
@@ -86,8 +85,8 @@ services:
       retries: 3
       start_period: 40s
 
-  # Optimizer service running optimizer_main.py
   optimizer:
+    <<: *default-environment
     build:
       context: ..
       dockerfile: docker/Dockerfile
@@ -95,8 +94,6 @@ services:
     command: ["python", "optimizer_main.py"]
     ports:
       - "8001:8001"
-    env_file:
-      - ./.env
     volumes:
       - ../data:/app/data
       - ../src/strategies:/app/src/strategies
@@ -107,36 +104,81 @@ services:
       - stack
     restart: unless-stopped
 
-  redis:
-    image: redis:7.2-alpine
-    container_name: ibbot-redis
-    command: ["redis-server", "--save", "", "--appendonly", "yes"]
-    ports:
-      - "6379:6379"
+  ib-command:
+    <<: *default-environment
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: ibbot-ib-command
+    command: ["python", "-m", "services.ib_command.main"]
     volumes:
-      - ../data/redis:/data
+      - ../data/logs:/app/logs
+      - ../data:/app/data
     networks:
       - ibbot-network
       - stack
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 5s
+
+  ib-feed:
+    <<: *default-environment
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: ibbot-ib-feed
+    command: ["python", "-m", "services.ib_feed.main"]
+    volumes:
+      - ../data/logs:/app/logs
+      - ../data:/app/data
+    depends_on:
+      - ib-gateway
+    networks:
+      - ibbot-network
+      - stack
+    restart: unless-stopped
+
+  market-data:
+    <<: *default-environment
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: ibbot-market-data
+    command: ["python", "-m", "uvicorn", "services.market_data.main:app", "--host", "0.0.0.0", "--port", "8010"]
+    ports:
+      - "8010:8010"
+    volumes:
+      - ../data/logs:/app/logs
+      - ../data:/app/data
+    networks:
+      - ibbot-network
+      - stack
+    restart: unless-stopped
+
+  queue-monitor:
+    <<: *default-environment
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: ibbot-queue-monitor
+    command: ["python", "-m", "uvicorn", "services.queue_monitor.main:create_app", "--host", "0.0.0.0", "--port", "8011"]
+    ports:
+      - "8011:8011"
+    volumes:
+      - ../data/logs:/app/logs
+      - ../data:/app/data
+    networks:
+      - ibbot-network
+      - stack
+    restart: unless-stopped
 
   account:
+    <<: *default-environment
     build:
       context: ..
       dockerfile: docker/Dockerfile
     container_name: ibbot-account
-    command:
-      ["python", "-m", "uvicorn", "services.account.main:app", "--host", "0.0.0.0", "--port", "8020"]
+    command: ["python", "-m", "uvicorn", "services.account.main:app", "--host", "0.0.0.0", "--port", "8020"]
     ports:
       - "8020:8020"
-    env_file:
-      - ./.env
     volumes:
       - ../data/logs:/app/logs
       - ../data:/app/data
@@ -146,16 +188,14 @@ services:
     restart: unless-stopped
 
   orders:
+    <<: *default-environment
     build:
       context: ..
       dockerfile: docker/Dockerfile
     container_name: ibbot-orders
-    command:
-      ["python", "-m", "uvicorn", "services.orders.main:app", "--host", "0.0.0.0", "--port", "8050"]
+    command: ["python", "-m", "uvicorn", "services.orders.main:app", "--host", "0.0.0.0", "--port", "8050"]
     ports:
       - "8050:8050"
-    env_file:
-      - ./.env
     volumes:
       - ../data/logs:/app/logs
       - ../data:/app/data
@@ -165,80 +205,34 @@ services:
     restart: unless-stopped
 
   risk:
+    <<: *default-environment
     build:
       context: ..
       dockerfile: docker/Dockerfile
     container_name: ibbot-risk
-    command:
-      ["python", "-m", "uvicorn", "services.risk.http:app", "--host", "0.0.0.0", "--port", "8030"]
+    command: ["python", "-m", "uvicorn", "services.risk.http:app", "--host", "0.0.0.0", "--port", "8030"]
     ports:
       - "8030:8030"
-    env_file:
-      - ./.env
     volumes:
       - ../data/logs:/app/logs
       - ../data:/app/data
-    networks:
-      - ibbot-network
-      - stack
-    restart: unless-stopped
-
-  connection_control:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
-    container_name: ibbot-connection-control
-    command:
-      [
-        "python",
-        "-m",
-        "uvicorn",
-        "services.connection_control.main:create_app",
-        "--factory",
-        "--host",
-        "0.0.0.0",
-        "--port",
-        "8056",
-      ]
-    ports:
-      - "8056:8056"
-    env_file:
-      - ./.env
-    volumes:
-      - ../data/logs:/app/logs
-      - ../data:/app/data
-    depends_on:
-      - redis
     networks:
       - ibbot-network
       - stack
     restart: unless-stopped
 
   notification:
+    <<: *default-environment
     build:
       context: ..
       dockerfile: docker/Dockerfile
     container_name: ibbot-notification
-    command:
-      [
-        "python",
-        "-m",
-        "uvicorn",
-        "services.notification.main:app",
-        "--host",
-        "0.0.0.0",
-        "--port",
-        "8055",
-      ]
+    command: ["python", "-m", "uvicorn", "services.notification.main:app", "--host", "0.0.0.0", "--port", "8055"]
     ports:
       - "8055:8055"
-    env_file:
-      - ./.env
     volumes:
       - ../data/logs:/app/logs
       - ../data:/app/data
-    depends_on:
-      - redis
     networks:
       - ibbot-network
       - stack
@@ -251,16 +245,14 @@ services:
       start_period: 20s
 
   strategy:
+    <<: *default-environment
     build:
       context: ..
       dockerfile: docker/Dockerfile
     container_name: ibbot-strategy
-    command:
-      ["python", "-m", "uvicorn", "services.strategy.http:app", "--host", "0.0.0.0", "--port", "8045"]
+    command: ["python", "-m", "uvicorn", "services.strategy.http:app", "--host", "0.0.0.0", "--port", "8045"]
     ports:
       - "8045:8045"
-    env_file:
-      - ./.env
     volumes:
       - ../data/logs:/app/logs
       - ../data:/app/data
@@ -270,7 +262,6 @@ services:
       - stack
     restart: unless-stopped
 
-  # IB Gateway (gnzsnz)
   ib-gateway:
     image: ghcr.io/gnzsnz/ib-gateway:10.39.1h
     container_name: ib-gateway
@@ -278,37 +269,37 @@ services:
     env_file:
       - ./.env
     environment:
-      - TWS_USERID=${TWS_USERID_PAPER}
-      - TWS_PASSWORD=${TWS_PASSWORD_PAPER}
-      - TRADING_MODE=${TRADING_MODE:-paper}
-      - TWS_SETTINGS_PATH=${TWS_SETTINGS_PATH:-}
-      - TWS_ACCEPT_INCOMING=${TWS_ACCEPT_INCOMING:-}
-      - READ_ONLY_API=${READ_ONLY_API:-}
-      - VNC_SERVER_PASSWORD=${VNC_SERVER_PASSWORD:-}
-      - TWOFA_TIMEOUT_ACTION=${TWOFA_TIMEOUT_ACTION:-exit}
-      - BYPASS_WARNING=${BYPASS_WARNING:-}
-      - AUTO_RESTART_TIME=${AUTO_RESTART_TIME:-}
-      - AUTO_LOGOFF_TIME=${AUTO_LOGOFF_TIME:-}
-      - TWS_COLD_RESTART=${TWS_COLD_RESTART:-}
-      - SAVE_TWS_SETTINGS=${SAVE_TWS_SETTINGS:-}
-      - RELOGIN_AFTER_TWOFA_TIMEOUT=${RELOGIN_AFTER_TWOFA_TIMEOUT:-no}
-      - TWOFA_EXIT_INTERVAL=${TWOFA_EXIT_INTERVAL:-60}
-      - TWOFA_DEVICE=${TWOFA_DEVICE:-}
-      - EXISTING_SESSION_DETECTED_ACTION=${EXISTING_SESSION_DETECTED_ACTION:-primary}
-      - ALLOW_BLIND_TRADING=${ALLOW_BLIND_TRADING:-no}
-      - TIME_ZONE=${TIME_ZONE:-Etc/UTC}
-      - TZ=${TIME_ZONE:-Etc/UTC}
-      - CUSTOM_CONFIG=${CUSTOM_CONFIG:-NO}
-      - JAVA_HEAP_SIZE=${JAVA_HEAP_SIZE:-}
-      - SSH_TUNNEL=${SSH_TUNNEL:-}
-      - SSH_OPTIONS=${SSH_OPTIONS:-}
-      - SSH_ALIVE_INTERVAL=${SSH_ALIVE_INTERVAL:-}
-      - SSH_ALIVE_COUNT=${SSH_ALIVE_COUNT:-}
-      - SSH_PASSPHRASE=${SSH_PASSPHRASE:-}
-      - SSH_REMOTE_PORT=${SSH_REMOTE_PORT:-}
-      - SSH_USER_TUNNEL=${SSH_USER_TUNNEL:-}
-      - SSH_RESTART=${SSH_RESTART:-}
-      - SSH_VNC_PORT=${SSH_VNC_PORT:-}
+      TWS_USERID: ${TWS_USERID_PAPER}
+      TWS_PASSWORD: ${TWS_PASSWORD_PAPER}
+      TRADING_MODE: ${TRADING_MODE:-paper}
+      TWS_SETTINGS_PATH: ${TWS_SETTINGS_PATH:-}
+      TWS_ACCEPT_INCOMING: ${TWS_ACCEPT_INCOMING:-}
+      READ_ONLY_API: ${READ_ONLY_API:-}
+      VNC_SERVER_PASSWORD: ${VNC_SERVER_PASSWORD:-}
+      TWOFA_TIMEOUT_ACTION: ${TWOFA_TIMEOUT_ACTION:-exit}
+      BYPASS_WARNING: ${BYPASS_WARNING:-}
+      AUTO_RESTART_TIME: ${AUTO_RESTART_TIME:-}
+      AUTO_LOGOFF_TIME: ${AUTO_LOGOFF_TIME:-}
+      TWS_COLD_RESTART: ${TWS_COLD_RESTART:-}
+      SAVE_TWS_SETTINGS: ${SAVE_TWS_SETTINGS:-}
+      RELOGIN_AFTER_TWOFA_TIMEOUT: ${RELOGIN_AFTER_TWOFA_TIMEOUT:-no}
+      TWOFA_EXIT_INTERVAL: ${TWOFA_EXIT_INTERVAL:-60}
+      TWOFA_DEVICE: ${TWOFA_DEVICE:-}
+      EXISTING_SESSION_DETECTED_ACTION: ${EXISTING_SESSION_DETECTED_ACTION:-primary}
+      ALLOW_BLIND_TRADING: ${ALLOW_BLIND_TRADING:-no}
+      TIME_ZONE: ${TIME_ZONE:-Etc/UTC}
+      TZ: ${TIME_ZONE:-Etc/UTC}
+      CUSTOM_CONFIG: ${CUSTOM_CONFIG:-NO}
+      JAVA_HEAP_SIZE: ${JAVA_HEAP_SIZE:-}
+      SSH_TUNNEL: ${SSH_TUNNEL:-}
+      SSH_OPTIONS: ${SSH_OPTIONS:-}
+      SSH_ALIVE_INTERVAL: ${SSH_ALIVE_INTERVAL:-}
+      SSH_ALIVE_COUNT: ${SSH_ALIVE_COUNT:-}
+      SSH_PASSPHRASE: ${SSH_PASSPHRASE:-}
+      SSH_REMOTE_PORT: ${SSH_REMOTE_PORT:-}
+      SSH_USER_TUNNEL: ${SSH_USER_TUNNEL:-}
+      SSH_RESTART: ${SSH_RESTART:-}
+      SSH_VNC_PORT: ${SSH_VNC_PORT:-}
     ports:
       - "4001:4003"
       - "4002:4004"
@@ -317,10 +308,30 @@ services:
       - ../data/ibgateway:/config:rw
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
-
     networks:
       - ibbot-network
-  # Cloudflare Tunnel (cloudflared) - token mode only
+      - stack
+
+  optimizer-ui:
+    image: nginx:1.25-alpine
+    container_name: ibbot-optimizer-ui
+    ports:
+      - "4173:80"
+    volumes:
+      - ../optimizer_ui:/usr/share/nginx/html:ro
+    depends_on:
+      - ibbot
+    networks:
+      - ibbot-network
+      - stack
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--spider", "http://localhost"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
   cloudflared:
     image: cloudflare/cloudflared:latest
     container_name: ibbot-cloudflared
@@ -328,13 +339,13 @@ services:
     env_file:
       - ./.env
     environment:
-      # Token-based mode: set CF_TUNNEL_TOKEN in docker/.env
-      - TUNNEL_TOKEN=${CF_TUNNEL_TOKEN}
+      TUNNEL_TOKEN: ${CF_TUNNEL_TOKEN}
     command: ["tunnel", "--no-autoupdate", "run"]
     depends_on:
       - ibbot
     networks:
       - ibbot-network
+      - stack
 
 networks:
   ibbot-network:
