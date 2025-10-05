@@ -95,36 +95,6 @@ class RiskSnapshotRepository:
             self._disabled_reason,
         )
 
-    async def save_config_snapshot(
-        self,
-        *,
-        service: str,
-        payload: Mapping[str, Any],
-        rules_count: int,
-        updated_at: str | datetime | None = None,
-        captured_at: datetime | str | None = None,
-    ) -> None:
-        row = {
-            "service": service,
-            "payload": _normalise_payload(payload),
-            "rules_count": int(rules_count),
-            "updated_at_text": str(updated_at) if updated_at is not None else None,
-            "captured_at": _parse_datetime(captured_at) or _utc_now(),
-        }
-        if self._is_disabled():
-            return
-        try:
-            await run_in_thread(self._write_config_snapshot, row)
-        except MariaDBConfigurationError as exc:
-            self._disable(str(exc))
-            return
-        except Exception as exc:  # pragma: no cover - log and wrap
-            self._logger.exception(
-                "Failed to persist risk config snapshot for service %s",
-                service,
-            )
-            raise RiskSnapshotRepositoryError("Failed to persist risk config snapshot") from exc
-
     async def save_rule_snapshots(
         self,
         *,
@@ -235,20 +205,6 @@ class RiskSnapshotRepository:
                 len(rows),
             )
             raise RiskSnapshotRepositoryError("Failed to upsert risk rule snapshots") from exc
-
-    def _write_config_snapshot(self, row: Mapping[str, Any]) -> None:
-        with use_connection() as connection:
-            payload = _prepare_json(row, "payload")
-            columns = list(payload.keys())
-            placeholders = (
-                ", ".join(f":{col}" for col in columns)
-                if is_sqlite(connection)
-                else ", ".join(f"%({col})s" for col in columns)
-            )
-            sql = "INSERT INTO risk_config_snapshots ({cols}) VALUES ({values})".format(
-                cols=", ".join(columns), values=placeholders
-            )
-            executemany_write(connection, sql, [payload])
 
     def _write_rule_snapshots(self, rows: Sequence[Mapping[str, Any]]) -> None:
         with use_connection() as connection:

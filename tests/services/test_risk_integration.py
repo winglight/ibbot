@@ -12,27 +12,7 @@ from services.risk import RiskRuntime
 
 class RecordingRepository:
     def __init__(self) -> None:
-        self.config_snapshots: list[dict[str, Any]] = []
         self.rule_snapshots: list[dict[str, Any]] = []
-
-    async def save_config_snapshot(
-        self,
-        *,
-        service: str,
-        payload: Mapping[str, Any],
-        rules_count: int,
-        updated_at: str | None = None,
-        captured_at: str | datetime | None = None,
-    ) -> None:
-        self.config_snapshots.append(
-            {
-                "service": service,
-                "payload": dict(payload),
-                "rules_count": rules_count,
-                "updated_at": updated_at,
-                "captured_at": captured_at,
-            }
-        )
 
     async def bulk_upsert_rule_snapshots(
         self,
@@ -50,6 +30,31 @@ class RecordingRepository:
                 "captured_at": captured_at,
             }
         )
+
+
+class RecordingConfigSnapshot:
+    def __init__(self, module: str, values: Mapping[str, str], version: str | None = None) -> None:
+        self.module = module
+        self.values = dict(values)
+        self.version = version
+
+
+class RecordingConfigRepository:
+    def __init__(self) -> None:
+        self.modules: dict[str, dict[str, str]] = {}
+        self.saved: list[tuple[str, dict[str, str]]] = []
+
+    async def load_module(self, module: str) -> RecordingConfigSnapshot:
+        values = dict(self.modules.get(module, {}))
+        return RecordingConfigSnapshot(module, values, values.get("__version__"))
+
+    async def save_module(
+        self, module: str, values: Mapping[str, str]
+    ) -> RecordingConfigSnapshot:
+        prepared = {str(key): str(value) for key, value in values.items()}
+        self.modules[module] = dict(prepared)
+        self.saved.append((module, dict(prepared)))
+        return RecordingConfigSnapshot(module, prepared, prepared.get("__version__"))
 
 
 class _InMemoryPipeline:
@@ -181,6 +186,7 @@ async def _run_integration(tmp_path: Path, redis: Any) -> None:
     await redis.flushall()
 
     repository = RecordingRepository()
+    config_repository = RecordingConfigRepository()
 
     async def redis_factory():
         return redis
@@ -188,9 +194,13 @@ async def _run_integration(tmp_path: Path, redis: Any) -> None:
     async def _repository_factory() -> Any:
         return repository
 
+    async def _config_repository_factory() -> Any:
+        return config_repository
+
     runtime = RiskRuntime(
         redis_factory=redis_factory,
         risk_snapshot_repository_factory=_repository_factory,
+        config_repository_factory=_config_repository_factory,
         logger_name="risk-service-test",
         service_name="risk-service-test",
         log_dir=tmp_path,
@@ -221,12 +231,12 @@ async def _run_integration(tmp_path: Path, redis: Any) -> None:
     assert rules_snapshot.get("success") is True
     assert rules_snapshot.get("rules")
 
-    assert repository.config_snapshots
-    latest_config = repository.config_snapshots[-1]
-    assert latest_config["service"] == runtime.service_name
-    assert latest_config["rules_count"] == 1
-    assert int(latest_config["payload"].get("rules_count", 0)) == 1
-    assert latest_config["payload"].get("updated_at")
+    assert config_repository.saved
+    latest_config_module, latest_payload = config_repository.saved[-1]
+    assert latest_config_module == runtime.service_name
+    stored_snapshot = json.loads(latest_payload["snapshot"])
+    assert stored_snapshot.get("rules_count") == 1
+    assert stored_snapshot.get("updated_at")
 
     assert repository.rule_snapshots
     latest_rules = repository.rule_snapshots[-1]
@@ -264,3 +274,61 @@ async def _run_integration(tmp_path: Path, redis: Any) -> None:
         await runtime.stop()
         await redis.flushall()
         await redis.close()
+
+
+@pytest.mark.asyncio
+async def test_config_persistence_across_restart(tmp_path: Path) -> None:
+    redis_primary = _InMemoryRedis()
+    redis_secondary = _InMemoryRedis()
+    repository = RecordingRepository()
+    config_repository = RecordingConfigRepository()
+
+    async def _redis_primary() -> _InMemoryRedis:
+        return redis_primary
+
+    async def _redis_secondary() -> _InMemoryRedis:
+        return redis_secondary
+
+    async def _risk_repo_factory() -> RecordingRepository:
+        return repository
+
+    async def _config_repo_factory() -> RecordingConfigRepository:
+        return config_repository
+
+    runtime = RiskRuntime(
+        redis_factory=_redis_primary,
+        risk_snapshot_repository_factory=_risk_repo_factory,
+        config_repository_factory=_config_repo_factory,
+        logger_name="risk-service-test",
+        service_name="risk-service-test",
+        log_dir=tmp_path,
+        poll_interval=0.05,
+    )
+
+    config = {
+        "market_stream": "stream:market-service",
+        "market_group": "group:risk:market",
+        "results_stream": "stream:ib:results",
+        "results_group": "group:risk:results",
+        "command_queue": "queue:ib:commands",
+        "rules": json.dumps([{"symbol": "ES", "stop_loss": 123.0}]),
+    }
+
+    await runtime.update_config(config)
+
+    assert config_repository.saved
+
+    runtime_reloaded = RiskRuntime(
+        redis_factory=_redis_secondary,
+        risk_snapshot_repository_factory=None,
+        config_repository_factory=_config_repo_factory,
+        logger_name="risk-service-test",
+        service_name="risk-service-test",
+        log_dir=tmp_path,
+        poll_interval=0.05,
+    )
+
+    loaded_config = await runtime_reloaded.load_risk_config()
+    assert loaded_config["market_stream"] == "stream:market-service"
+    assert loaded_config["command_queue"] == "queue:ib:commands"
+    assert loaded_config.get("rules_count") == 1
