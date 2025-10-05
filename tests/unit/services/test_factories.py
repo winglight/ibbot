@@ -4,9 +4,7 @@ from typing import Any, Iterable, Mapping
 import pytest
 
 from src.services.factories import (
-    MarketPriceRepositoryAdapter,
     ServiceMetricsWriterAdapter,
-    create_market_price_repository,
     create_service_metrics_writer,
 )
 
@@ -42,30 +40,6 @@ class AsyncMetricsWriter:
         self.closed = True
 
 
-class SyncPriceRepository:
-    def __init__(self) -> None:
-        self.calls: list[int] = []
-        self.closed = False
-
-    def insert_price(self, **payload: Any) -> None:
-        self.calls.append(threading.get_ident())
-
-    def close(self) -> None:
-        self.closed = True
-
-
-class AsyncPriceRepository:
-    def __init__(self) -> None:
-        self.thread_ids: list[int] = []
-        self.closed = False
-
-    async def insert_price(self, **payload: Any) -> None:
-        self.thread_ids.append(threading.get_ident())
-
-    async def close(self) -> None:
-        self.closed = True
-
-
 @pytest.mark.asyncio
 async def test_create_service_metrics_writer_wraps_sync() -> None:
     writer = SyncMetricsWriter()
@@ -94,33 +68,3 @@ async def test_create_service_metrics_writer_keeps_async_writer_on_loop() -> Non
 
     assert writer.thread_ids == [main_thread]
     assert writer.closed
-
-
-@pytest.mark.asyncio
-async def test_create_market_price_repository_wraps_sync() -> None:
-    repository = SyncPriceRepository()
-    main_thread = threading.get_ident()
-
-    adapter = await create_market_price_repository(factory=lambda: repository)
-    assert isinstance(adapter, MarketPriceRepositoryAdapter)
-    await adapter.insert_price(symbol="AAPL", bid=1.0, ask=1.1)
-    await adapter.aclose()
-
-    assert repository.calls
-    for thread_id in repository.calls:
-        assert thread_id != main_thread
-    assert repository.closed
-
-
-@pytest.mark.asyncio
-async def test_create_market_price_repository_keeps_async_repo_on_loop() -> None:
-    repository = AsyncPriceRepository()
-    main_thread = threading.get_ident()
-
-    adapter = await create_market_price_repository(factory=lambda: repository)
-    assert isinstance(adapter, MarketPriceRepositoryAdapter)
-    await adapter.insert_price(symbol="ES", bid=4300.0, ask=4300.5)
-    await adapter.aclose()
-
-    assert repository.thread_ids == [main_thread]
-    assert repository.closed

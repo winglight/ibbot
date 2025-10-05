@@ -8,8 +8,6 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 
-from typing import Any
-
 import pytest
 
 from src.ibbot.redis import PubSubListener
@@ -147,16 +145,14 @@ def test_redis_pubsub_listener_recovers_from_disconnect() -> None:
 
 
 def test_ib_feed_reconnects_after_disconnect() -> None:
-    async def _run() -> tuple[list[logging.LogRecord], RecordingPriceRepository]:
+    async def _run() -> tuple[list[logging.LogRecord], _RecordingRedis]:
         ib_client = _FakeIBClient()
         redis = _RecordingRedis()
 
-        repository = RecordingPriceRepository()
         service = MarketDataFeedService(
             ib_client=ib_client,
             redis=redis,
             subscriptions=["AAPL"],
-            price_repository=repository,
             reconnect_delay=0.01,
         )
 
@@ -171,22 +167,13 @@ def test_ib_feed_reconnects_after_disconnect() -> None:
             await _wait_for(lambda: ib_client.connect_calls >= 2)
 
             await service.stop()
-        return records, repository
+        return records, redis
 
-    records, repository = asyncio.run(_run())
+    records, redis = asyncio.run(_run())
     messages = " ".join(record.message for record in records)
     assert "IB client disconnected; scheduling reconnect" in messages
     assert "Reconnected to IB and restored subscriptions" in messages
-    assert repository.calls
-    payload = repository.calls[-1]
-    assert payload["symbol"] == "AAPL"
-
-
-class RecordingPriceRepository:
-    def __init__(self) -> None:
-        self.calls: list[dict[str, Any]] = []
-
-    async def insert_price(self, **payload: Any) -> None:
-        self.calls.append(dict(payload))
+    price_snapshot = redis.hashes.get("hash:market:snapshot:AAPL") or {}
+    assert price_snapshot.get("symbol") == "AAPL"
 
 

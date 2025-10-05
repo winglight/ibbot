@@ -1,5 +1,4 @@
 """Factories and adapters for service persistence dependencies."""
-
 from __future__ import annotations
 
 import asyncio
@@ -15,9 +14,6 @@ __all__ = [
     "ServiceMetricsWriterProtocol",
     "ServiceMetricsWriterAdapter",
     "create_service_metrics_writer",
-    "MarketPriceRepositoryProtocol",
-    "MarketPriceRepositoryAdapter",
-    "create_market_price_repository",
 ]
 
 
@@ -29,13 +25,6 @@ class ServiceMetricsWriterProtocol(Protocol):
         metrics: Mapping[str, Any] | Iterable[Mapping[str, Any]],
     ) -> None:
         """Persist one or more metrics entries."""
-
-
-class MarketPriceRepositoryProtocol(Protocol):
-    """Protocol for repositories capable of storing market prices."""
-
-    async def insert_price(self, /, **payload: Any) -> None:
-        """Persist a market price snapshot."""
 
 
 @dataclass(slots=True)
@@ -110,19 +99,6 @@ class RedisServiceMetricWriter:
             raise
 
 
-class MarketPriceRepositoryAdapter(_RepositoryAdapter):
-    """Adapter exposing an async interface for price persistence."""
-
-    def __post_init__(self) -> None:
-        super().__post_init__()
-        self._insert_price = _resolve_callable(
-            self._instance, ("insert_price", "write_price", "save_price")
-        )
-
-    async def insert_price(self, /, **payload: Any) -> None:
-        await _invoke_callable(self._insert_price, offload=True, **payload)
-
-
 async def _invoke_callable(
     func: Callable[..., Any],
     /,
@@ -195,33 +171,3 @@ async def create_service_metrics_writer(
     if isinstance(repository, ServiceMetricsWriterAdapter):
         return repository
     return ServiceMetricsWriterAdapter(repository)
-
-
-async def create_market_price_repository(
-    factory: Callable[[], Awaitable[Any] | Any] | None = None,
-    *,
-    logger_name: str | None = None,
-) -> MarketPriceRepositoryAdapter | None:
-    """Return an adapter providing async access to a market price repository."""
-
-    repository_factory = factory
-    if repository_factory is None:
-        try:
-            from src.db import market_price_writer as default_factory
-        except ModuleNotFoundError:
-            return None
-
-        if logger_name is not None:
-            repository_factory = lambda: default_factory(logger_name=logger_name)
-        else:
-            repository_factory = default_factory
-
-    repository = repository_factory()
-    if inspect.isawaitable(repository):
-        repository = await repository
-
-    if repository is None:
-        return None
-    if isinstance(repository, MarketPriceRepositoryAdapter):
-        return repository
-    return MarketPriceRepositoryAdapter(repository)
