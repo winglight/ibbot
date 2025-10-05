@@ -346,11 +346,15 @@ class OrderRepository:
     def __init__(self, *, logger_name: str = "db.orders") -> None:
         self._logger = get_logger(logger_name)
 
-    async def upsert_order(self, payload: Mapping[str, Any]) -> int | None:
+    async def upsert_order(
+        self, payload: Mapping[str, Any], *, allow_insert: bool = True
+    ) -> int | None:
         normalised = _normalise_order_payload(payload)
 
         try:
-            return await run_in_thread(self._write_order, normalised)
+            return await run_in_thread(
+                self._write_order, normalised, allow_insert=allow_insert
+            )
         except RepositoryValidationError:
             raise
         except MariaDBConfigurationError as exc:
@@ -360,7 +364,7 @@ class OrderRepository:
             self._logger.exception("Failed to upsert order %s", order_id)
             raise OrderRepositoryError("Failed to upsert order") from exc
 
-    def _write_order(self, row: Mapping[str, Any]) -> int | None:
+    def _write_order(self, row: Mapping[str, Any], *, allow_insert: bool = True) -> int | None:
         with use_connection() as connection:
             prepared = {key: value for key, value in dict(row).items() if key != "id"}
             if prepared.get("raw_payload") is not None:
@@ -399,6 +403,8 @@ class OrderRepository:
                         cursor, command_id, ib_order_id, client_order_id, order_id
                     )
                     if match_column is None:
+                        if not allow_insert:
+                            return None
                         inserted_id = self._insert_sqlite(cursor, prepared)
                         connection.commit()
                         return inserted_id
@@ -414,6 +420,8 @@ class OrderRepository:
                     order_id,
                 )
                 if match_column is None:
+                    if not allow_insert:
+                        return None
                     inserted_id = self._insert_mariadb(cursor, prepared)
                     connection.commit()
                     return inserted_id

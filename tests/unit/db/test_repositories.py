@@ -49,6 +49,37 @@ async def test_order_repository_upserts_by_command_id(
 
 
 @pytest.mark.asyncio
+async def test_order_repository_respects_allow_insert_flag(
+    sqlite_db, order_repository_factory
+) -> None:
+    repo = await order_repository_factory()
+
+    payload = {
+        "ib_order_id": "IB-SKIP-1",
+        "symbol": "ES",
+        "status": "Submitted",
+    }
+
+    skipped_id = await repo.upsert_order(payload, allow_insert=False)
+    assert skipped_id is None
+
+    row = sqlite_db.execute(
+        "SELECT id FROM orders WHERE ib_order_id = ?",
+        ("IB-SKIP-1",),
+    ).fetchone()
+    assert row is None
+
+    inserted_id = await repo.upsert_order(payload, allow_insert=True)
+    assert isinstance(inserted_id, int)
+
+    row_after = sqlite_db.execute(
+        "SELECT id, ib_order_id FROM orders WHERE id = ?",
+        (inserted_id,),
+    ).fetchone()
+    assert row_after["ib_order_id"] == "IB-SKIP-1"
+
+
+@pytest.mark.asyncio
 async def test_order_repository_updates_existing_row_with_ib_identifier(
     sqlite_db, order_repository_factory
 ) -> None:
