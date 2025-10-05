@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 from fastapi import Depends, FastAPI, HTTPException, status
 from pydantic import BaseModel, ConfigDict, model_validator
 
+from src.db.repositories.order import OrderNotFoundError
 from src.ibbot import update_service_health
 from src.ibbot.redis import DEFAULT_COMMAND_QUEUE, enqueue_ib_command, get_redis_client
 
@@ -634,13 +635,16 @@ class OrdersRuntime:
             await self._append_history({"event": "submitted", "command_id": command_id, "order": entry})
             entry_snapshot = _clone_order_record(entry)
         if entry_snapshot is not None:
-            inserted_id = await self._upsert_order_snapshot(
+            persist_result = await self._persist_order_snapshot(
                 entry_snapshot,
                 timestamp=entry_snapshot.get("requested_at"),
+                mode="insert",
             )
-            if inserted_id is not None:
+            if persist_result.inserted_id is not None:
                 await self._register_persisted_order_id(
-                    command_id, entry_snapshot, inserted_id
+                    command_id,
+                    entry_snapshot,
+                    persist_result,
                 )
         await self._publish_health()
         return command_id
@@ -792,12 +796,30 @@ class OrdersRuntime:
             )
 
         if record_snapshot is not None:
-            inserted_id = await self._upsert_order_snapshot(
-                record_snapshot, timestamp=timestamp
+            persist_result = await self._persist_order_snapshot(
+                record_snapshot,
+                timestamp=timestamp,
+                mode="update",
             )
-            if inserted_id is not None and record_identifier_for_repo is not None:
+            if (
+                persist_result.inserted_id is not None
+                and record_identifier_for_repo is not None
+            ):
                 await self._register_persisted_order_id(
-                    record_identifier_for_repo, record_snapshot, inserted_id
+                    record_identifier_for_repo,
+                    record_snapshot,
+                    persist_result,
+                )
+            elif persist_result.not_found:
+                identifier_for_log = (
+                    record_identifier_for_repo
+                    or _coerce_str(record_snapshot.get("command_id"))
+                    or _coerce_str(record_snapshot.get("order_id"))
+                    or "unknown"
+                )
+                self.logger.warning(
+                    "Order repository missing order %s during fill metrics update",
+                    identifier_for_log,
                 )
             return record_snapshot
         raise RuntimeError("failed to update fill metrics")
@@ -1142,32 +1164,54 @@ class OrdersRuntime:
         self._repository_failure_count += 1
         self._repository_last_error = message
 
-    async def _upsert_order_snapshot(
+
+@dataclass
+class OrderPersistenceResult:
+    inserted_id: int | None = None
+    not_found: bool = False
+
+
+def _is_order_not_found_error(exc: BaseException) -> bool:
+    return isinstance(exc, OrderNotFoundError) or exc.__class__.__name__ == "OrderNotFoundError"
+
+
+    async def _persist_order_snapshot(
         self,
         record: Mapping[str, Any],
         *,
         timestamp: str | datetime | None = None,
-        allow_insert: bool = True,
-    ) -> int | None:
+        mode: str = "insert",
+    ) -> OrderPersistenceResult:
         if self.order_repository_factory is None:
-            return None
+            return OrderPersistenceResult()
 
         repository = self._order_repository
         if repository is None:
             self.logger.warning("Order repository unavailable; dropping snapshot")
             self._record_repository_failure("repository unavailable")
-            return None
+            return OrderPersistenceResult()
 
         payload = self._build_repository_order_payload(record, timestamp=timestamp)
 
         try:
-            result = await repository.upsert_order(payload, allow_insert=allow_insert)
+            if mode == "insert":
+                inserted_id = await repository.insert_order(payload)
+                result = OrderPersistenceResult(inserted_id=inserted_id)
+            elif mode == "update":
+                await repository.update_order(payload)
+                result = OrderPersistenceResult()
+            else:  # pragma: no cover - defensive programming
+                raise ValueError(f"Unsupported persistence mode: {mode}")
         except Exception as exc:
+            if _is_order_not_found_error(exc):
+                message = str(exc) or "order not found"
+                self._record_repository_failure(message)
+                return OrderPersistenceResult(not_found=True)
             self._record_repository_failure(str(exc))
             self.logger.warning(
                 "Failed to persist order snapshot to repository", exc_info=True
             )
-            return None
+            return OrderPersistenceResult()
         else:
             self._repository_last_error = ""
             return result
@@ -1176,8 +1220,11 @@ class OrdersRuntime:
         self,
         record_identifier: str,
         snapshot: Mapping[str, Any],
-        inserted_id: int,
+        result: OrderPersistenceResult,
     ) -> None:
+        inserted_id = result.inserted_id
+        if inserted_id is None:
+            return
         identifier = str(record_identifier or "").strip()
         if not identifier:
             return
@@ -1340,24 +1387,31 @@ class OrdersRuntime:
         updated = False
         record_snapshot: dict[str, Any] | None = None
         record_identifier_for_repo: str | None = None
-        allow_insert = True
         created_from_ib_event = False
+        matched_existing = False
         async with self._lock:
             record_identifier = identifier
             record = self._active_orders.get(record_identifier)
+            if record is not None:
+                matched_existing = True
             from_history = False
             if record is None and command_id and command_id in self._command_to_order:
                 record_identifier = self._command_to_order[command_id]
                 record = self._active_orders.get(record_identifier)
+                if record is not None:
+                    matched_existing = True
             if record is None and order_id and order_id in self._command_to_order:
                 record_identifier = self._command_to_order[order_id]
                 record = self._active_orders.get(record_identifier)
+                if record is not None:
+                    matched_existing = True
             if record is None:
                 for item in self._history:
                     if _record_matches(item, identifier, order_id, command_id):
                         record = item
                         record_identifier = str(item.get("id") or identifier)
                         from_history = True
+                        matched_existing = True
                         break
             if record is None:
                 record_identifier = identifier
@@ -1442,29 +1496,61 @@ class OrdersRuntime:
                 self._history = deque(existing_history, maxlen=self.history_limit)
             record_snapshot = _clone_order_record(record)
             record_identifier_for_repo = record_identifier
-            allow_insert = record_identifier not in self._ib_only_orders
             if status_lower in _TERMINAL_STATUSES:
                 self._ib_only_orders.discard(record_identifier)
             updated = True
         if record_snapshot is not None:
-            if not allow_insert and created_from_ib_event:
+            persist_mode = "update" if matched_existing else "insert"
+            if created_from_ib_event:
+                persist_mode = "update"
+            persist_result = await self._persist_order_snapshot(
+                record_snapshot,
+                timestamp=event_time,
+                mode=persist_mode,
+            )
+            if (
+                persist_mode == "insert"
+                and persist_result.inserted_id is not None
+                and record_identifier_for_repo is not None
+            ):
+                await self._register_persisted_order_id(
+                    record_identifier_for_repo,
+                    record_snapshot,
+                    persist_result,
+                )
+            elif persist_mode == "update" and persist_result.not_found:
                 identifier_for_log = (
-                    _coerce_str(record_snapshot.get("order_id"))
+                    record_identifier_for_repo
+                    or _coerce_str(record_snapshot.get("order_id"))
                     or _coerce_str(record_snapshot.get("ib_order_id"))
                     or _coerce_str(record_snapshot.get("command_id"))
-                    or record_identifier_for_repo
                     or "unknown"
                 )
-                self.logger.info(
-                    "Skipping repository insert for IB-originated order %s", identifier_for_log
-                )
-            inserted_id = await self._upsert_order_snapshot(
-                record_snapshot, timestamp=event_time, allow_insert=allow_insert
-            )
-            if inserted_id is not None and record_identifier_for_repo is not None:
-                await self._register_persisted_order_id(
-                    record_identifier_for_repo, record_snapshot, inserted_id
-                )
+                if created_from_ib_event:
+                    self.logger.warning(
+                        "Repository missing persisted order %s for IB callback;"
+                        " skipping insert",
+                        identifier_for_log,
+                    )
+                else:
+                    self.logger.warning(
+                        "Repository missing persisted order %s for update; retrying insert",
+                        identifier_for_log,
+                    )
+                    retry_result = await self._persist_order_snapshot(
+                        record_snapshot,
+                        timestamp=event_time,
+                        mode="insert",
+                    )
+                    if (
+                        retry_result.inserted_id is not None
+                        and record_identifier_for_repo is not None
+                    ):
+                        await self._register_persisted_order_id(
+                            record_identifier_for_repo,
+                            record_snapshot,
+                            retry_result,
+                        )
         return updated
 
     def _extract_order_id(
