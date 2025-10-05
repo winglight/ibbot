@@ -6,6 +6,7 @@ from .audit import AuditLogRepository, AuditLogRepositoryError
 from .config import ConfigRepository, ConfigRepositoryError, ModuleConfigSnapshot
 from .order import OrderRepository, OrderRepositoryError
 from .risk import RiskSnapshotRepository, RiskSnapshotRepositoryError
+from .strategy import StrategyRecord, StrategyRepository, StrategyRepositoryError
 from .base import RepositoryError, RepositoryValidationError
 
 __all__ = [
@@ -18,6 +19,9 @@ __all__ = [
     "ModuleConfigSnapshot",
     "RiskSnapshotRepository",
     "RiskSnapshotRepositoryError",
+    "StrategyRepository",
+    "StrategyRepositoryError",
+    "StrategyRecord",
     "RepositoryError",
     "RepositoryValidationError",
 ]
