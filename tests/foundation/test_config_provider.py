@@ -25,7 +25,7 @@ async def wait_until(condition: Callable[[], bool], timeout: float = 1.0) -> Non
 
 
 class FakeRedis:
-    """Minimal Redis subset used for fallback behaviour."""
+    """Minimal Redis subset used for publish assertions in tests."""
 
     def __init__(self) -> None:
         self._hashes: Dict[str, Dict[str, str]] = {}
@@ -55,7 +55,7 @@ class FailingRepository:
     async def load_module(self, module: str):  # pragma: no cover - used for fallback tests
         raise ConfigRepositoryError("database unavailable")
 
-    async def save_module(self, module: str, values: Dict[str, str]):  # pragma: no cover - fallback path
+    async def save_module(self, module: str, values: Dict[str, str]):  # pragma: no cover - error path
         raise ConfigRepositoryError("database unavailable")
 
     async def load_versions(self) -> Dict[str, str]:  # pragma: no cover - fallback path
@@ -114,7 +114,7 @@ def test_config_provider_detects_external_db_changes(sqlite_db, monkeypatch: pyt
     asyncio.run(scenario())
 
 
-def test_config_provider_falls_back_to_redis(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_config_provider_raises_when_db_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
     async def scenario() -> None:
         load_project_env.cache_clear()
         monkeypatch.delenv("STOP_LOSS_RATIO", raising=False)
@@ -122,13 +122,14 @@ def test_config_provider_falls_back_to_redis(monkeypatch: pytest.MonkeyPatch) ->
         fake = FakeRedis()
         provider = ConfigProvider(redis_client=fake, config_repository=FailingRepository())
 
-        merged = await provider.get_module("risk")
-        assert merged.get("STOP_LOSS_RATIO") is None
+        with pytest.raises(ConfigRepositoryError):
+            await provider.get_module("risk")
 
-        await provider.set_module("risk", {"STOP_LOSS_RATIO": "0.2"})
+        with pytest.raises(ConfigRepositoryError):
+            await provider.set_module("risk", {"STOP_LOSS_RATIO": "0.2"})
 
-        redis_values = await fake.hgetall("hash:config:risk")
-        assert redis_values["STOP_LOSS_RATIO"] == "0.2"
+        assert fake._hashes == {}
+        assert fake.published == []
 
         await provider.close()
 

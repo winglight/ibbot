@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import time
 from collections import defaultdict
 from copy import deepcopy
 from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping, Optional
@@ -56,8 +55,6 @@ class ConfigProvider:
         self._global_listeners: list[Listener] = []
         self._lock = asyncio.Lock()
         self._env_defaults: Dict[str, str] = self._load_env_defaults()
-        self._db_retry_at: float = 0.0
-        self._db_last_error: str | None = None
 
     # ------------------------------------------------------------------
     # public API
@@ -148,12 +145,8 @@ class ConfigProvider:
 
         async with self._lock:
             snapshot = await self._save_to_db(module, serialised)
-            if snapshot is not None:
-                overrides = snapshot.values
-                version = snapshot.version
-            else:
-                overrides = await self._store_in_redis(module, serialised)
-                version = None
+            overrides = snapshot.values
+            version = snapshot.version
 
             merged = {**self._env_defaults, **overrides}
             self._cache[module] = merged
@@ -200,53 +193,21 @@ class ConfigProvider:
             if not bypass_cache and module in self._cache:
                 return self._cache[module]
 
-            overrides: dict[str, str] = {}
-            version: str | None = None
-            db_success = False
+            repository = self._get_repository()
+            try:
+                snapshot = await repository.load_module(module)
+            except ConfigRepositoryError:
+                raise
+            except Exception as exc:  # pragma: no cover - defensive guard
+                raise ConfigRepositoryError(str(exc)) from exc
 
-            if self._should_use_db():
-                try:
-                    snapshot = await self._repository.load_module(module)  # type: ignore[union-attr]
-                except ConfigRepositoryError as exc:
-                    self._record_db_error(str(exc))
-                else:
-                    db_success = True
-                    self._record_db_success()
-                    overrides = dict(snapshot.values)
-                    version = snapshot.version
-
-            if not db_success:
-                overrides = await self._load_from_redis(module)
-                version = None
+            overrides = dict(snapshot.values)
+            version = snapshot.version
 
             merged = {**self._env_defaults, **overrides}
             self._cache[module] = merged
             self._versions[module] = version
             return merged
-
-    async def _load_from_redis(self, module: str) -> Dict[str, str]:
-        if self._redis is None:
-            return {}
-
-        key = f"{self._hash_prefix}:{module}"
-        try:
-            values = await self._redis.hgetall(key)
-        except Exception as exc:  # pragma: no cover - connection issues
-            logger.warning("Failed to load config from Redis", key=key, error=str(exc))
-            return {}
-        return {str(k): str(v) for k, v in values.items()}
-
-    async def _store_in_redis(self, module: str, values: Mapping[str, str]) -> Dict[str, str]:
-        if self._redis is not None:
-            key = f"{self._hash_prefix}:{module}"
-            try:
-                if values:
-                    await self._redis.hset(key, mapping=dict(values))
-                else:
-                    await self._redis.delete(key)
-            except Exception as exc:  # pragma: no cover - depends on redis availability
-                logger.warning("Failed to persist config to Redis", module=module, error=str(exc))
-        return dict(values)
 
     def _stringify_mapping(self, values: Mapping[str, Any]) -> Dict[str, str]:
         result: Dict[str, str] = {}
@@ -274,16 +235,16 @@ class ConfigProvider:
         try:
             while True:
                 await asyncio.sleep(self._poll_interval)
-                if not self._should_use_db():
-                    continue
 
+                repository = self._get_repository()
                 try:
-                    versions = await self._repository.load_versions()
+                    versions = await repository.load_versions()
                 except ConfigRepositoryError as exc:
-                    self._record_db_error(str(exc))
+                    logger.warning("Failed to load configuration versions: {}", str(exc))
                     continue
-                else:
-                    self._record_db_success()
+                except Exception as exc:  # pragma: no cover - defensive logging
+                    logger.warning("Unexpected error while loading config versions: {}", str(exc))
+                    continue
 
                 tracked = set(self._cache.keys()) | set(self._versions.keys())
                 for module in tracked:
@@ -349,33 +310,17 @@ class ConfigProvider:
             return float(value)
         return type_(value)
 
-    def _should_use_db(self) -> bool:
-        if self._repository is None:
-            return False
-        if self._db_retry_at and time.time() < self._db_retry_at:
-            return False
-        return True
-
-    async def _save_to_db(self, module: str, values: Mapping[str, str]) -> ModuleConfigSnapshot | None:
-        if not self._should_use_db():
-            return None
+    async def _save_to_db(self, module: str, values: Mapping[str, str]) -> ModuleConfigSnapshot:
+        repository = self._get_repository()
         try:
-            snapshot = await self._repository.save_module(module, values)  # type: ignore[union-attr]
-        except ConfigRepositoryError as exc:
-            self._record_db_error(str(exc))
-            return None
-        else:
-            self._record_db_success()
-            return snapshot
+            return await repository.save_module(module, values)
+        except ConfigRepositoryError:
+            raise
+        except Exception as exc:  # pragma: no cover - defensive guard
+            raise ConfigRepositoryError(str(exc)) from exc
 
-    def _record_db_error(self, message: str) -> None:
-        self._db_retry_at = time.time() + 30.0
-        if message and message != self._db_last_error:
-            logger.warning("Falling back to Redis config store: {}", message)
-        self._db_last_error = message or self._db_last_error
-
-    def _record_db_success(self) -> None:
-        if self._db_last_error is not None:
-            logger.info("Reconnected to MariaDB configuration store")
-        self._db_last_error = None
-        self._db_retry_at = 0.0
+    def _get_repository(self) -> ConfigRepository:
+        repository = self._repository
+        if repository is None:
+            raise ConfigRepositoryError("Configuration repository is not available")
+        return repository
