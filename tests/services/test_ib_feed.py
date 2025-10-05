@@ -29,23 +29,6 @@ class DummyRedis:
         return dict(self.hashes.get(key, {}))
 
 
-class RecordingPriceRepository:
-    def __init__(self) -> None:
-        self.records: list[dict[str, Any]] = []
-
-    async def insert_price(self, **payload: Any) -> None:
-        self.records.append(dict(payload))
-
-
-class ClosablePriceRepository(RecordingPriceRepository):
-    def __init__(self) -> None:
-        super().__init__()
-        self.closed = False
-
-    async def close(self) -> None:
-        self.closed = True
-
-
 class FakeIBClient:
     def __init__(self) -> None:
         self._price_listeners: list[Callable[[str, Mapping[str, Any]], None]] = []
@@ -90,13 +73,11 @@ class FakeIBClient:
 
 async def _run_price_update_flow() -> None:
     redis = DummyRedis()
-    repository = RecordingPriceRepository()
     client = FakeIBClient()
     service = MarketDataFeedService(
         client,
         redis,
         subscriptions=["AAPL"],
-        price_repository=repository,
         reconnect_delay=0.05,
         logger_name="tests.ib_feed",
         health_interval=0.05,
@@ -129,16 +110,6 @@ async def _run_price_update_flow() -> None:
     assert snapshot["bid"] == "199.5"
     assert "timestamp" in snapshot
 
-    assert repository.records
-    record = repository.records[-1]
-    assert record["symbol"] == "AAPL"
-    assert record["bid"] == 199.5
-    assert record["ask"] == 200.5
-    assert isinstance(record["observed_at"], datetime)
-    assert record["observed_at"] == record["recorded_at"]
-    assert record["extra"]["last"] == 200.0
-    assert record["extra"]["volume"] == 1500.0
-
     health = redis.hashes.get("hash:service:health:ib-feed") or {}
     assert health.get("status") == "running"
     assert health.get("healthy") == "true"
@@ -156,13 +127,11 @@ def test_price_updates_publish_and_persist() -> None:
 
 async def _run_dom_serialisation_flow() -> None:
     redis = DummyRedis()
-    repository = RecordingPriceRepository()
     client = FakeIBClient()
     service = MarketDataFeedService(
         client,
         redis,
         subscriptions=["ES"],
-        price_repository=repository,
         reconnect_delay=0.05,
         logger_name="tests.ib_feed",
         health_interval=0.05,
@@ -195,13 +164,11 @@ def test_dom_updates_are_serialised() -> None:
 
 async def _run_throughput_flow() -> None:
     redis = DummyRedis()
-    repository = RecordingPriceRepository()
     client = FakeIBClient()
     service = MarketDataFeedService(
         client,
         redis,
         subscriptions=["NQ"],
-        price_repository=repository,
         reconnect_delay=0.01,
         logger_name="tests.ib_feed",
         health_interval=0.05,
@@ -224,7 +191,6 @@ async def _run_throughput_flow() -> None:
     await asyncio.sleep(0.2)
 
     assert service.price_updates == 50
-    assert len(repository.records) >= 50
     assert len(redis.published) >= 50
 
     await service.stop()
@@ -238,13 +204,11 @@ def test_service_handles_high_throughput() -> None:
 
 async def _run_reconnect_flow() -> None:
     redis = DummyRedis()
-    repository = RecordingPriceRepository()
     client = FakeIBClient()
     service = MarketDataFeedService(
         client,
         redis,
         subscriptions=["CL", "GC"],
-        price_repository=repository,
         reconnect_delay=0.05,
         logger_name="tests.ib_feed",
         health_interval=0.05,
@@ -274,33 +238,3 @@ async def _run_reconnect_flow() -> None:
 
 def test_reconnect_restores_subscriptions() -> None:
     asyncio.run(_run_reconnect_flow())
-
-
-async def _run_repository_factory_flow() -> ClosablePriceRepository:
-    redis = DummyRedis()
-    client = FakeIBClient()
-    repository = ClosablePriceRepository()
-
-    async def factory() -> ClosablePriceRepository:
-        return repository
-
-    service = MarketDataFeedService(
-        client,
-        redis,
-        subscriptions=[],
-        price_repository_factory=factory,
-        reconnect_delay=0.01,
-        logger_name="tests.ib_feed",
-        health_interval=0.05,
-    )
-
-    await service.start()
-    assert service.price_repository is repository
-    await service.stop()
-    assert repository.closed
-    return repository
-
-
-def test_price_repository_factory_lifecycle() -> None:
-    repository = asyncio.run(_run_repository_factory_flow())
-    assert repository.closed

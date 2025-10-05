@@ -12,17 +12,13 @@ from collections import defaultdict
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable, Mapping, Sequence
+from typing import Any, Awaitable, Mapping, Sequence
 
 from src.ibbot import update_service_health
 from src.ibbot.config import ConfigProvider
 from src.ibbot.logging import get_logger
 from src.ibbot.redis import DEFAULT_REDIS_URL, close_global_client, get_redis_client
 from src.ibbot.storage.parquet_writer import MarketDataParquetWriter, get_market_data_writer
-from src.services.factories import (
-    MarketPriceRepositoryProtocol,
-    create_market_price_repository,
-)
 
 SERVICE_NAME = "ib-feed"
 PRICE_CHANNEL_TEMPLATE = "pubsub:ib:price:{symbol}"
@@ -49,16 +45,6 @@ class MarketDataFeedService:
     ib_client: Any
     redis: Any
     subscriptions: Sequence[str]
-    price_repository: MarketPriceRepositoryProtocol | None = None
-    price_repository_factory: (
-        Callable[
-            [],
-            Awaitable[MarketPriceRepositoryProtocol | None]
-            | MarketPriceRepositoryProtocol
-            | None,
-        ]
-        | None
-    ) = None
     dom_writer: MarketDataParquetWriter | None = None
     logger_name: str = "ibbot.services.ib_feed"
     reconnect_delay: float = 1.0
@@ -80,10 +66,6 @@ class MarketDataFeedService:
     _health_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _last_price_updates: int = field(default=0, init=False, repr=False)
     _last_dom_updates: int = field(default=0, init=False, repr=False)
-    _price_repository_created: bool = field(default=False, init=False, repr=False)
-    _price_repository_cleanup: Callable[[], Awaitable[None]] | None = field(
-        default=None, init=False, repr=False
-    )
 
     def __post_init__(self) -> None:
         self._logger = get_logger(self.logger_name)
@@ -103,7 +85,6 @@ class MarketDataFeedService:
         self._last_price_updates = self.price_updates
         self._last_dom_updates = self.dom_updates
         try:
-            await self._initialise_price_repository()
             await self._publish_health(status="starting", healthy=False)
             self._health_task = asyncio.create_task(
                 self._health_loop(), name="ib-feed-health"
@@ -126,7 +107,6 @@ class MarketDataFeedService:
                     await self._health_task
                 self._health_task = None
             await self._publish_health(status="offline", healthy=False)
-            await self._shutdown_price_repository()
             raise
 
     async def stop(self) -> None:
@@ -148,7 +128,6 @@ class MarketDataFeedService:
                 await _ensure_awaitable(disconnect())
         self._active = False
         await self._publish_health(status="offline", healthy=False)
-        await self._shutdown_price_repository()
 
     def _bind_client_events(self) -> None:
         price_handler = getattr(self.ib_client, "add_price_listener", None)
@@ -286,7 +265,6 @@ class MarketDataFeedService:
         snapshot = self._build_price_snapshot(symbol, update)
         self._price_cache[symbol] = snapshot
         await self._publish_price_snapshot(symbol, snapshot)
-        await self._persist_price_snapshot(symbol, snapshot)
 
     async def process_dom_update(self, symbol: str, levels: Sequence[Mapping[str, Any]]) -> None:
         self.dom_updates += 1
@@ -363,97 +341,6 @@ class MarketDataFeedService:
         }
         return snapshot
 
-    async def _initialise_price_repository(self) -> None:
-        if self.price_repository is not None:
-            return
-        factory = self.price_repository_factory
-        if factory is None:
-            return
-        repository = factory()
-        if inspect.isawaitable(repository):
-            repository = await repository
-        if repository is None:
-            self.price_repository = None
-            self._price_repository_created = False
-            self._price_repository_cleanup = None
-            return
-        self.price_repository = repository
-        self._price_repository_created = True
-        self._price_repository_cleanup = self._resolve_repository_cleanup(repository)
-
-    async def _shutdown_price_repository(self) -> None:
-        if not self._price_repository_created:
-            return
-        cleanup = self._price_repository_cleanup
-        if cleanup is not None:
-            try:
-                await cleanup()
-            except Exception:  # pragma: no cover - defensive guard
-                if self._logger:
-                    self._logger.warning("Failed to close price repository", exc_info=True)
-        self.price_repository = None
-        self._price_repository_created = False
-        self._price_repository_cleanup = None
-
-    def _resolve_repository_cleanup(
-        self, repository: Any
-    ) -> Callable[[], Awaitable[None]] | None:
-        for attr in ("aclose", "close"):
-            closer = getattr(repository, attr, None)
-            if callable(closer):
-                async def _cleanup(closer: Callable[[], Awaitable[Any] | Any] = closer) -> None:
-                    result = closer()
-                    if inspect.isawaitable(result):
-                        await result
-
-                return _cleanup
-        session = getattr(repository, "_session", None)
-        if session is not None:
-            close = getattr(session, "close", None)
-            if callable(close):
-                async def _cleanup_session(
-                    close: Callable[[], Awaitable[Any] | Any] = close,
-                ) -> None:
-                    result = close()
-                    if inspect.isawaitable(result):
-                        await result
-
-                return _cleanup_session
-        return None
-
-    async def _persist_price_snapshot(self, symbol: str, snapshot: Mapping[str, Any]) -> None:
-        repository = self.price_repository
-        if repository is None:
-            return
-        payload = self._convert_snapshot_to_repository_payload(symbol, snapshot)
-        try:
-            await repository.insert_price(**payload)
-        except Exception:  # pragma: no cover - depends on repository implementation
-            if self._logger:
-                self._logger.exception("Failed to persist market price for %s", symbol)
-
-    def _convert_snapshot_to_repository_payload(
-        self, symbol: str, snapshot: Mapping[str, Any]
-    ) -> dict[str, Any]:
-        extra: dict[str, Any] = {}
-        for key in ("last", "mid", "volume"):
-            value = snapshot.get(key)
-            if value not in (None, ""):
-                extra[key] = value
-        timestamp = snapshot.get("timestamp")
-        payload = {
-            "symbol": symbol,
-            "bid": snapshot.get("bid"),
-            "ask": snapshot.get("ask"),
-            "bid_size": snapshot.get("bid_size"),
-            "ask_size": snapshot.get("ask_size"),
-            "source": self.health_service_name,
-            "observed_at": timestamp,
-            "recorded_at": timestamp,
-            "extra": extra or None,
-        }
-        return payload
-
     @staticmethod
     def _encode_redis_value(value: Any) -> str:
         if isinstance(value, datetime):
@@ -518,7 +405,6 @@ async def run_service() -> None:
         redis,
         subscriptions=subscriptions,
         reconnect_delay=reconnect_delay,
-        price_repository_factory=create_market_price_repository,
     )
 
     stop_event = asyncio.Event()

@@ -13,21 +13,10 @@ from .adapters import DomDepthAdapter, MarketQuoteAdapter
 from .cache import InMemoryCacheBackend, RedisCacheBackend
 from .data_source_manager import DataSourceManager
 from .config import get_candle_intervals
-from .persistence import (
-    MariaDbPersistenceBackend,
-    NoopPersistenceBackend,
-    ParquetPersistenceBackend,
-)
+from .persistence import NoopPersistenceBackend, ParquetPersistenceBackend
 from src.ibbot.storage.parquet_writer import MarketDataParquetWriter
 from .quote_feed import QuoteFeed, resolve_default_quote_feed
 from src.ibbot.redis import DEFAULT_REDIS_URL
-from src.db import (
-    MariaDBConfigurationError,
-    SchemaBootstrapError,
-    ensure_schema,
-    market_event_writer,
-)
-from src.services.factories import create_service_metrics_writer
 
 __all__ = ["get_data_source_manager", "get_quote_feed"]
 
@@ -131,26 +120,6 @@ def _get_persistence_backend():
         return _persistence_backend
     except Exception as exc:
         logger.warning("Failed to initialise Parquet backend: {}", exc)
-
-    try:
-        result = ensure_schema(logger=logger)
-    except MariaDBConfigurationError as exc:
-        logger.info("MariaDB persistence disabled: {}", exc)
-    except SchemaBootstrapError as exc:
-        logger.warning("Database schema bootstrap failed: {}", exc)
-    except Exception as exc:  # pragma: no cover - defensive guard
-        logger.warning("Failed to bootstrap database schema: {}", exc)
-    else:
-        if result.created_tables:
-            logger.info("Created missing database tables: {}", ", ".join(result.created_tables))
-        _persistence_backend = MariaDbPersistenceBackend(
-            repository_factory=market_event_writer,
-            metric_writer_factory=lambda: create_service_metrics_writer(
-                logger_name="data-layer.metrics"
-            ),
-        )
-        logger.info("Using MariaDB persistence backend")
-        return _persistence_backend
 
     _persistence_backend = NoopPersistenceBackend()
     logger.info("Using noop persistence backend")
