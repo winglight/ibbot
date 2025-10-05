@@ -134,6 +134,14 @@ Object.assign(globalObj.appModules.utils, {
   slugifyStrategyName(value) {
     return String(value || '').toLowerCase();
   },
+  strategyFilenameToDisplayName(value) {
+    const base = String(value || '').replace(/\.py$/i, '').split('_');
+    return base.filter(Boolean).map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join(' ');
+  },
+  strategyDisplayNameToFilename(value) {
+    const base = String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/_+/g, '_').replace(/^_+|_+$/g, '');
+    return base ? `${base}.py` : '';
+  },
 });
 
 if (!globalObj.appModules.monitoring) {

@@ -93,6 +93,8 @@ requireMonitoringUtil(getTrendSuggestionLabel, 'getTrendSuggestionLabel');
 const {
     TrendSignalLabelPlugin,
     slugifyStrategyName,
+    strategyFilenameToDisplayName,
+    strategyDisplayNameToFilename,
     formatNumber: sharedFormatNumber,
     escapeHtml: sharedEscapeHtml,
     formatDuration: sharedFormatDuration,
@@ -105,6 +107,12 @@ if (!TrendSignalLabelPlugin || typeof TrendSignalLabelPlugin.afterDatasetsDraw !
 }
 if (typeof slugifyStrategyName !== 'function') {
     throw new Error('utils.slugifyStrategyName is required');
+}
+if (typeof strategyFilenameToDisplayName !== 'function') {
+    throw new Error('utils.strategyFilenameToDisplayName is required');
+}
+if (typeof strategyDisplayNameToFilename !== 'function') {
+    throw new Error('utils.strategyDisplayNameToFilename is required');
 }
 if (typeof sharedFormatNumber !== 'function') {
     throw new Error('utils.formatNumber is required');
@@ -1217,8 +1225,16 @@ class TradingApp {
                         if (data && data.success) {
                             const files = data.files || [];
                             let html = '<option value="new">[New File]</option>';
-                            for (const f of files) { html += `<option value="${f}">${f}</option>`; }
+                            for (const f of files) {
+                                const displayName = strategyFilenameToDisplayName(f)
+                                    || f.replace(/\.py$/i, '').replace(/[_\s]+/g, ' ').trim()
+                                    || f;
+                                const safeValue = sharedEscapeHtml(f);
+                                const safeLabel = sharedEscapeHtml(displayName);
+                                html += `<option value="${safeValue}">${safeLabel}</option>`;
+                            }
                             fileSelect.innerHTML = html;
+                            fileSelect.value = 'new';
                         }
                     } catch (err) { console.warn('Failed to load strategy files', err); }
                 }
@@ -1228,6 +1244,7 @@ class TradingApp {
         if (createStrategyBtn) {
             createStrategyBtn.addEventListener('click', async () => {
                 const nameInput = document.getElementById('strategyNameInput');
+                const filenamePreviewEl = document.getElementById('strategyFilenamePreview');
                 const nameRaw = (nameInput?.value || '').trim();
                 const strategy_type = document.getElementById('strategyTypeSelect')?.value || 'external';
                 const description = document.getElementById('strategyDescriptionInput')?.value || '';
@@ -1250,8 +1267,15 @@ class TradingApp {
                 if (strategy_type === 'internal' && (!name || name.length === 0)) {
                     const sel = selected_file || 'new';
                     if (sel && sel !== 'new') {
-                        name = sel.replace(/\.py$/i, '');
-                        if (nameInput) nameInput.value = name;
+                        const derivedName = strategyFilenameToDisplayName(sel)
+                            || sel.replace(/\.py$/i, '').replace(/[_\s]+/g, ' ').trim()
+                            || sel;
+                        name = derivedName;
+                        if (nameInput) nameInput.value = derivedName;
+                        if (filenamePreviewEl) {
+                            const derivedFilename = strategyDisplayNameToFilename(derivedName);
+                            filenamePreviewEl.textContent = derivedFilename || sel;
+                        }
                     }
                 }
                 if (!name) { this.showAlert('danger', 'Please enter strategy name'); return; }
@@ -1307,12 +1331,28 @@ class TradingApp {
 
         const nameInput = document.getElementById('strategyNameInput');
         const filenamePreview = document.getElementById('strategyFilenamePreview');
+        const fileSelect = document.getElementById('strategyFileSelect');
+        const updateFilenamePreview = () => {
+            if (!nameInput || !filenamePreview) return;
+            const filename = strategyDisplayNameToFilename(nameInput.value);
+            filenamePreview.textContent = filename || '';
+        };
         if (nameInput && filenamePreview) {
-            nameInput.addEventListener('input', () => {
-                const sanitized = slugifyStrategyName(nameInput.value);
-                filenamePreview.textContent = sanitized ? `${sanitized}.py` : '';
+            nameInput.addEventListener('input', updateFilenamePreview);
+        }
+        if (fileSelect && nameInput) {
+            fileSelect.addEventListener('change', () => {
+                const selected = fileSelect.value;
+                if (selected && selected !== 'new') {
+                    const displayName = strategyFilenameToDisplayName(selected)
+                        || selected.replace(/\.py$/i, '').replace(/[_\s]+/g, ' ').trim()
+                        || selected;
+                    nameInput.value = displayName;
+                }
+                updateFilenamePreview();
             });
         }
+        updateFilenamePreview();
 
         // Place order button
         document.getElementById('placeOrderBtn').addEventListener('click', () => {
