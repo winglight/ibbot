@@ -47,7 +47,7 @@
   - `hash:market:snapshot:<symbol>`：市场数据服务维护的快照，供 REST/WS 查询。
   - `stream:strategy:events`、`stream:risk:events`、`stream:notification:events`：各模块事件总线。
   - `hash:service:health:<module>`：每个服务上报健康信息（心跳时间、最近错误）。
-  - `hash:config:<module>`：配置参数，由主程序写入，模块订阅变化。
+  - `config` 表：配置参数由主程序写入，模块轮询版本号更新本地缓存。
   - `list:queue:strategy`：策略任务队列。
   - `zset:service_metrics:<service>:<metric>`：记录服务写入吞吐、延迟、队列深度等监控指标（默认保留 24 小时）。
 - **MariaDB**
@@ -71,8 +71,8 @@
 
 ### 3.5 环境与配置
 - 所有服务在启动时仅依赖必要环境变量（Redis/MariaDB 地址、服务名称等）；其他可运行时调整的参数（订阅列表、风控阈值、策略配置、行情刷新周期）通过配置模块加载：
-  - `configuration` 模块从 Redis `hash:config:<module>` 读取，支持热更新（订阅 `pubsub:config:update`）。
-  - 主程序提供页面与 API 管理配置，并写回 Redis。
+  - `configuration` 模块通过 `ConfigProvider` 读取数据库 `config` 表并轮询更新。
+  - 主程序提供页面与 API 管理配置，并写回数据库。
   - 每个服务仅在首次启动时需要的环境变量保留在 `.env`（如 IB 账号、密码、客户端 ID）。
 
 ## 4. 独立模块设计
@@ -89,7 +89,7 @@
   - 统一格式化（JSON/文本），支持按模块名称写入 `data/logs`。
   - 提供日志读取工具，供主程序分页展示。
 - **config 子模块**：
-  - 支持 `.env` + Redis 配置合并，提供 `ConfigProvider` 接口；监听配置变更。
+  - 支持 `.env` + MariaDB 配置合并，提供 `ConfigProvider` 接口并轮询数据库变更。
 - 所有服务必须依赖这些库，不可直接访问底层客户端，保证一致性。
 
 ### 4.2 IB 指令执行服务
@@ -184,7 +184,7 @@
 4. **容器控制**：
    - 集成 Docker Engine API 或 `docker-compose` 脚本，实现服务重启按钮。
 5. **配置中心**：
-   - UI 表单写入 Redis `hash:config:<module>`；触发 `pubsub:config:update`。
+  - UI 表单写入 MariaDB `config` 表；触发后台轮询刷新。
 6. **安全与权限**：
   - 服务控制与配置修改需鉴权，预留审计日志记录到 MariaDB。
 
