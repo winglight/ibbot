@@ -188,3 +188,39 @@ async def test_sizing_history_stream_filters_and_counts() -> None:
 
     metrics = runtime.health_snapshot()
     assert metrics["sizing_history_events"] == await redis.xlen(runtime.sizing_history_stream)
+
+
+async def test_apply_runtime_rule_update_refreshes_cache() -> None:
+    redis = FakeRedis()
+
+    async def factory() -> FakeRedis:
+        return redis
+
+    runtime = RiskRuntime(
+        redis_factory=factory,
+        trailing_tracker_factory=lambda _: None,
+    )
+
+    await runtime.save_risk_rule(
+        "ES",
+        {
+            "stop_loss": 5.0,
+            "take_profit": 10.0,
+            "rule_type": "trailing",
+        },
+    )
+
+    updated = await runtime.apply_runtime_rule_update(
+        "ES",
+        {"stop_loss": 6.5, "take_profit": 11.0},
+    )
+    assert updated["stop_loss"] == 6.5
+    assert updated["take_profit"] == 11.0
+
+    snapshot = runtime.get_rules_snapshot()
+    assert snapshot["ES"]["stop_loss"] == 6.5
+    assert snapshot["ES"]["take_profit"] == 11.0
+
+    stored_payload = json.loads(redis.hashes[runtime.rules_hash_key]["ES"])
+    assert stored_payload["stop_loss"] == 6.5
+    assert stored_payload["take_profit"] == 11.0

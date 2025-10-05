@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import inspect
 import json
+import math
 import os
 import uuid
 from dataclasses import dataclass, field
@@ -15,11 +16,12 @@ from services.risk.engine import RiskEngine, RiskEvent, RiskRule
 from src.ibbot import update_service_health
 from src.ibbot.logging import get_logger
 from src.ibbot.redis import (
+    PubSubListener,
+    ResponseError,
+    StreamMessage,
     ack_stream,
     enqueue_ib_command,
     read_stream,
-    ResponseError,
-    StreamMessage,
 )
 
 try:  # Optional dependency during testing environments.
@@ -86,6 +88,514 @@ RiskRulesRepositoryFactory = Callable[
     [], Awaitable[RiskRulesRepositoryFactoryResult] | RiskRulesRepositoryFactoryResult
 ]
 
+
+@dataclass(slots=True)
+class TrailingRuleState:
+    symbol: str
+    channel: str
+    rule: dict[str, Any]
+    tick_size: float
+    stop_offset: float | None
+    take_profit_offset: float | None
+    min_interval: float
+    price_threshold: float
+    fallback_direction: int
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+    last_price: float | None = None
+    last_update_at: datetime | None = None
+    last_direction_check: datetime | None = None
+    direction: int = 0
+    position_size: float | None = None
+
+
+class TrailingRuleTracker:
+    """Manage trailing-stop risk rules driven by live price updates."""
+
+    positions_snapshot_key: str = "account:positions"
+    price_channel_template: str = "pubsub:ib:price:{symbol}"
+
+    def __init__(
+        self,
+        runtime: "RiskRuntime",
+        *,
+        redis_factory: Callable[[], Awaitable[Redis]] | None = None,
+        pubsub_listener: PubSubListener | None = None,
+        reconnect_delay: float | None = None,
+    ) -> None:
+        self._runtime = runtime
+        self._redis_factory = redis_factory or runtime.redis_factory
+        self._pubsub = pubsub_listener or PubSubListener(
+            redis_factory=self._redis_factory,
+            reconnect_delay=reconnect_delay or runtime.reconnect_delay,
+        )
+        self._logger = get_logger(f"{runtime.logger_name}.trailing")
+        self._lock = asyncio.Lock()
+        self._states: dict[str, TrailingRuleState] = {}
+        self._channel_map: dict[str, str] = {}
+        self._subscribed_channels: set[str] = set()
+        self._running = False
+        self._pubsub_callback = self._handle_channel_message
+        self._position_refresh_seconds = 10.0
+        self._price_threshold_fraction = 0.2
+
+    # ------------------------------------------------------------------
+    # lifecycle management
+    # ------------------------------------------------------------------
+    async def start(self) -> None:
+        async with self._lock:
+            if self._running:
+                return
+            self._running = True
+        await self._pubsub.start()
+        try:
+            rules = await self._runtime.load_risk_rules()
+        except Exception:
+            rules = {}
+        if not rules:
+            rules = self._runtime.get_rules_snapshot()
+        await self.refresh_from_rules(rules)
+
+    async def stop(self) -> None:
+        async with self._lock:
+            if not self._running:
+                return
+            channels = list(self._subscribed_channels)
+            self._running = False
+            self._subscribed_channels.clear()
+            self._channel_map.clear()
+        for channel in channels:
+            self._pubsub.unregister_channel(channel)
+        await self._pubsub.stop()
+
+    # ------------------------------------------------------------------
+    # rule synchronisation
+    # ------------------------------------------------------------------
+    async def refresh_from_rules(
+        self, rules: Mapping[str, Mapping[str, Any]] | Sequence[Mapping[str, Any]] | None
+    ) -> None:
+        mapping: dict[str, Mapping[str, Any]] = {}
+        if isinstance(rules, Mapping):
+            mapping = {str(symbol): payload for symbol, payload in rules.items()}
+        elif isinstance(rules, Sequence):
+            mapping = {
+                self._runtime._normalise_symbol(str(payload.get("symbol"))) or str(index): payload
+                for index, payload in enumerate(rules)
+                if isinstance(payload, Mapping)
+            }
+
+        async with self._lock:
+            desired: dict[str, dict[str, Any]] = {}
+            for raw_symbol, payload in mapping.items():
+                symbol = self._runtime._normalise_symbol(raw_symbol) or raw_symbol
+                normalised = self._normalise_rule_payload(payload)
+                if not self._should_track(normalised):
+                    continue
+                desired[symbol] = normalised
+
+            # Update or create states for desired rules
+            for symbol, payload in desired.items():
+                state = self._states.get(symbol)
+                if state is None:
+                    state = self._build_state(symbol, payload)
+                    self._states[symbol] = state
+                else:
+                    state.rule = dict(payload)
+                    self._refresh_state_parameters(state)
+
+            # Remove states for rules no longer tracked
+            for symbol in [key for key in self._states.keys() if key not in desired]:
+                state = self._states.pop(symbol)
+                channel = state.channel
+                self._channel_map.pop(channel, None)
+                if channel in self._subscribed_channels:
+                    self._pubsub.unregister_channel(channel)
+                    self._subscribed_channels.discard(channel)
+
+            if self._running:
+                for symbol, state in self._states.items():
+                    channel = state.channel
+                    self._channel_map[channel] = symbol
+                    if channel not in self._subscribed_channels:
+                        self._pubsub.register_callback(channel, self._pubsub_callback)
+                        self._subscribed_channels.add(channel)
+
+    # ------------------------------------------------------------------
+    # pubsub handling
+    # ------------------------------------------------------------------
+    async def _handle_channel_message(self, channel: str, message: str) -> None:
+        symbol = self._channel_map.get(channel)
+        if not symbol:
+            return
+        async with self._lock:
+            state = self._states.get(symbol)
+        if state is None:
+            return
+        payload = self._decode_message(message)
+        if not payload:
+            return
+        price = self._extract_price(payload)
+        if price is None or not math.isfinite(price) or price <= 0:
+            return
+        await self._process_symbol(state, price, payload)
+
+    async def _process_symbol(
+        self, state: TrailingRuleState, price: float, payload: Mapping[str, Any]
+    ) -> None:
+        now = _utc_now()
+        async with state.lock:
+            previous_price = state.last_price
+            if (
+                previous_price is not None
+                and abs(price - previous_price) < state.price_threshold
+                and state.last_update_at is not None
+                and (now - state.last_update_at).total_seconds() < state.min_interval
+            ):
+                state.last_price = price
+                return
+
+            state.last_price = price
+            direction = await self._resolve_direction(state, now)
+            if direction == 0:
+                return
+            updates = self._calculate_updates(state, price, direction)
+            if not updates:
+                return
+        try:
+            updated = await self._runtime.apply_runtime_rule_update(
+                state.symbol,
+                updates,
+                timestamp=now,
+            )
+        except Exception:
+            self._logger.warning("Failed to apply trailing rule update for %s", state.symbol, exc_info=True)
+            return
+
+        if not isinstance(updated, Mapping):
+            return
+
+        async with state.lock:
+            state.rule = {str(k): v for k, v in updated.items()}
+            state.last_update_at = now
+
+    # ------------------------------------------------------------------
+    # helpers
+    # ------------------------------------------------------------------
+    def _normalise_rule_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        normalised = {str(key): value for key, value in payload.items()}
+        metadata = normalised.get("metadata")
+        if isinstance(metadata, Mapping):
+            for key, value in metadata.items():
+                key_str = str(key)
+                if key_str == "atr_params" and isinstance(value, Mapping):
+                    normalised.setdefault("atr_params", {str(k): v for k, v in value.items()})
+                    continue
+                if isinstance(value, Mapping):
+                    for nested_key, nested_value in value.items():
+                        nested_key_str = str(nested_key)
+                        normalised.setdefault(nested_key_str, nested_value)
+                else:
+                    normalised.setdefault(key_str, value)
+        return normalised
+
+    def _should_track(self, rule: Mapping[str, Any]) -> bool:
+        enabled = rule.get("enabled")
+        if enabled is not None and not self._to_bool(enabled):
+            return False
+        rule_type = str(rule.get("rule_type") or "").strip().lower()
+        if rule_type == "trailing":
+            return True
+        if self._to_bool(rule.get("auto_trailing"), default=False):
+            return True
+        if any(key in rule for key in ("trail_ticks", "trail_stop_ticks", "trail_take_profit_ticks")):
+            return True
+        if isinstance(rule.get("atr_params"), Mapping):
+            return True
+        return False
+
+    def _build_state(self, symbol: str, payload: Mapping[str, Any]) -> TrailingRuleState:
+        channel = self.price_channel_template.format(symbol=symbol)
+        state = TrailingRuleState(
+            symbol=symbol,
+            channel=channel,
+            rule={str(k): v for k, v in payload.items()},
+            tick_size=self._resolve_tick_size(payload),
+            stop_offset=None,
+            take_profit_offset=None,
+            min_interval=self._resolve_min_interval(payload),
+            price_threshold=0.0,
+            fallback_direction=self._infer_direction(payload),
+        )
+        self._refresh_state_parameters(state)
+        return state
+
+    def _refresh_state_parameters(self, state: TrailingRuleState) -> None:
+        state.tick_size = self._resolve_tick_size(state.rule)
+        state.min_interval = max(0.5, self._resolve_min_interval(state.rule))
+        state.stop_offset = self._resolve_stop_offset(state.rule, state.tick_size, state.stop_offset)
+        state.take_profit_offset = self._resolve_take_profit_offset(
+            state.rule, state.tick_size, state.take_profit_offset
+        )
+        baseline = max(filter(lambda x: x is not None and x > 0, [state.stop_offset, state.take_profit_offset]), default=0.0)
+        tick = state.tick_size if state.tick_size > 0 else 0.0
+        if baseline <= 0:
+            baseline = tick or 0.01
+        state.price_threshold = max(tick or 0.01, baseline * self._price_threshold_fraction)
+        state.fallback_direction = self._infer_direction(state.rule)
+
+    @staticmethod
+    def _decode_message(message: str) -> Mapping[str, Any] | None:
+        try:
+            payload = json.loads(message)
+        except json.JSONDecodeError:
+            return None
+        if isinstance(payload, Mapping):
+            return payload
+        return None
+
+    @staticmethod
+    def _extract_price(payload: Mapping[str, Any]) -> float | None:
+        for key in ("last", "price", "mid", "close"):
+            value = payload.get(key)
+            try:
+                price = float(value)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(price):
+                return price
+        return None
+
+    async def _resolve_direction(self, state: TrailingRuleState, now: datetime) -> int:
+        if state.direction != 0 and state.last_direction_check is not None:
+            if (now - state.last_direction_check).total_seconds() < self._position_refresh_seconds:
+                return state.direction
+        positions = await self._load_positions()
+        direction = 0
+        size: float | None = None
+        for item in positions:
+            symbol = self._runtime._normalise_symbol(str(item.get("symbol") or ""))
+            if symbol == state.symbol:
+                qty = self._to_float(item.get("position") or item.get("size") or item.get("quantity"))
+                if qty is None:
+                    continue
+                size = qty
+                if qty > 0:
+                    direction = 1
+                elif qty < 0:
+                    direction = -1
+                break
+        if direction == 0:
+            direction = state.fallback_direction
+        state.direction = direction
+        state.position_size = size
+        state.last_direction_check = now
+        return direction
+
+    async def _load_positions(self) -> list[Mapping[str, Any]]:
+        try:
+            redis = await self._runtime._get_cache_redis()
+        except Exception:
+            redis = None
+        if redis is None:
+            return []
+        try:
+            raw = await redis.get(self.positions_snapshot_key)
+        except Exception:
+            return []
+        if not raw:
+            return []
+        try:
+            payload = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            return []
+        entries: list[Mapping[str, Any]] = []
+        if isinstance(payload, Mapping):
+            data = payload.get("data") or payload.get("positions")
+            if isinstance(data, Sequence):
+                entries = [item for item in data if isinstance(item, Mapping)]
+        elif isinstance(payload, Sequence):
+            entries = [item for item in payload if isinstance(item, Mapping)]
+        return entries
+
+    def _calculate_updates(
+        self, state: TrailingRuleState, price: float, direction: int
+    ) -> dict[str, float]:
+        tolerance = max(state.tick_size * 0.1 if state.tick_size > 0 else 0.01, 1e-6)
+        rule = state.rule
+        updates: dict[str, float] = {}
+
+        existing_sl = self._to_float(rule.get("stop_loss") or rule.get("stop_loss_price"))
+        existing_tp = self._to_float(rule.get("take_profit") or rule.get("take_profit_price"))
+
+        stop_offset = state.stop_offset
+        if stop_offset is None and existing_sl is not None:
+            diff = (price - existing_sl) if direction > 0 else (existing_sl - price)
+            if diff > tolerance:
+                stop_offset = diff
+                state.stop_offset = diff
+
+        take_offset = state.take_profit_offset
+        if take_offset is None and existing_tp is not None:
+            diff = (existing_tp - price) if direction > 0 else (price - existing_tp)
+            if diff > tolerance:
+                take_offset = diff
+                state.take_profit_offset = diff
+
+        if stop_offset is not None and stop_offset > tolerance:
+            if direction > 0:
+                candidate = self._round_price(price - stop_offset, state.tick_size)
+                if existing_sl is None or candidate > existing_sl + tolerance:
+                    updates["stop_loss"] = candidate
+                    updates["stop_loss_price"] = candidate
+            else:
+                candidate = self._round_price(price + stop_offset, state.tick_size)
+                if existing_sl is None or candidate < existing_sl - tolerance:
+                    updates["stop_loss"] = candidate
+                    updates["stop_loss_price"] = candidate
+
+        if take_offset is not None and take_offset > tolerance:
+            if direction > 0:
+                candidate = self._round_price(price + take_offset, state.tick_size)
+                if existing_tp is None or candidate > existing_tp + tolerance:
+                    updates["take_profit"] = candidate
+                    updates["take_profit_price"] = candidate
+            else:
+                candidate = self._round_price(price - take_offset, state.tick_size)
+                if existing_tp is None or candidate < existing_tp - tolerance:
+                    updates["take_profit"] = candidate
+                    updates["take_profit_price"] = candidate
+
+        return updates
+
+    @staticmethod
+    def _round_price(value: float, tick_size: float) -> float:
+        if tick_size and tick_size > 0:
+            steps = round(value / tick_size)
+            return round(steps * tick_size, 6)
+        return round(value, 6)
+
+    @staticmethod
+    def _to_float(value: Any) -> float | None:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            return float(text)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _to_bool(value: Any, default: bool = True) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off"}:
+            return False
+        return default
+
+    def _resolve_tick_size(self, rule: Mapping[str, Any]) -> float:
+        for key in ("tick_size", "trail_tick_size", "min_tick", "tickSize"):
+            candidate = self._to_float(rule.get(key))
+            if candidate is not None and candidate > 0:
+                return candidate
+        return 0.0
+
+    def _resolve_min_interval(self, rule: Mapping[str, Any]) -> float:
+        for key in ("trail_min_interval", "trail_update_interval"):
+            candidate = self._to_float(rule.get(key))
+            if candidate is not None and candidate > 0:
+                return candidate
+        atr_params = rule.get("atr_params")
+        if isinstance(atr_params, Mapping):
+            candidate = self._to_float(atr_params.get("update_throttle"))
+            if candidate is not None and candidate > 0:
+                return candidate
+        return 2.0
+
+    def _resolve_stop_offset(
+        self, rule: Mapping[str, Any], tick_size: float, existing: float | None
+    ) -> float | None:
+        for key in ("trail_stop_distance", "trail_stop_offset", "trail_stop_ticks", "trail_ticks"):
+            candidate = self._extract_offset(rule.get(key), tick_size, key.endswith("ticks"))
+            if candidate is not None and candidate > 0:
+                return candidate
+        atr_params = rule.get("atr_params")
+        atr_value = self._to_float(
+            rule.get("atr_value")
+            or rule.get("atr")
+            or rule.get("last_atr")
+            or (atr_params.get("atr") if isinstance(atr_params, Mapping) else None)
+        )
+        if atr_value and isinstance(atr_params, Mapping):
+            multiplier = self._to_float(
+                atr_params.get("multiplier_sl")
+                or atr_params.get("stop_multiplier")
+                or atr_params.get("multiplier")
+            )
+            if multiplier and multiplier > 0:
+                return atr_value * multiplier
+        return existing
+
+    def _resolve_take_profit_offset(
+        self, rule: Mapping[str, Any], tick_size: float, existing: float | None
+    ) -> float | None:
+        for key in (
+            "trail_take_profit_distance",
+            "trail_take_profit_ticks",
+            "trail_target_ticks",
+        ):
+            candidate = self._extract_offset(rule.get(key), tick_size, key.endswith("ticks"))
+            if candidate is not None and candidate > 0:
+                return candidate
+        atr_params = rule.get("atr_params")
+        atr_value = self._to_float(
+            rule.get("atr_value")
+            or rule.get("atr")
+            or rule.get("last_atr")
+            or (atr_params.get("atr") if isinstance(atr_params, Mapping) else None)
+        )
+        if atr_value and isinstance(atr_params, Mapping):
+            multiplier = self._to_float(
+                atr_params.get("multiplier_tp")
+                or atr_params.get("target_multiplier")
+            )
+            if multiplier and multiplier > 0:
+                return atr_value * multiplier
+        if existing is not None and existing > 0:
+            return existing
+        return None
+
+    def _extract_offset(self, value: Any, tick_size: float, is_ticks: bool) -> float | None:
+        candidate = self._to_float(value)
+        if candidate is None or candidate <= 0:
+            return None
+        if is_ticks and tick_size > 0:
+            return candidate * tick_size
+        return candidate
+
+    def _infer_direction(self, rule: Mapping[str, Any]) -> int:
+        for key in ("trail_direction", "direction", "position_side"):
+            value = rule.get(key)
+            if isinstance(value, str):
+                text = value.strip().lower()
+                if text in {"long", "buy", "bull"}:
+                    return 1
+                if text in {"short", "sell", "bear"}:
+                    return -1
+        qty = self._to_float(rule.get("position") or rule.get("position_size"))
+        if qty is not None:
+            if qty > 0:
+                return 1
+            if qty < 0:
+                return -1
+        return 0
 
 def create_risk_snapshot_repository_factory(
     *, logger_name: str = "db.risk"
@@ -159,6 +669,7 @@ class RiskRuntime:
     cache_source: str = "risk-service"
     config_measurement: str = "risk_config_snapshot"
     rules_measurement: str = "risk_rule_snapshot"
+    trailing_tracker_factory: Callable[["RiskRuntime"], "TrailingRuleTracker" | None] | None = None
 
     _engine: RiskEngine = field(default_factory=RiskEngine, init=False, repr=False)
     _redis: Redis | None = field(default=None, init=False, repr=False)
@@ -199,6 +710,23 @@ class RiskRuntime:
     _config_repository_created: bool = field(
         default=False, init=False, repr=False
     )
+    _trailing_tracker: "TrailingRuleTracker" | None = field(
+        default=None, init=False, repr=False
+    )
+
+    def __post_init__(self) -> None:
+        tracker: TrailingRuleTracker | None = None
+        if self.trailing_tracker_factory is not None:
+            try:
+                tracker = self.trailing_tracker_factory(self)
+            except Exception:
+                tracker = None
+        if tracker is None:
+            try:
+                tracker = TrailingRuleTracker(self)
+            except Exception:
+                tracker = None
+        self._trailing_tracker = tracker
 
     # ------------------------------------------------------------------
     # redis helpers
@@ -505,6 +1033,57 @@ class RiskRuntime:
             self.refresh_snapshots(), name="risk-refresh-snapshots"
         )
 
+    async def apply_runtime_rule_update(
+        self,
+        symbol: str,
+        updates: Mapping[str, Any],
+        *,
+        timestamp: datetime | str | None = None,
+    ) -> dict[str, Any]:
+        symbol_normalised = self._normalise_symbol(symbol)
+        if not symbol_normalised:
+            raise ValueError("risk rule requires a symbol")
+        existing = self._rules_snapshot.get(symbol_normalised)
+        if existing is None:
+            return {}
+
+        merged = self._merge_rule_payload(existing, updates, symbol_normalised)
+        ts_value: str
+        if isinstance(timestamp, datetime):
+            ts_value = timestamp.isoformat()
+        elif isinstance(timestamp, str) and timestamp:
+            ts_value = timestamp
+        else:
+            ts_value = _utc_now().isoformat()
+        merged["updated_at"] = ts_value
+        normalised = RiskRule.normalise_payload(merged)
+        normalised["symbol"] = symbol_normalised
+        normalised["updated_at"] = ts_value
+
+        redis = await self._get_cache_redis()
+        if redis is not None:
+            mapping = {symbol_normalised: self._encode_value(normalised)}
+            await redis.hset(self.rules_hash_key, mapping=mapping)
+
+        self._update_rule_snapshot(symbol_normalised, normalised, ts_value)
+        await self._reload_engine_from_snapshots()
+
+        rules_payload = self.get_rules_snapshot()
+        config_payload = self.get_config_snapshot()
+        try:
+            await self._write_cache_snapshot(config_payload, rules_payload, ts_value)
+        except Exception:
+            logger = self._logger or get_logger(self.logger_name)
+            logger.debug("Failed to refresh risk rule cache during runtime update", exc_info=True)
+        try:
+            await self._publish_rules_update_event(rules_payload, ts_value)
+        except Exception:
+            logger = self._logger or get_logger(self.logger_name)
+            logger.debug(
+                "Failed to publish risk rule update during runtime update", exc_info=True
+            )
+        return normalised
+
     async def save_risk_rule(
         self, symbol: str, updates: Mapping[str, Any]
     ) -> dict[str, Any]:
@@ -547,6 +1126,13 @@ class RiskRuntime:
         self._update_rule_snapshot(symbol_normalised, normalised, timestamp)
         await self._reload_engine_from_snapshots()
         self._schedule_snapshot_refresh()
+        tracker = self._trailing_tracker
+        if tracker is not None:
+            try:
+                await tracker.refresh_from_rules(self.get_rules_snapshot())
+            except Exception:
+                logger = self._logger or get_logger(self.logger_name)
+                logger.debug("Failed to refresh trailing tracker after rule save", exc_info=True)
         return normalised
 
     async def delete_risk_rule(self, symbol: str) -> bool:
@@ -582,6 +1168,13 @@ class RiskRuntime:
             self._remove_rule_snapshot(symbol_normalised, timestamp)
             await self._reload_engine_from_snapshots()
             self._schedule_snapshot_refresh()
+        tracker = self._trailing_tracker
+        if tracker is not None:
+            try:
+                await tracker.refresh_from_rules(self.get_rules_snapshot())
+            except Exception:
+                logger = self._logger or get_logger(self.logger_name)
+                logger.debug("Failed to refresh trailing tracker after rule delete", exc_info=True)
         return removed
 
     async def reload_from_storage(
@@ -707,6 +1300,13 @@ class RiskRuntime:
             else:
                 self._rules_snapshot_timestamp = self._config_snapshot_timestamp
             await self._publish_snapshots(*snapshot)
+            tracker = self._trailing_tracker
+            if tracker is not None:
+                try:
+                    await tracker.refresh_from_rules(self._rules_snapshot)
+                except Exception:
+                    logger = self._logger or get_logger(self.logger_name)
+                    logger.debug("Failed to refresh trailing tracker after config update", exc_info=True)
 
     def _build_snapshots(
         self, config: Mapping[str, Any]
@@ -1471,6 +2071,13 @@ class RiskRuntime:
         self._stop_event.clear()
         self._market_task = asyncio.create_task(self._market_loop(), name="risk-market-loop")
         self._results_task = asyncio.create_task(self._results_loop(), name="risk-results-loop")
+        tracker = self._trailing_tracker
+        if tracker is not None:
+            try:
+                await tracker.start()
+            except Exception:
+                if self._logger:
+                    self._logger.warning("Failed to start trailing tracker", exc_info=True)
         await self._update_health(healthy=True, extra_metrics={"state": "started"})
 
     async def stop(self) -> None:
@@ -1498,6 +2105,10 @@ class RiskRuntime:
                 last_error="stopped",
                 extra_metrics={"state": "stopped"},
             )
+        tracker = self._trailing_tracker
+        if tracker is not None:
+            with contextlib.suppress(Exception):
+                await tracker.stop()
         self._redis = None
         self._pending_commands.clear()
         await self._shutdown_risk_rules_repository()
