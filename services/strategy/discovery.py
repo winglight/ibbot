@@ -422,26 +422,10 @@ async def sync_strategy_metadata(
     discovered = discover_builtin_strategies()
     merged: dict[str, Any] = {str(k): v for k, v in configured.items()}
 
-    filesystem = discover_filesystem_strategies(strategy_path)
-
-    for name, spec in filesystem.items():
-        existing_spec = merged.get(name)
-        if existing_spec is None:
-            merged[name] = spec
-            continue
-        if isinstance(existing_spec, Mapping):
-            base_spec = dict(existing_spec)
-        else:
-            base_spec = {"factory": existing_spec}
-        metadata_payload = dict(base_spec.get("metadata") or {})
-        for key, value in dict(spec.get("metadata") or {}).items():
-            metadata_payload.setdefault(key, value)
-        combined = {**spec, **base_spec}
-        if metadata_payload:
-            combined["metadata"] = metadata_payload
-        if base_spec.get("factory"):
-            combined["factory"] = base_spec.get("factory")
-        merged[name] = combined
+    if strategy_path and logger is not None:
+        logger.debug(
+            "Skipping automatic filesystem strategy import for path %s", strategy_path
+        )
 
     for name, factory in discovered.items():
         merged.setdefault(name, {"factory": factory})
