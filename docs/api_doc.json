@@ -1169,31 +1169,6 @@
     ],
     "dom": [
       {
-        "method": "POST",
-        "path": "/api/dom/automation/schedule",
-        "summary": "Configure Dom Automation",
-        "requires_auth": false,
-        "query_params": null,
-        "headers": null,
-        "request_body": "AutomationScheduleRequest",
-        "response_codes": [
-          "200",
-          "422"
-        ]
-      },
-      {
-        "method": "GET",
-        "path": "/api/dom/automation/status",
-        "summary": "Get Dom Automation Status",
-        "requires_auth": false,
-        "query_params": null,
-        "headers": null,
-        "request_body": null,
-        "response_codes": [
-          "200"
-        ]
-      },
-      {
         "method": "GET",
         "path": "/api/dom/data",
         "summary": "Get Dom Data",
@@ -1236,19 +1211,6 @@
         ],
         "headers": null,
         "request_body": null,
-        "response_codes": [
-          "200",
-          "422"
-        ]
-      },
-      {
-        "method": "POST",
-        "path": "/api/dom/optimize",
-        "summary": "Optimize Dom Parameters",
-        "requires_auth": false,
-        "query_params": null,
-        "headers": null,
-        "request_body": "OptimizeRequest",
         "response_codes": [
           "200",
           "422"

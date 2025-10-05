@@ -5,7 +5,6 @@
 市场数据,历史数据接口,按需拉取K线与图表数据并规范化返回结构,已完成,高,FastAPI + pandas,src/routes/market_data.py; src/ibkr_client.py
 市场数据,实时价格流,统一的行情流服务支持WebSocket与REST查询最新价,已完成,高,asyncio,src/market_data_stream.py; src/routes/market_data.py
 DOM分析,深度行情服务,封装深度订阅、缓存与报警通知,已完成,高,FastAPI + asyncio,src/dom_service.py; src/routes/dom.py
-DOM分析,参数调优,集成优化器与自动化调度接口,已完成,中,scikit-learn + 自定义优化器,src/dom_optimizer.py; src/routes/dom.py
 订单管理,订单路由与风控联动,统一下单、撤单、反手与批量取消并校验风控限制,已完成,高,ib_insync + FastAPI,services/orders/main.py; src/routes/orders.py
 订单管理,订单历史同步,支持佣金补录与外部同步策略,已完成,中,Orders Service + Redis,src/routes/orders.py; services/orders/main.py
 风险控制,风险规则管理,提供风控规则CRUD、阈值与ATR跟踪,已完成,高,FastAPI + APScheduler,src/risk_manager.py; src/routes/risk.py
