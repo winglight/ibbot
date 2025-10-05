@@ -18,11 +18,15 @@ from .base import (
     use_connection,
 )
 
-__all__ = ["OrderRepository", "OrderRepositoryError"]
+__all__ = ["OrderRepository", "OrderRepositoryError", "OrderNotFoundError"]
 
 
 class OrderRepositoryError(RepositoryError):
     """Raised when persisting order events fails."""
+
+
+class OrderNotFoundError(OrderRepositoryError):
+    """Raised when an update is requested but no existing order matches."""
 
 
 def _utc_now() -> datetime:
@@ -240,7 +244,7 @@ def _normalise_order_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     action_text = _coerce_str(action_value)
 
     exchange_value = _first_nonempty(_lookup("exchange"))
-    exchange = _coerce_str(exchange_value)
+    exchange_text = _coerce_str(exchange_value)
 
     quantity_value = _coerce_float(
         _lookup(
@@ -317,8 +321,8 @@ def _normalise_order_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         "raw_payload": _normalise_raw(payload),
     }
 
-    if exchange:
-        normalised["exchange"] = exchange
+    if exchange_text:
+        normalised["exchange"] = exchange_text
 
     normalised["strategy"] = strategy_value
 
@@ -390,88 +394,102 @@ class OrderRepository:
     def __init__(self, *, logger_name: str = "db.orders") -> None:
         self._logger = get_logger(logger_name)
 
+    async def insert_order(self, payload: Mapping[str, Any]) -> int:
+        normalised = _normalise_order_payload(payload)
+        return await self._execute_db_write(
+            self._insert_order_sync, normalised, operation="insert"
+        )
+
+    async def update_order(self, payload: Mapping[str, Any]) -> None:
+        normalised = _normalise_order_payload(payload)
+        await self._execute_db_write(
+            self._update_order_sync, normalised, operation="update"
+        )
+
     async def upsert_order(
         self, payload: Mapping[str, Any], *, allow_insert: bool = True
     ) -> int | None:
         normalised = _normalise_order_payload(payload)
-
         try:
-            return await run_in_thread(
-                self._write_order, normalised, allow_insert=allow_insert
+            await self._execute_db_write(
+                self._update_order_sync, normalised, operation="update"
             )
-        except RepositoryValidationError:
+            return None
+        except OrderNotFoundError:
+            if not allow_insert:
+                return None
+            return await self._execute_db_write(
+                self._insert_order_sync, normalised, operation="insert"
+            )
+
+    async def _execute_db_write(
+        self,
+        func: Any,
+        normalised: Mapping[str, Any],
+        *,
+        operation: str,
+        **kwargs: Any,
+    ) -> Any:
+        try:
+            return await run_in_thread(func, normalised, **kwargs)
+        except (RepositoryValidationError, OrderNotFoundError):
             raise
         except MariaDBConfigurationError as exc:
             raise OrderRepositoryError(str(exc)) from exc
         except Exception as exc:  # pragma: no cover - log and wrap
             order_id = normalised.get("order_id")
-            self._logger.exception("Failed to upsert order %s", order_id)
-            raise OrderRepositoryError("Failed to upsert order") from exc
+            self._logger.exception(
+                "Failed to %s order %s", operation, order_id
+            )
+            raise OrderRepositoryError(f"Failed to {operation} order") from exc
 
-    def _write_order(self, row: Mapping[str, Any], *, allow_insert: bool = True) -> int | None:
+    def _prepare_order_row(
+        self, row: Mapping[str, Any]
+    ) -> tuple[dict[str, Any], str | None, str | None, str | None, str | None]:
+        prepared = {key: value for key, value in dict(row).items() if key != "id"}
+        if prepared.get("raw_payload") is not None:
+            prepared["raw_payload"] = json_dumps(prepared["raw_payload"])
+
+        if not prepared:
+            raise RepositoryValidationError("Normalised order payload is empty")
+
+        command_id = prepared.get("command_id")
+        ib_order_id = prepared.get("ib_order_id")
+        client_order_id = prepared.get("client_order_id")
+        order_id = prepared.get("order_id")
+
+        if command_id is not None:
+            command_id = str(command_id)
+            prepared["command_id"] = command_id
+        if ib_order_id is not None:
+            ib_order_id = str(ib_order_id)
+            prepared["ib_order_id"] = ib_order_id
+        if client_order_id is not None:
+            client_order_id = str(client_order_id)
+            prepared["client_order_id"] = client_order_id
+        if order_id is not None:
+            order_id = str(order_id)
+            prepared["order_id"] = order_id
+
+        if command_id is None and ib_order_id is None:
+            raise RepositoryValidationError(
+                "Normalised order payload requires a command_id or ib_order_id"
+            )
+
+        return prepared, command_id, ib_order_id, client_order_id, order_id
+
+    def _insert_order_sync(self, row: Mapping[str, Any]) -> int:
+        prepared, *_ = self._prepare_order_row(row)
+
         with use_connection() as connection:
-            prepared = {key: value for key, value in dict(row).items() if key != "id"}
-            if prepared.get("raw_payload") is not None:
-                prepared["raw_payload"] = json_dumps(prepared["raw_payload"])
-
-            if not prepared:
-                raise RepositoryValidationError("Normalised order payload is empty")
-
-            command_id = prepared.get("command_id")
-            ib_order_id = prepared.get("ib_order_id")
-            client_order_id = prepared.get("client_order_id")
-            order_id = prepared.get("order_id")
-
-            if command_id is not None:
-                command_id = str(command_id)
-                prepared["command_id"] = command_id
-            if ib_order_id is not None:
-                ib_order_id = str(ib_order_id)
-                prepared["ib_order_id"] = ib_order_id
-            if client_order_id is not None:
-                client_order_id = str(client_order_id)
-                prepared["client_order_id"] = client_order_id
-            if order_id is not None:
-                order_id = str(order_id)
-                prepared["order_id"] = order_id
-
-            if command_id is None and ib_order_id is None:
-                raise RepositoryValidationError(
-                    "Normalised order payload requires a command_id or ib_order_id"
-                )
-
             cursor = connection.cursor()
             try:
                 if is_sqlite(connection):
-                    match_column, match_value = self._find_existing_sqlite(
-                        cursor, command_id, ib_order_id, client_order_id, order_id
-                    )
-                    if match_column is None:
-                        if not allow_insert:
-                            return None
-                        inserted_id = self._insert_sqlite(cursor, prepared)
-                        connection.commit()
-                        return inserted_id
-                    self._update_sqlite(cursor, prepared, match_column, match_value)
-                    connection.commit()
-                    return None
-
-                match_column, match_value = self._find_existing_mariadb(
-                    cursor,
-                    command_id,
-                    ib_order_id,
-                    client_order_id,
-                    order_id,
-                )
-                if match_column is None:
-                    if not allow_insert:
-                        return None
+                    inserted_id = self._insert_sqlite(cursor, prepared)
+                else:
                     inserted_id = self._insert_mariadb(cursor, prepared)
-                    connection.commit()
-                    return inserted_id
-                self._update_mariadb(cursor, prepared, match_column, match_value)
                 connection.commit()
-                return None
+                return inserted_id
             except Exception:
                 try:
                     connection.rollback()
@@ -484,14 +502,57 @@ class OrderRepository:
                 except Exception:  # pragma: no cover - defensive
                     pass
 
-    def _find_existing_sqlite(
+    def _update_order_sync(self, row: Mapping[str, Any]) -> None:
+        (
+            prepared,
+            command_id,
+            ib_order_id,
+            client_order_id,
+            order_id,
+        ) = self._prepare_order_row(row)
+
+        with use_connection() as connection:
+            cursor = connection.cursor()
+            try:
+                match_column, match_value = self._locate_existing(
+                    connection,
+                    cursor,
+                    command_id=command_id,
+                    ib_order_id=ib_order_id,
+                    client_order_id=client_order_id,
+                    order_id=order_id,
+                )
+
+                if is_sqlite(connection):
+                    self._update_sqlite(cursor, prepared, match_column, match_value)
+                else:
+                    self._update_mariadb(cursor, prepared, match_column, match_value)
+                connection.commit()
+            except OrderNotFoundError:
+                raise
+            except Exception:
+                try:
+                    connection.rollback()
+                except Exception:  # pragma: no cover - defensive
+                    pass
+                raise
+            finally:
+                try:
+                    cursor.close()
+                except Exception:  # pragma: no cover - defensive
+                    pass
+
+    def _locate_existing(
         self,
+        connection: Any,
         cursor: Any,
+        *,
         command_id: str | None,
         ib_order_id: str | None,
         client_order_id: str | None,
         order_id: str | None,
-    ) -> tuple[str | None, str | None]:
+    ) -> tuple[str, str]:
+        placeholder = "?" if is_sqlite(connection) else "%s"
         for column, value in _iter_identifier_candidates(
             command_id=command_id,
             ib_order_id=ib_order_id,
@@ -499,12 +560,12 @@ class OrderRepository:
             order_id=order_id,
         ):
             cursor.execute(
-                f"SELECT id FROM orders WHERE {column} = ?", (value,)
+                f"SELECT id FROM orders WHERE {column} = {placeholder}", (value,)
             )
             row = cursor.fetchone()
             if row:
                 return column, value
-        return None, None
+        raise OrderNotFoundError("Order not found for update")
 
     def _insert_sqlite(self, cursor: Any, prepared: dict[str, Any]) -> int:
         columns = list(prepared.keys())
@@ -548,28 +609,6 @@ class OrderRepository:
             assignments=assignments, column=match_column
         )
         cursor.execute(sql, params)
-
-    def _find_existing_mariadb(
-        self,
-        cursor: Any,
-        command_id: str | None,
-        ib_order_id: str | None,
-        client_order_id: str | None,
-        order_id: str | None,
-    ) -> tuple[str | None, str | None]:
-        for column, value in _iter_identifier_candidates(
-            command_id=command_id,
-            ib_order_id=ib_order_id,
-            client_order_id=client_order_id,
-            order_id=order_id,
-        ):
-            cursor.execute(
-                f"SELECT id FROM orders WHERE {column} = %s", (value,)
-            )
-            row = cursor.fetchone()
-            if row:
-                return column, value
-        return None, None
 
     def _insert_mariadb(self, cursor: Any, prepared: dict[str, Any]) -> int:
         columns = list(prepared.keys())
