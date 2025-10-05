@@ -271,15 +271,50 @@ async def _diagnose_mariadb(config: Mapping[str, str], *, dry_run: bool) -> Diag
     details["missing_tables"] = missing_tables
 
     if missing_tables:
-        return DiagnosticResult(
-            name="MariaDB",
-            success=False,
-            message=(
-                "Database is reachable but required tables are missing: "
-                + ", ".join(missing_tables)
-            ),
-            details=details,
-        )
+        bootstrap_error: str | None = None
+        try:
+            from src.db.bootstrap import SchemaBootstrapError, ensure_schema  # noqa: WPS433
+        except ImportError as exc:
+            bootstrap_error = f"bootstrap module unavailable: {exc}"
+        else:
+            try:
+                result = ensure_schema()
+            except SchemaBootstrapError as exc:
+                bootstrap_error = str(exc)
+            except Exception as exc:  # pragma: no cover - environment dependent
+                bootstrap_error = str(exc)
+            else:
+                details["bootstrap_created"] = list(result.created_tables)
+                table_rows = run_sql_query(table_query)
+                available_tables = {
+                    row.get("table_name") for row in table_rows if row.get("table_name")
+                }
+                details["tables_present"] = sorted(available_tables)
+                missing_tables = sorted(REQUIRED_DB_TABLES - available_tables)
+                details["missing_tables"] = missing_tables
+                if not missing_tables:
+                    return DiagnosticResult(
+                        name="MariaDB",
+                        success=True,
+                        message="Connectivity checks succeeded after automatic bootstrap.",
+                        details=details,
+                    )
+
+        if bootstrap_error is not None:
+            details["bootstrap_error"] = bootstrap_error
+
+        if missing_tables:
+            return DiagnosticResult(
+                name="MariaDB",
+                success=False,
+                message=(
+                    "Database is reachable but required tables are missing: "
+                    + ", ".join(missing_tables)
+                    + "; start orders/strategy/data-layer services or run "
+                    "'python -m src.db.bootstrap' (scripts/sql/db.sql)."
+                ),
+                details=details,
+            )
 
     return DiagnosticResult(
         name="MariaDB",

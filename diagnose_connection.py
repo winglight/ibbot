@@ -183,13 +183,44 @@ async def test_mariadb_connection() -> bool:
     tables = {row.get("table_name") for row in table_rows if row.get("table_name")}
     missing = sorted(REQUIRED_DB_TABLES - tables)
     if missing:
-        print("   ✗ 数据库缺少必要表:")
+        print("   ! 数据库缺少必要表:")
         for table in missing:
             print(f"     - {table}")
-        print("   解决方案:")
-        print("     - 运行 scripts/sql/20240522_init_mariadb.sql 初始化表结构")
-        print("     - 或执行最新的数据库迁移脚本")
-        return False
+        print("   -> 尝试自动创建缺失的表 (scripts/sql/db.sql)")
+        try:
+            from src.db.bootstrap import SchemaBootstrapError, ensure_schema  # noqa: WPS433
+        except ImportError as exc:
+            print(f"   ✗ 自动建表模块不可用: {exc}")
+        else:
+            try:
+                result = ensure_schema(logger=logger)
+            except SchemaBootstrapError as exc:
+                print(f"   ✗ 自动建表失败: {exc}")
+            except Exception as exc:  # pragma: no cover - environment specific
+                print(f"   ✗ 自动建表失败: {exc}")
+            else:
+                created_tables = list(result.created_tables)
+                if created_tables:
+                    print(f"   ✓ 已创建数据表: {', '.join(created_tables)}")
+                else:
+                    print("   ✓ 自动建表程序确认所有必需表均已存在")
+                table_rows = run_sql_query(table_query)
+                tables = {row.get("table_name") for row in table_rows if row.get("table_name")}
+                missing = sorted(REQUIRED_DB_TABLES - tables)
+
+        if missing:
+            print("   ✗ 数据库仍缺少必要表:")
+            for table in missing:
+                print(f"     - {table}")
+            print("   解决方案:")
+            print("     - 启动 orders/strategy/data-layer 服务以触发自动建表")
+            print(
+                "     - 或运行 'python -m src.db.bootstrap' （使用 scripts/sql/db.sql 兜底初始化）"
+            )
+            return False
+
+        print("   ✓ 所有必需表均已准备就绪")
+        return True
 
     print("   ✓ 所有必需表均已存在")
 

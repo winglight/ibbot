@@ -35,15 +35,14 @@ python scripts/diagnose_foundation.py --dry-run
 python diagnose_connection.py
 ```
 
-若脚本提示缺少表结构，请参考 `scripts/sql/20240522_init_mariadb.sql` 初始化数据
-库。该脚本同步了订单表的最新字段（自动递增 `id` 主键、命令/客户端/IB ID、
-生命周期时间戳、成交价格与 JSON 原始载荷等），并创建了仓储依赖的唯一索引
-与辅助索引。所有历史引用 `src.ibbot.db` 的模块都应替换为上述新接口，以避免在
-运行时遇到 `ImportError`。
+若脚本提示缺少表结构，可启动 `services/orders`、`services/strategy` 或数据层服
+务触发自动建表流程（内部使用 `scripts/sql/db.sql`）。也可以运行 `python -m
+src.db.bootstrap` 手动兜底。所有历史引用 `src.ibbot.db` 的模块都应替换为上述新接
+口，以避免在运行时遇到 `ImportError`。
 
 ## 从 SQLite 迁移历史数据
 
-- 先执行 `scripts/sql/20240522_init_mariadb.sql` 创建新的 MariaDB 表结构。
+- 如需手动初始化，可执行 `python -m src.db.bootstrap`（底层读取 `scripts/sql/db.sql`）。
 - 运行 `python scripts/sqlite_to_mariadb.py`（可选 `--sqlite` / `--tables` 参数）
   将旧版 `data/trading_bot.db` 中的订单、风控、配置等表迁移到 MariaDB。脚本会
   自动跳过 DOM 与 K 线相关的数据表。

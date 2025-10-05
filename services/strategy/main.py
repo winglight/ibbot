@@ -51,6 +51,19 @@ async def run_service() -> None:
     """Initialise dependencies and start the consumer loop."""
 
     logger = get_logger("ibbot.services.strategy")
+
+    try:
+        from src.db.bootstrap import SchemaBootstrapError, ensure_schema
+    except ImportError:  # pragma: no cover - optional dependency in minimal builds
+        logger.debug("Database bootstrap helper unavailable; skipping schema check")
+    else:
+        try:
+            await asyncio.to_thread(ensure_schema, logger=logger)
+        except SchemaBootstrapError as exc:
+            logger.exception("Database schema bootstrap failed: {}", exc)
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.warning("Database schema bootstrap skipped: {}", exc)
+
     redis_url = _resolve_redis_url("STRATEGY_REDIS_URL")
     redis = await get_redis_client(redis_url)
 

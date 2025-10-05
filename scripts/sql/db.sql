@@ -124,3 +124,60 @@ CREATE TABLE notification_history (
                     sent_at TEXT,
                     created_at TEXT NOT NULL
                 );
+CREATE TABLE market_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_type TEXT NOT NULL,
+                    topic TEXT NOT NULL,
+                    symbol TEXT,
+                    source TEXT,
+                    payload TEXT,
+                    meta TEXT,
+                    ts_ns INTEGER,
+                    recorded_at TEXT NOT NULL,
+                    ingested_at TEXT NOT NULL
+                );
+CREATE INDEX idx_market_events_topic_recorded
+                ON market_events(topic, recorded_at DESC)
+                ;
+CREATE INDEX idx_market_events_type_ingested
+                ON market_events(event_type, ingested_at DESC)
+                ;
+CREATE TABLE market_prices (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    symbol TEXT NOT NULL,
+                    bid REAL,
+                    ask REAL,
+                    bid_size REAL,
+                    ask_size REAL,
+                    source TEXT,
+                    observed_at TEXT NOT NULL,
+                    extra TEXT
+                );
+CREATE INDEX idx_market_prices_symbol_observed
+                ON market_prices(symbol, observed_at DESC)
+                ;
+CREATE TABLE risk_config_snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    service TEXT NOT NULL,
+                    payload TEXT,
+                    rules_count INTEGER DEFAULT 0,
+                    updated_at_text TEXT,
+                    captured_at TEXT NOT NULL
+                );
+CREATE INDEX idx_risk_config_snapshots_service_time
+                ON risk_config_snapshots(service, captured_at DESC)
+                ;
+CREATE TABLE risk_rule_snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    service TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    payload TEXT,
+                    updated_at_text TEXT,
+                    captured_at TEXT NOT NULL
+                );
+CREATE INDEX idx_risk_rule_snapshots_service_symbol
+                ON risk_rule_snapshots(service, symbol)
+                ;
+CREATE INDEX idx_risk_rule_snapshots_captured
+                ON risk_rule_snapshots(captured_at DESC)
+                ;

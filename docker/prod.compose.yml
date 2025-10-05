@@ -5,7 +5,7 @@ services:
   mariadb:
     volumes:
       - ${IBBOT_DB_DATA:-/var/lib/ibbot/mariadb}:/var/lib/mysql
-      - ${IBBOT_DB_INIT_SQL:-./scripts/sql/20240522_init_mariadb.sql}:/docker-entrypoint-initdb.d/001-init.sql:ro
+      - ${IBBOT_DB_INIT_SQL:-./scripts/sql/db.sql}:/docker-entrypoint-initdb.d/001-init.sql:ro
   ib-gateway:
     environment:
       TRADING_MODE: ${TRADING_MODE:-live}

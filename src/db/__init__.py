@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from .async_support import run_in_thread
+from .bootstrap import BootstrapResult, SchemaBootstrapError, ensure_schema
 from .config import DatabaseConfigError, resolve_database_url
 from .mariadb import (
     MariaDBConfigurationError,
@@ -32,6 +33,7 @@ from .repositories import (
 )
 
 __all__ = [
+    "BootstrapResult",
     "DatabaseConfigError",
     "MariaDBConfigurationError",
     "ConfigRepository",
@@ -47,6 +49,7 @@ __all__ = [
     "ModuleConfigSnapshot",
     "OrderRepository",
     "OrderRepositoryError",
+    "SchemaBootstrapError",
     "RiskSnapshotRepository",
     "RiskSnapshotRepositoryError",
     "audit_log_writer",
@@ -56,6 +59,7 @@ __all__ = [
     "market_event_writer",
     "market_price_writer",
     "order_repository",
+    "ensure_schema",
     "REQUIRED_TABLES",
     "resolve_database_url",
     "risk_snapshot_repository",
