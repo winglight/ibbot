@@ -1,4 +1,4 @@
-"""Helpers for persisting DOM configuration and automation state."""
+"""Helpers for persisting DOM configuration."""
 
 from __future__ import annotations
 
@@ -13,8 +13,6 @@ from src.ibbot.redis import get_redis_client
 
 _DOM_CONFIG_KEY_ENV = "DOM_CONFIG_REDIS_KEY"
 _DEFAULT_DOM_CONFIG_KEY = "json:dom:config"
-_DOM_AUTOMATION_KEY_ENV = "DOM_AUTOMATION_STATE_KEY"
-_DEFAULT_DOM_AUTOMATION_KEY = "json:dom:automation_state"
 
 
 async def _read_json_async(key: str) -> Optional[Dict[str, Any]]:
@@ -97,33 +95,7 @@ def save_dom_config(payload: Mapping[str, Any], redis_key: Optional[str] = None)
     _persist_payload(key, payload)
 
 
-def load_dom_automation_state(redis_key: Optional[str] = None) -> Optional[Dict[str, Any]]:
-    """Load the DOM automation scheduler state from storage."""
-
-    key = _resolve_key(
-        redis_key,
-        default=_DEFAULT_DOM_AUTOMATION_KEY,
-        env=_DOM_AUTOMATION_KEY_ENV,
-    )
-    return _load_payload(key)
-
-
-def save_dom_automation_state(
-    payload: Mapping[str, Any], redis_key: Optional[str] = None
-) -> None:
-    """Persist the DOM automation scheduler state."""
-
-    key = _resolve_key(
-        redis_key,
-        default=_DEFAULT_DOM_AUTOMATION_KEY,
-        env=_DOM_AUTOMATION_KEY_ENV,
-    )
-    _persist_payload(key, payload)
-
-
 __all__ = [
     "load_dom_config",
     "save_dom_config",
-    "load_dom_automation_state",
-    "save_dom_automation_state",
 ]

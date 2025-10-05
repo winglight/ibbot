@@ -1946,13 +1946,6 @@ async def websocket_endpoint(websocket: WebSocket):
                         )
                         error_payload["details"] = str(exc)
                         await websocket.send_text(json.dumps(error_payload))
-            elif msg_type == "request_dom_automation_status":
-                await websocket.send_text(json.dumps({
-                    "type": "dom_automation_status",
-                    "success": False,
-                    "error": "DOM automation is disabled",
-                }))
-                continue
             elif msg_type == "request_dom_stats":
                 symbol = (message.get("symbol") or "").strip().upper()
                 if not symbol:

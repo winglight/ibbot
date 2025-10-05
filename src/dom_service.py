@@ -42,7 +42,6 @@ from src.dom_parameter_tuner import (
 )
 from src.dom_signal_tracker import SignalOutcomeTracker, resolve_outcome_config
 from src.dom_stats import DomStatsAggregator
-from src.dom_settings import get_automation_defaults
 from src.dom_persistence import load_dom_config, save_dom_config
 
 DEFAULT_TREND_THRESHOLDS = [0.5, 0.7, 0.85, 0.95]
@@ -167,20 +166,6 @@ class DOMService:
                 tuner_parameters=None,
                 persist=False,
             )
-
-        try:
-            defaults = get_automation_defaults()
-        except Exception as exc:  # pragma: no cover - defensive guard
-            logger.debug("Failed to resolve DOM automation defaults: {}", exc)
-            defaults = None
-        if defaults and defaults.symbol:
-            symbol = str(defaults.symbol).strip().upper()
-            if symbol:
-                self._auto_start_symbol = symbol
-                if isinstance(defaults.limit, int) and defaults.limit > 0:
-                    self._auto_start_num_rows = max(
-                        5, min(int(defaults.limit), 30)
-                    )
 
         atexit.register(self._handle_process_shutdown)
 

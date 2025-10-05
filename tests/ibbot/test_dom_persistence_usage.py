@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 import copy
-import types
 from typing import Any, Dict, List
 
 import pytest
 
 import src.dom_service as dom_service_module
 from src.dom_dependencies import DOMConfig
-from src.dom_optimizer import DOMOptimizationOrchestrator
 from src.dom_processor import DOMProcessor
 
 
@@ -75,38 +73,3 @@ def test_dom_service_persists_config(monkeypatch: pytest.MonkeyPatch, isolated_d
     assert persisted["trend_thresholds"] == [0.4, 0.6, 0.8, 0.95]
 
 
-def test_dom_optimizer_uses_persistence_layer(monkeypatch: pytest.MonkeyPatch) -> None:
-    loaded: Dict[str, Any] = {
-        "schedule": {"enabled": True, "interval_minutes": 60},
-        "plan": {"symbol": "ES", "lookback_minutes": 120},
-    }
-    load_calls: List[Dict[str, Any]] = []
-    saved_payloads: List[Dict[str, Any]] = []
-
-    def _loader() -> Dict[str, Any]:
-        load_calls.append(loaded)
-        return loaded
-
-    def _persister(payload: Dict[str, Any]) -> None:
-        saved_payloads.append(payload)
-
-    monkeypatch.setattr(
-        DOMOptimizationOrchestrator,
-        "_start_scheduler",
-        lambda self: None,
-    )
-
-    fake_service = types.SimpleNamespace(_cache=None)
-    orchestrator = DOMOptimizationOrchestrator(
-        service=fake_service,
-        state_loader=_loader,
-        state_persister=_persister,
-    )
-
-    assert load_calls, "State loader was not invoked"
-    status = orchestrator.get_status()
-    assert status["plan"]["symbol"] == "ES"
-
-    orchestrator.reset_state()
-    assert saved_payloads, "State persister was not invoked"
-    orchestrator.shutdown()
