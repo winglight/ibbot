@@ -1,169 +1,101 @@
-CREATE TABLE orders (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    command_id TEXT,
-    order_id TEXT,
-    client_order_id TEXT,
-    ib_order_id TEXT,
-    symbol TEXT NOT NULL,
-    action TEXT,
-    side TEXT,
-    quantity REAL,
-    order_type TEXT,
-    price REAL,
-    limit_price REAL,
-    stop_price REAL,
-    status TEXT DEFAULT 'Submitted',
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-    executed_at TEXT,
-    order_timestamp TEXT,
-    fill_price REAL,
-    filled_quantity REAL,
-    remaining_quantity REAL,
-    avg_fill_price REAL,
-    order_source TEXT,
-    strategy TEXT,
-    strategy_name TEXT,
-    rule_id TEXT,
-    parent_order_id TEXT,
-    exchange TEXT DEFAULT 'SMART',
-    sec_type TEXT DEFAULT 'STK',
-    notes TEXT,
-    commission REAL,
-    pnl REAL,
-    realized_pnl REAL,
-    unrealized_pnl REAL,
-    trigger TEXT,
-    trigger_type TEXT,
-    trigger_status TEXT,
-    trigger_price REAL,
-    account TEXT,
-    source TEXT,
-    raw_payload TEXT,
-    is_deleted INTEGER DEFAULT 0
-);
-CREATE UNIQUE INDEX ix_orders_command_id ON orders(command_id);
-CREATE UNIQUE INDEX ix_orders_client_order_id ON orders(client_order_id);
-CREATE UNIQUE INDEX ix_orders_ib_order_id ON orders(ib_order_id);
-CREATE INDEX ix_orders_symbol ON orders(symbol);
-CREATE INDEX ix_orders_status_created ON orders(status, created_at);
-CREATE INDEX ix_orders_strategy ON orders(strategy);
-CREATE INDEX ix_orders_strategy_name ON orders(strategy_name);
-CREATE INDEX ix_orders_parent ON orders(parent_order_id);
-CREATE INDEX ix_orders_created ON orders(created_at);
+-- MariaDB schema for ibbot services.
+-- This schema aligns with the main branch layout while removing
+-- deprecated tables that are now backed by Redis or Parquet storage.
 
-CREATE TABLE risk_rules (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    symbol TEXT UNIQUE NOT NULL,
-                    stop_loss_price REAL,
-                    take_profit_price REAL,
-                    max_loss_percent REAL,
-                    enabled BOOLEAN DEFAULT 1,
-                    max_time_span INTEGER,
-                    timestamp TEXT NOT NULL,
-                    auto_trailing BOOLEAN DEFAULT 0,
-                    atr_params TEXT,
-                    rule_type TEXT DEFAULT 'fixed'
-                );
-CREATE TABLE sqlite_sequence(name,seq);
-CREATE TABLE strategies (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT UNIQUE NOT NULL,
-                    strategy_type TEXT NOT NULL,
-                    enabled BOOLEAN DEFAULT 1,
-                    api_endpoint TEXT,
-                    file_path TEXT,
-                    description TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-CREATE TABLE historical_data (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    symbol TEXT NOT NULL,
-                    date TEXT NOT NULL,
-                    time TEXT,
-                    open REAL NOT NULL,
-                    high REAL NOT NULL,
-                    low REAL NOT NULL,
-                    close REAL NOT NULL,
-                    volume INTEGER NOT NULL,
-                    interval TEXT NOT NULL,
-                    adj_close REAL,
-                    UNIQUE(symbol, date, time, interval)
-                );
-CREATE TABLE config (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    config_key TEXT UNIQUE NOT NULL,
-                    config_value TEXT NOT NULL,
-                    description TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-CREATE TABLE sizing_history (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    symbol TEXT NOT NULL,
-                    action TEXT NOT NULL,
-                    suggested_quantity INTEGER NOT NULL,
-                    current_price REAL,
-                    account_value REAL,
-                    position_size REAL,
-                    risk_percent REAL,
-                    sizing_method TEXT NOT NULL,
-                    calculation_details TEXT,
-                    g_rules_checked TEXT,
-                    timestamp TEXT NOT NULL
-                );
-CREATE TABLE notification_history (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    channel TEXT NOT NULL,
-                    event_type TEXT NOT NULL,
-                    message TEXT NOT NULL,
-                    status TEXT DEFAULT 'pending',
-                    retry_count INTEGER DEFAULT 0,
-                    error_message TEXT,
-                    sent_at TEXT,
-                    created_at TEXT NOT NULL
-                );
-CREATE TABLE market_events (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    event_type TEXT NOT NULL,
-                    topic TEXT NOT NULL,
-                    symbol TEXT,
-                    source TEXT,
-                    payload TEXT,
-                    meta TEXT,
-                    ts_ns INTEGER,
-                    recorded_at TEXT NOT NULL,
-                    ingested_at TEXT NOT NULL
-                );
-CREATE INDEX idx_market_events_topic_recorded
-                ON market_events(topic, recorded_at DESC)
-                ;
-CREATE INDEX idx_market_events_type_ingested
-                ON market_events(event_type, ingested_at DESC)
-                ;
-CREATE TABLE market_prices (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    symbol TEXT NOT NULL,
-                    bid REAL,
-                    ask REAL,
-                    bid_size REAL,
-                    ask_size REAL,
-                    source TEXT,
-                    observed_at TEXT NOT NULL,
-                    extra TEXT
-                );
-CREATE INDEX idx_market_prices_symbol_observed
-                ON market_prices(symbol, observed_at DESC)
-                ;
-CREATE TABLE risk_config_snapshots (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    service TEXT NOT NULL,
-                    payload TEXT,
-                    rules_count INTEGER DEFAULT 0,
-                    updated_at_text TEXT,
-                    captured_at TEXT NOT NULL
-                );
-CREATE INDEX idx_risk_config_snapshots_service_time
-                ON risk_config_snapshots(service, captured_at DESC)
-                ;
+CREATE TABLE IF NOT EXISTS `orders` (
+    `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+    `command_id` VARCHAR(191) NULL,
+    `order_id` VARCHAR(191) NULL,
+    `client_order_id` VARCHAR(191) NULL,
+    `ib_order_id` VARCHAR(191) NULL,
+    `symbol` VARCHAR(191) NOT NULL,
+    `action` VARCHAR(32) NULL,
+    `side` VARCHAR(32) NULL,
+    `quantity` DOUBLE NULL,
+    `order_type` VARCHAR(64) NULL,
+    `price` DOUBLE NULL,
+    `limit_price` DOUBLE NULL,
+    `stop_price` DOUBLE NULL,
+    `status` VARCHAR(64) NOT NULL DEFAULT 'Submitted',
+    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    `executed_at` DATETIME NULL,
+    `order_timestamp` DATETIME NULL,
+    `fill_price` DOUBLE NULL,
+    `filled_quantity` DOUBLE NULL,
+    `remaining_quantity` DOUBLE NULL,
+    `avg_fill_price` DOUBLE NULL,
+    `order_source` VARCHAR(191) NULL,
+    `strategy` VARCHAR(191) NULL,
+    `strategy_name` VARCHAR(191) NULL,
+    `rule_id` VARCHAR(191) NULL,
+    `parent_order_id` VARCHAR(191) NULL,
+    `exchange` VARCHAR(64) NOT NULL DEFAULT 'SMART',
+    `sec_type` VARCHAR(64) NOT NULL DEFAULT 'STK',
+    `notes` TEXT NULL,
+    `commission` DOUBLE NULL,
+    `pnl` DOUBLE NULL,
+    `realized_pnl` DOUBLE NULL,
+    `unrealized_pnl` DOUBLE NULL,
+    `trigger` VARCHAR(191) NULL,
+    `trigger_type` VARCHAR(191) NULL,
+    `trigger_status` VARCHAR(191) NULL,
+    `trigger_price` DOUBLE NULL,
+    `account` VARCHAR(191) NULL,
+    `source` VARCHAR(191) NULL,
+    `raw_payload` JSON NULL,
+    `is_deleted` TINYINT(1) NOT NULL DEFAULT 0,
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `ux_orders_command_id` (`command_id`),
+    UNIQUE KEY `ux_orders_client_order_id` (`client_order_id`),
+    UNIQUE KEY `ux_orders_ib_order_id` (`ib_order_id`),
+    KEY `ix_orders_symbol` (`symbol`),
+    KEY `ix_orders_status_created` (`status`, `created_at`),
+    KEY `ix_orders_strategy` (`strategy`),
+    KEY `ix_orders_strategy_name` (`strategy_name`),
+    KEY `ix_orders_parent` (`parent_order_id`),
+    KEY `ix_orders_created` (`created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `risk_rules` (
+    `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+    `symbol` VARCHAR(191) NOT NULL,
+    `stop_loss_price` DOUBLE NULL,
+    `take_profit_price` DOUBLE NULL,
+    `max_loss_percent` DOUBLE NULL,
+    `enabled` TINYINT(1) NOT NULL DEFAULT 1,
+    `max_time_span` INT NULL,
+    `timestamp` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `auto_trailing` TINYINT(1) NOT NULL DEFAULT 0,
+    `atr_params` JSON NULL,
+    `rule_type` VARCHAR(64) NOT NULL DEFAULT 'fixed',
+    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `ux_risk_rules_symbol` (`symbol`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `strategies` (
+    `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+    `name` VARCHAR(191) NOT NULL,
+    `strategy_type` VARCHAR(64) NOT NULL,
+    `enabled` TINYINT(1) NOT NULL DEFAULT 1,
+    `api_endpoint` VARCHAR(255) NULL,
+    `file_path` VARCHAR(255) NULL,
+    `description` TEXT NULL,
+    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `ux_strategies_name` (`name`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `config` (
+    `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+    `config_key` VARCHAR(191) NOT NULL,
+    `config_value` TEXT NOT NULL,
+    `description` TEXT NULL,
+    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `ux_config_key` (`config_key`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
