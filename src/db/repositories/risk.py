@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -9,7 +10,15 @@ from src.db.async_support import run_in_thread
 from src.db.mariadb import MariaDBConfigurationError
 from src.ibbot.logging import get_logger
 
-from .base import RepositoryError, RepositoryValidationError, executemany_write, is_sqlite, json_dumps, use_connection
+from .base import (
+    RepositoryError,
+    RepositoryValidationError,
+    executemany_write,
+    is_sqlite,
+    json_dumps,
+    use_connection,
+)
+from .config import ConfigRepository, ConfigRepositoryError
 
 __all__ = [
     "RiskSnapshotRepository",
@@ -48,10 +57,19 @@ def _parse_datetime(value: Any) -> datetime | None:
 
 
 class RiskSnapshotRepository:
-    """Legacy repository retained for compatibility with historical code paths."""
+    """Persist risk snapshots via the configuration and rules repositories."""
 
-    def __init__(self, *, logger_name: str = "db.risk") -> None:
+    def __init__(
+        self,
+        *,
+        logger_name: str = "db.risk",
+        config_repository: ConfigRepository | None = None,
+        risk_rules_repository: RiskRulesRepository | None = None,
+    ) -> None:
         self._logger = get_logger(logger_name)
+        self._config_repository = config_repository
+        self._risk_rules_repository = risk_rules_repository
+        self._logger_name = logger_name
 
     async def save_rule_snapshots(
         self,
@@ -61,22 +79,92 @@ class RiskSnapshotRepository:
         updated_at: str | datetime | None = None,
         captured_at: datetime | str | None = None,
     ) -> None:
-        timestamp = _parse_datetime(captured_at) or _utc_now()
-        if isinstance(rules, Mapping):
-            count = len(rules)
-        else:
-            count = sum(1 for _ in rules)
+        service_name = str(service).strip()
+        if not service_name:
+            raise RiskSnapshotRepositoryError("service name is required")
 
-        if count == 0:
-            return
+        captured_timestamp = _parse_datetime(captured_at) or _utc_now()
+        updated_timestamp = _parse_datetime(updated_at) or captured_timestamp
+        captured_text = captured_timestamp.isoformat()
+        updated_text = updated_timestamp.isoformat()
+
+        prepared_rules = self._prepare_rule_payloads(rules, updated_text)
+
+        config_snapshot = {
+            "service": service_name,
+            "captured_at": captured_text,
+            "updated_at": updated_text,
+            "rules_count": len(prepared_rules),
+            "rules": list(prepared_rules.values()),
+        }
+
+        try:
+            config_repo = await self._ensure_config_repository()
+            await config_repo.save_module(
+                service_name,
+                {"snapshot": json_dumps(config_snapshot)},
+            )
+        except ConfigRepositoryError as exc:
+            raise RiskSnapshotRepositoryError(str(exc)) from exc
+        except Exception as exc:  # pragma: no cover - defensive logging
+            self._logger.exception("Failed to persist risk config snapshot")
+            raise RiskSnapshotRepositoryError("Failed to persist risk config snapshot") from exc
+
+        try:
+            rules_repo = await self._ensure_risk_rules_repository()
+            await rules_repo.replace_rules(prepared_rules, timestamp=updated_text)
+        except RepositoryValidationError:
+            raise
+        except RiskRulesRepositoryError as exc:
+            raise RiskSnapshotRepositoryError(str(exc)) from exc
+        except Exception as exc:  # pragma: no cover - defensive logging
+            self._logger.exception("Failed to persist risk rules snapshot")
+            raise RiskSnapshotRepositoryError("Failed to persist risk rules snapshot") from exc
 
         self._logger.debug(
-            "Skipping MariaDB risk snapshot persistence",
-            service=service,
-            snapshot_count=count,
-            updated_at=str(updated_at) if updated_at is not None else None,
-            captured_at=str(timestamp),
+            "Persisted risk snapshots",
+            service=service_name,
+            snapshot_count=len(prepared_rules),
+            updated_at=updated_text,
+            captured_at=captured_text,
         )
+
+    async def _ensure_config_repository(self) -> ConfigRepository:
+        if self._config_repository is None:
+            self._config_repository = ConfigRepository(
+                logger_name=f"{self._logger_name}.config"
+            )
+        return self._config_repository
+
+    async def _ensure_risk_rules_repository(self) -> RiskRulesRepository:
+        if self._risk_rules_repository is None:
+            self._risk_rules_repository = RiskRulesRepository(
+                logger_name=f"{self._logger_name}.rules"
+            )
+        return self._risk_rules_repository
+
+    def _prepare_rule_payloads(
+        self,
+        rules: Mapping[str, Mapping[str, Any]] | Iterable[Mapping[str, Any]],
+        default_timestamp: str,
+    ) -> dict[str, dict[str, Any]]:
+        prepared: dict[str, dict[str, Any]] = {}
+        if isinstance(rules, Mapping):
+            iterator: Iterable[tuple[str, Mapping[str, Any]]] = rules.items()
+        else:
+            iterator = (("", payload) for payload in rules)
+
+        for key, payload in iterator:
+            if not isinstance(payload, Mapping):
+                raise RepositoryValidationError("risk rule payload must be a mapping")
+            symbol = str(payload.get("symbol") or key).strip()
+            if not symbol:
+                raise RepositoryValidationError("risk rule requires a symbol")
+            normalised = {str(k): v for k, v in payload.items()}
+            normalised["symbol"] = symbol
+            normalised.setdefault("updated_at", default_timestamp)
+            prepared[symbol] = normalised
+        return prepared
 
 class RiskRulesRepository:
     """Persist the active set of risk rules."""
