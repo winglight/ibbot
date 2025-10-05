@@ -213,7 +213,8 @@ class LogsManager {
         this.isLoading = true;
         this.setStatus('加载中…');
 
-        const useWebSocket = this.shouldUseWebSocket() && this.app?.ibkrManager?.requestLogsSnapshot;
+        const forceHttp = options.forceHttp === true;
+        const useWebSocket = !forceHttp && this.shouldUseWebSocket() && this.app?.ibkrManager?.requestLogsSnapshot;
         if (useWebSocket) {
             return new Promise((resolve, reject) => {
                 const requestId = `logs:${Date.now()}:${(++this.requestCounter % 1_000_000)}`;
@@ -221,16 +222,37 @@ class LogsManager {
                     requestId,
                     append,
                     direction,
+                    cursor,
                     resolve,
                     reject,
+                    forceHttp,
+                    originalOptions: { ...options },
                 };
                 this.pendingRequests.set(requestId, context);
-                context.timer = setTimeout(() => {
+                context.timer = setTimeout(async () => {
                     this.pendingRequests.delete(requestId);
                     this.isLoading = false;
-                    const error = new Error('日志请求超时');
-                    this.handleLogsError(error);
-                    reject(error);
+                    if (!context.forceHttp) {
+                        try {
+                            const fallbackOptions = {
+                                ...context.originalOptions,
+                                direction: context.direction,
+                                cursor: context.cursor,
+                                forceHttp: true,
+                            };
+                            const result = await this.loadLogs(fallbackOptions);
+                            resolve(result);
+                            return;
+                        } catch (fallbackError) {
+                            const error = fallbackError instanceof Error ? fallbackError : new Error('日志请求超时');
+                            this.handleLogsError(error);
+                            reject(error);
+                        }
+                    } else {
+                        const error = new Error('日志请求超时');
+                        this.handleLogsError(error);
+                        reject(error);
+                    }
                     if (this.autoTail) {
                         this.scheduleTail();
                     }
