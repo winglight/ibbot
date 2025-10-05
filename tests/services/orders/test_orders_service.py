@@ -11,6 +11,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from services.orders.main import _coerce_str, OrderSubmission, OrdersRuntime, create_app
+from src.db.repositories.order import OrderNotFoundError
 from src.utils.ibkr_serialization import trade_to_dict
 from tests.services.redis_utils import InMemoryRedis
 
@@ -18,65 +19,82 @@ from tests.services.redis_utils import InMemoryRedis
 class RecordingRepository:
     def __init__(self) -> None:
         self.payloads: list[dict[str, Any]] = []
+        self.insert_payloads: list[dict[str, Any]] = []
+        self.update_payloads: list[dict[str, Any]] = []
+        self.insert_calls = 0
+        self.update_calls = 0
         self.closed = False
         self._next_id = 1
+        self._rows: dict[int, dict[str, Any]] = {}
         self._by_command: dict[str, int] = {}
         self._by_ib: dict[str, int] = {}
         self._by_client: dict[str, int] = {}
         self._by_order: dict[str, int] = {}
         self.created_ids: list[int] = []
-        self.allow_insert_flags: list[bool] = []
 
-    async def upsert_order(
-        self, payload: Mapping[str, Any], *, allow_insert: bool = True
-    ) -> int | None:
+    def _register_identifiers(self, payload: Mapping[str, Any], row_id: int) -> None:
+        command_id = _coerce_str(payload.get("command_id"))
+        ib_order_id = _coerce_str(payload.get("ib_order_id"))
+        client_order_id = _coerce_str(payload.get("client_order_id"))
+        order_id = _coerce_str(payload.get("order_id"))
+        if command_id:
+            self._by_command[command_id] = row_id
+        if ib_order_id:
+            self._by_ib[ib_order_id] = row_id
+        if client_order_id:
+            self._by_client[client_order_id] = row_id
+        if order_id:
+            self._by_order[order_id] = row_id
+
+    def _resolve_row_id(self, payload: Mapping[str, Any]) -> int | None:
+        command_id = _coerce_str(payload.get("command_id"))
+        ib_order_id = _coerce_str(payload.get("ib_order_id"))
+        client_order_id = _coerce_str(payload.get("client_order_id"))
+        order_id = _coerce_str(payload.get("order_id"))
+        for lookup in (
+            (command_id, self._by_command),
+            (ib_order_id, self._by_ib),
+            (client_order_id, self._by_client),
+            (order_id, self._by_order),
+        ):
+            identifier, mapping = lookup
+            if identifier and identifier in mapping:
+                return mapping[identifier]
+        return None
+
+    async def insert_order(self, payload: Mapping[str, Any]) -> int:
         record = dict(payload)
         self.payloads.append(record)
-        self.allow_insert_flags.append(allow_insert)
+        self.insert_payloads.append(record)
+        self.insert_calls += 1
+        row_id = self._next_id
+        self._next_id += 1
+        self._rows[row_id] = dict(record)
+        self._register_identifiers(record, row_id)
+        self.created_ids.append(row_id)
+        return row_id
 
-        command_id = _coerce_str(record.get("command_id"))
-        ib_order_id = _coerce_str(record.get("ib_order_id"))
-        client_order_id = _coerce_str(record.get("client_order_id"))
-        order_id = _coerce_str(record.get("order_id"))
+    async def update_order(self, payload: Mapping[str, Any]) -> None:
+        record = dict(payload)
+        self.payloads.append(record)
+        self.update_payloads.append(record)
+        self.update_calls += 1
+        row_id = self._resolve_row_id(record)
+        if row_id is None:
+            raise OrderNotFoundError()
+        existing = self._rows.setdefault(row_id, {})
+        existing.update(record)
+        self._register_identifiers(record, row_id)
 
-        assigned: int | None = None
-        created = False
-        if command_id and command_id in self._by_command:
-            assigned = self._by_command[command_id]
-        elif ib_order_id and ib_order_id in self._by_ib:
-            assigned = self._by_ib[ib_order_id]
-        elif client_order_id and client_order_id in self._by_client:
-            assigned = self._by_client[client_order_id]
-        elif order_id and order_id in self._by_order:
-            assigned = self._by_order[order_id]
-
-        if assigned is None:
-            if command_id is None and ib_order_id is None:
-                return None
-            if not allow_insert:
-                return None
-            assigned = self._next_id
-            self._next_id += 1
-            self.created_ids.append(assigned)
-            created = True
-
-        if command_id:
-            self._by_command[command_id] = assigned
-        if ib_order_id:
-            self._by_ib[ib_order_id] = assigned
-        if client_order_id:
-            self._by_client[client_order_id] = assigned
-        if order_id:
-            self._by_order[order_id] = assigned
-
-        return assigned if created else None
+    def truncate(self) -> None:
+        self._rows.clear()
+        self._by_command.clear()
+        self._by_ib.clear()
+        self._by_client.clear()
+        self._by_order.clear()
 
     async def close(self) -> None:
         self.closed = True
-
-
-class OrderNotFoundError(Exception):
-    pass
 
 
 class SyncRepository:
@@ -213,11 +231,17 @@ class _FailingRepository:
     def __init__(self, error: Exception) -> None:
         self.error = error
         self.calls = 0
+        self.insert_calls = 0
+        self.update_calls = 0
 
-    async def upsert_order(
-        self, payload: Mapping[str, Any], *, allow_insert: bool = True
-    ) -> None:
+    async def insert_order(self, payload: Mapping[str, Any]) -> int:
         self.calls += 1
+        self.insert_calls += 1
+        raise self.error
+
+    async def update_order(self, payload: Mapping[str, Any]) -> None:
+        self.calls += 1
+        self.update_calls += 1
         raise self.error
 
 
@@ -737,10 +761,10 @@ def test_order_update_persists_to_repository() -> None:
     asyncio.run(_scenario())
 
 
-def test_ib_only_event_skips_repository_insert(
+def test_ib_only_event_logs_warning_when_repository_missing(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    caplog.set_level(logging.INFO, logger="ibbot.services.orders")
+    caplog.set_level(logging.WARNING, logger="ibbot.services.orders")
 
     async def _scenario() -> None:
         repository = RecordingRepository()
@@ -763,7 +787,8 @@ def test_ib_only_event_skips_repository_insert(
             }
             updated = await runtime._apply_order_event(payload)
             assert updated is True
-            assert repo.allow_insert_flags[-1] is False
+            assert repo.insert_calls == 0
+            assert repo.update_calls == 1
             assert not repo.created_ids
             assert "IB-ONLY-1" in runtime._active_orders
             assert "IB-ONLY-1" in runtime._ib_only_orders
@@ -778,7 +803,8 @@ def test_ib_only_event_skips_repository_insert(
             }
             updated_again = await runtime._apply_order_event(follow_up)
             assert updated_again is True
-            assert repo.allow_insert_flags[-2:] == [False, False]
+            assert repo.insert_calls == 0
+            assert repo.update_calls == 2
             assert not repo.created_ids
         finally:
             await runtime.stop()
@@ -790,7 +816,54 @@ def test_ib_only_event_skips_repository_insert(
         for record in caplog.records
         if record.name == "ibbot.services.orders"
     ]
-    assert any("Skipping repository insert" in message for message in messages)
+    assert any("skipping insert" in message.lower() for message in messages)
+
+
+def test_ib_callback_after_truncate_logs_warning_and_reinserts(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.WARNING, logger="ibbot.services.orders")
+    repository = RecordingRepository()
+
+    async def _scenario() -> None:
+        runtime, _, repo = await _create_runtime(repository=repository)
+        try:
+            submission = OrderSubmission(symbol="CL", quantity=1, action="BUY")
+            command_id = await runtime.submit_order(submission)
+            repo.truncate()
+            trade_payload = _build_trade_payload(
+                order_id="IB-TRUNC-1",
+                symbol="CL",
+                exchange="NYMEX",
+                status="Filled",
+                avg_fill_price=85.25,
+                filled=1.0,
+                remaining=0.0,
+                commission=1.5,
+                realized_pnl=25.0,
+            )
+            payload = {
+                "command_id": command_id,
+                "status": "success",
+                "result": json.dumps(trade_payload),
+            }
+            updated = await runtime._apply_order_event(payload)
+            assert updated is True
+        finally:
+            await runtime.stop()
+
+    asyncio.run(_scenario())
+
+    assert repository.update_calls == 1
+    assert repository.insert_calls == 2
+    assert len(repository.created_ids) == 2
+
+    messages = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "ibbot.services.orders"
+    ]
+    assert any("retrying insert" in message.lower() for message in messages)
 
 
 def test_apply_order_event_updates_order_from_serialised_trade() -> None:
