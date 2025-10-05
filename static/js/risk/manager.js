@@ -114,6 +114,37 @@
             return true;
         }
 
+        formatRiskRulePrice(value) {
+            if (value === null || value === undefined) {
+                return 'N/A';
+            }
+            const numeric = Number(value);
+            if (!Number.isFinite(numeric) || numeric <= 0) {
+                return 'N/A';
+            }
+            if (this.app && typeof this.app.formatNumber === 'function') {
+                return '$' + this.app.formatNumber(numeric);
+            }
+            return `$${numeric.toFixed(2)}`;
+        }
+
+        formatRiskRuleMaxTime(value) {
+            if (value === null || value === undefined) {
+                return 'N/A';
+            }
+            if (value === '') {
+                return 'N/A';
+            }
+            const numeric = Number(value);
+            if (Number.isFinite(numeric)) {
+                if (numeric <= 0) {
+                    return 'N/A';
+                }
+                return `${numeric}`;
+            }
+            return value;
+        }
+
         renderRiskRulesTable(rules) {
             const tbody = document.querySelector('#riskRulesTable2 tbody');
             if (!tbody) return;
@@ -133,17 +164,26 @@
                 const avgCost = portfolioItem ? portfolioItem.avg_cost : 0;
                 const positionSize = portfolioItem ? portfolioItem.position : 0;
 
-                const stopLossValue = rule.stop_loss_price || '';
-                const takeProfitValue = rule.take_profit_price || '';
+                const stopLossValue = (() => {
+                    const numeric = Number(rule.stop_loss_price);
+                    return Number.isFinite(numeric) && numeric > 0 ? rule.stop_loss_price : '';
+                })();
+                const takeProfitValue = (() => {
+                    const numeric = Number(rule.take_profit_price);
+                    return Number.isFinite(numeric) && numeric > 0 ? rule.take_profit_price : '';
+                })();
                 const symbolEscaped = rule.symbol.replace(/'/g, "\\'");
+                const stopLossDisplay = this.formatRiskRulePrice(rule.stop_loss_price);
+                const takeProfitDisplay = this.formatRiskRulePrice(rule.take_profit_price);
+                const maxTimeDisplay = this.formatRiskRuleMaxTime(rule.max_time_span);
 
                 return `
                     <tr>
                         <td>${rule.symbol}</td>
                         <td><span class="badge bg-${typeClass}">${typeLabel}</span></td>
-                        <td>${rule.stop_loss_price ? '$' + this.app.formatNumber(rule.stop_loss_price) : 'N/A'}</td>
-                        <td>${rule.take_profit_price ? '$' + this.app.formatNumber(rule.take_profit_price) : 'N/A'}</td>
-                        <td>${rule.max_time_span || 'N/A'}</td>
+                        <td>${stopLossDisplay}</td>
+                        <td>${takeProfitDisplay}</td>
+                        <td>${maxTimeDisplay}</td>
                         <td><span class="badge bg-${rule.enabled ? 'success' : 'secondary'}">${rule.enabled ? 'Active' : 'Disabled'}</span></td>
                         <td>
                             <button class="btn btn-sm btn-outline-info me-1" onclick="app.showRiskRuleOrders('${symbolEscaped}')" title="Details">
@@ -300,43 +340,72 @@
 
         async toggleRiskRule(symbol, enabled) {
             try {
+                const normalizedSymbol = (symbol || '').toString().toUpperCase();
+                const existingRule = this.app?.riskRules?.[normalizedSymbol] || null;
+                const normalizedType = this.normalizeRuleType(existingRule);
+                const isTrailingRule = normalizedType === 'trailing';
+
+                let sl = null;
+                let tp = null;
+                let hasInputPrice = false;
+                let hasExistingPrice = false;
+
                 if (enabled) {
                     const slInputEl = document.getElementById('monitorStopLoss');
                     const tpInputEl = document.getElementById('monitorTakeProfit');
-                    const sl = slInputEl && slInputEl.value ? parseFloat(slInputEl.value) : null;
-                    const tp = tpInputEl && tpInputEl.value ? parseFloat(tpInputEl.value) : null;
+                    sl = slInputEl && slInputEl.value ? parseFloat(slInputEl.value) : null;
+                    tp = tpInputEl && tpInputEl.value ? parseFloat(tpInputEl.value) : null;
 
-                    const existingRule = this.app.riskRules && this.app.riskRules[symbol] ? this.app.riskRules[symbol] : null;
-                    const hasExistingPrice = !!(existingRule && ((existingRule.stop_loss_price && existingRule.stop_loss_price > 0) || (existingRule.take_profit_price && existingRule.take_profit_price > 0)));
-                    const hasInputPrice = !!((sl && sl > 0) || (tp && tp > 0));
+                    if (existingRule) {
+                        const existingSl = Number(existingRule.stop_loss_price);
+                        const existingTp = Number(existingRule.take_profit_price);
+                        hasExistingPrice = Number.isFinite(existingSl) && existingSl > 0;
+                        hasExistingPrice = hasExistingPrice || (Number.isFinite(existingTp) && existingTp > 0);
+                    }
 
-                    if (!hasExistingPrice && !hasInputPrice) {
+                    hasInputPrice = Number.isFinite(sl) && sl > 0;
+                    hasInputPrice = hasInputPrice || (Number.isFinite(tp) && tp > 0);
+
+                    if (!isTrailingRule && !hasExistingPrice && !hasInputPrice) {
                         throw new Error('请先输入止损或止盈价，并点击“保存规则”或直接在监控框输入后再启用。');
                     }
 
-                    if (hasInputPrice) {
+                    if (!isTrailingRule && hasInputPrice) {
                         await this.app.apiCall('/risk_rules', {
                             method: 'POST',
                             body: JSON.stringify({
-                                symbol,
-                                stop_loss_price: sl || undefined,
-                                take_profit_price: tp || undefined
+                                symbol: normalizedSymbol,
+                                stop_loss_price: Number.isFinite(sl) && sl > 0 ? sl : undefined,
+                                take_profit_price: Number.isFinite(tp) && tp > 0 ? tp : undefined,
                             })
-                        });
-
-                        if (!this.app.riskRules) this.app.riskRules = {};
-                        this.app.riskRules[symbol] = Object.assign({}, existingRule || {}, {
-                            symbol,
-                            stop_loss_price: sl ?? (existingRule ? existingRule.stop_loss_price : undefined),
-                            take_profit_price: tp ?? (existingRule ? existingRule.take_profit_price : undefined),
-                            rule_type: existingRule ? this.normalizeRuleType(existingRule) : 'fixed',
-                            atr_params: existingRule && existingRule.atr_params ? { ...existingRule.atr_params } : {},
                         });
                     }
                 }
 
-                await this.app.apiCall(`/risk_rules/${symbol}?enabled=${enabled}`, { method: 'PUT' });
-                this.app.showAlert('success', `Risk rule for ${symbol} ${enabled ? 'enabled' : 'disabled'} successfully`);
+                await this.app.apiCall(`/risk_rules/${normalizedSymbol}?enabled=${enabled}`, { method: 'PUT' });
+
+                if (!this.app.riskRules) {
+                    this.app.riskRules = {};
+                }
+
+                const updatedRule = Object.assign({}, existingRule || {}, {
+                    symbol: normalizedSymbol,
+                    rule_type: normalizedType || (existingRule?.rule_type) || 'fixed',
+                    atr_params: existingRule && existingRule.atr_params ? { ...existingRule.atr_params } : {},
+                    enabled,
+                });
+
+                if (!isTrailingRule && enabled && hasInputPrice) {
+                    updatedRule.stop_loss_price = Number.isFinite(sl) && sl > 0 ? sl : (existingRule ? existingRule.stop_loss_price : undefined);
+                    updatedRule.take_profit_price = Number.isFinite(tp) && tp > 0 ? tp : (existingRule ? existingRule.take_profit_price : undefined);
+                } else if (!enabled && existingRule) {
+                    updatedRule.stop_loss_price = existingRule.stop_loss_price;
+                    updatedRule.take_profit_price = existingRule.take_profit_price;
+                }
+
+                this.app.riskRules[normalizedSymbol] = updatedRule;
+
+                this.app.showAlert('success', `Risk rule for ${normalizedSymbol} ${enabled ? 'enabled' : 'disabled'} successfully`);
                 await this.loadRiskRules({ force: true });
             } catch (error) {
                 console.error('Failed to update risk rule:', error);
