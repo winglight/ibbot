@@ -43,7 +43,7 @@
 | 阶段 | 核对项 |
 | --- | --- |
 | 阶段 1 | `python scripts/diagnose_foundation.py` 返回全绿；`data/logs/` 写入权限正常。 |
-| 阶段 2 | Redis 中存在服务配置键（`hash:config:<service>`）；`services/<name>/main.py` 日志无异常；Redis 指标集合（`zset:service_metrics:*`）出现对应服务写入。 |
+| 阶段 2 | MariaDB `config` 表存在服务配置键（`<service>:` 前缀）；`services/<name>/main.py` 日志无异常；Redis 指标集合（`zset:service_metrics:*`）出现对应服务写入。 |
 | 阶段 3 | 访问主站 `/rapidoc`、`/api/monitoring/metrics/write-rate` 成功；前端监控卡片可展示队列和写入速率指标。 |
 | 阶段 4 | `pytest tests`、`pytest tests/e2e`、`pytest tests/perf`、`pytest tests/failover` 全部通过；`./scripts/deploy.sh up --env production` 能在目标环境跑通。 |
 
@@ -104,7 +104,7 @@
   1. 检查 `redis-cli PUBSUB CHANNELS "pubsub:ib:price*"` 是否存在频道；若无，确认 `services/ib_feed` 是否运行且订阅列表正确。
   2. 使用上文的 MariaDB 查询命令确认 `market_events` 在最近 5 分钟内有写入。
   3. 查看 `services/ib_feed` 日志（`docker logs` 或 `tail -f data/logs/ib-feed.log`）。
-- **恢复**：更新配置（Redis `hash:config:ib-feed` 中的订阅列表），重启 `ib-feed` 与 `market-data`。
+- **恢复**：更新配置（数据库 `config` 表中 `ib-feed:` 前缀的订阅列表），重启 `ib-feed` 与 `market-data`。
 
 ### 3.3 队列/流堆积
 

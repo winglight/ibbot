@@ -131,10 +131,11 @@ def test_filesystem_strategies_discovered(redis_client: InMemoryRedis, tmp_path:
         assert strategies_response.status_code == 200
         strategies = strategies_response.json()
         names = [entry["name"] for entry in strategies]
-        assert "filesystem_alpha" in names
-        fs_entry = next(entry for entry in strategies if entry["name"] == "filesystem_alpha")
+        assert "FilesystemAlpha" in names
+        fs_entry = next(entry for entry in strategies if entry["name"] == "FilesystemAlpha")
         assert fs_entry["metadata"]["file"] == "filesystem_alpha.py"
         assert fs_entry["metadata"]["source"] == "filesystem"
+        assert fs_entry["metadata"]["normalised_name"] == "FilesystemAlpha"
 
 
 def test_strategy_crud_lifecycle(redis_client: InMemoryRedis) -> None:
@@ -744,10 +745,11 @@ def test_strategy_file_auto_discovery_during_runtime(
         strategies_response = client.get("/strategy")
         assert strategies_response.status_code == 200
         strategies = strategies_response.json()
-        assert any(entry["name"] == "omega" for entry in strategies)
-        omega_entry = next(entry for entry in strategies if entry["name"] == "omega")
+        assert any(entry["name"] == "Omega" for entry in strategies)
+        omega_entry = next(entry for entry in strategies if entry["name"] == "Omega")
         assert omega_entry["metadata"].get("file") == "omega.py"
         assert omega_entry["metadata"].get("source") == "filesystem"
+        assert omega_entry["metadata"].get("normalised_name") == "Omega"
 
 
 def test_strategy_executions_endpoint_returns_recent_fills(

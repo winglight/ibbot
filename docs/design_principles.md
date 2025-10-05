@@ -14,9 +14,10 @@ below when adding new routes or background features.
   payloads onto the strategy queue (`list:queue:strategy`).  Strategy workers
   consume the queue asynchronously and publish lifecycle events.
 * **Risk configuration** – the risk service derives its runtime state from the
-  Redis-backed configuration hash (`hash:config:risk-service`).  Route
-  handlers should update this hash and publish to
-  `pubsub:config:update` instead of calling the service synchronously.
+  MariaDB-backed configuration table (`config`, keys prefixed with
+  `risk-service:`).  Route handlers should write through `ConfigProvider`
+  (which persists to MariaDB and broadcasts cache invalidations) instead of
+  calling the service synchronously.
 
 ## 2. Prefer lightweight service calls for reads
 
@@ -31,8 +32,9 @@ missing.
 * Do **not** import `core.connection_manager` from routes.
 * Do **not** access the legacy `get_db_manager` or SQLite connections from new
   handlers; use service APIs instead.
-* Persist configuration through the Redis config hash or dedicated services to
-  keep database concerns out of the gateway.
+* Persist configuration through the shared MariaDB `config` table (via
+  `ConfigProvider`) or dedicated services to keep database concerns out of the
+  gateway.
 
 ## 4. Provide audit and metadata
 
@@ -45,8 +47,8 @@ and monitoring tools.
 
 * `POST /api/place_order` – builds a command payload, enqueues it on
   `queue:ib:commands`, logs success/failure and broadcasts websocket updates.
-* `PUT /api/risk-config` – stringifies the submitted fields, writes them to the
-  risk configuration hash and publishes a config update message so the risk
-  service refreshes without blocking the API request.
+* `PUT /api/risk-config` – stringifies the submitted fields, writes them
+  through `ConfigProvider` (which updates the database) and relies on
+  background polling to refresh services without blocking the API request.
 * `GET /api/order_queue_status` – uses the risk service HTTP client for a
   lightweight status snapshot without touching Redis directly.

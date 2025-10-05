@@ -1,0 +1,179 @@
+-- MariaDB initial schema for ibbot services.
+-- Generated to reflect the order repository expectations as of 2024-05-22.
+
+CREATE TABLE IF NOT EXISTS `orders` (
+    `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+    `command_id` VARCHAR(191) NULL,
+    `order_id` VARCHAR(191) NULL,
+    `client_order_id` VARCHAR(191) NULL,
+    `ib_order_id` VARCHAR(191) NULL,
+    `symbol` VARCHAR(191) NOT NULL,
+    `action` VARCHAR(32) NULL,
+    `side` VARCHAR(32) NULL,
+    `quantity` DOUBLE NULL,
+    `order_type` VARCHAR(64) NULL,
+    `price` DOUBLE NULL,
+    `limit_price` DOUBLE NULL,
+    `stop_price` DOUBLE NULL,
+    `status` VARCHAR(64) NOT NULL DEFAULT 'Submitted',
+    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    `executed_at` DATETIME NULL,
+    `order_timestamp` DATETIME NULL,
+    `fill_price` DOUBLE NULL,
+    `filled_quantity` DOUBLE NULL,
+    `remaining_quantity` DOUBLE NULL,
+    `avg_fill_price` DOUBLE NULL,
+    `order_source` VARCHAR(191) NULL,
+    `strategy` VARCHAR(191) NULL,
+    `strategy_name` VARCHAR(191) NULL,
+    `rule_id` VARCHAR(191) NULL,
+    `parent_order_id` VARCHAR(191) NULL,
+    `exchange` VARCHAR(64) NOT NULL DEFAULT 'SMART',
+    `sec_type` VARCHAR(64) NOT NULL DEFAULT 'STK',
+    `notes` TEXT NULL,
+    `commission` DOUBLE NULL,
+    `pnl` DOUBLE NULL,
+    `realized_pnl` DOUBLE NULL,
+    `unrealized_pnl` DOUBLE NULL,
+    `trigger` VARCHAR(191) NULL,
+    `trigger_type` VARCHAR(191) NULL,
+    `trigger_status` VARCHAR(191) NULL,
+    `trigger_price` DOUBLE NULL,
+    `account` VARCHAR(191) NULL,
+    `source` VARCHAR(191) NULL,
+    `raw_payload` JSON NULL,
+    `is_deleted` TINYINT(1) NOT NULL DEFAULT 0,
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `ux_orders_command_id` (`command_id`),
+    UNIQUE KEY `ux_orders_client_order_id` (`client_order_id`),
+    UNIQUE KEY `ux_orders_ib_order_id` (`ib_order_id`),
+    KEY `ix_orders_symbol` (`symbol`),
+    KEY `ix_orders_status_created` (`status`, `created_at`),
+    KEY `ix_orders_strategy` (`strategy`),
+    KEY `ix_orders_strategy_name` (`strategy_name`),
+    KEY `ix_orders_parent` (`parent_order_id`),
+    KEY `ix_orders_created` (`created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `market_events` (
+    `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    `event_type` VARCHAR(64) NOT NULL,
+    `topic` VARCHAR(191) NOT NULL,
+    `symbol` VARCHAR(191) NULL,
+    `source` VARCHAR(191) NULL,
+    `payload` JSON NULL,
+    `meta` JSON NULL,
+    `ts_ns` BIGINT NULL,
+    `recorded_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `ingested_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    KEY `ix_market_events_topic` (`topic`),
+    KEY `ix_market_events_symbol` (`symbol`),
+    KEY `ix_market_events_recorded` (`recorded_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `market_prices` (
+    `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    `symbol` VARCHAR(191) NOT NULL,
+    `bid` DOUBLE NULL,
+    `ask` DOUBLE NULL,
+    `bid_size` DOUBLE NULL,
+    `ask_size` DOUBLE NULL,
+    `source` VARCHAR(191) NULL,
+    `observed_at` DATETIME NOT NULL,
+    `extra` JSON NULL,
+    PRIMARY KEY (`id`),
+    KEY `ix_market_prices_symbol` (`symbol`),
+    KEY `ix_market_prices_observed` (`observed_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `risk_rules` (
+    `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+    `symbol` VARCHAR(191) NOT NULL,
+    `stop_loss_price` DOUBLE NULL,
+    `take_profit_price` DOUBLE NULL,
+    `max_loss_percent` DOUBLE NULL,
+    `enabled` TINYINT(1) NOT NULL DEFAULT 1,
+    `max_time_span` INT NULL,
+    `timestamp` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `auto_trailing` TINYINT(1) NOT NULL DEFAULT 0,
+    `atr_params` JSON NULL,
+    `rule_type` VARCHAR(64) NOT NULL DEFAULT 'fixed',
+    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `ux_risk_rules_symbol` (`symbol`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `strategies` (
+    `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+    `name` VARCHAR(191) NOT NULL,
+    `strategy_type` VARCHAR(64) NOT NULL,
+    `enabled` TINYINT(1) NOT NULL DEFAULT 1,
+    `api_endpoint` VARCHAR(255) NULL,
+    `file_path` VARCHAR(255) NULL,
+    `description` TEXT NULL,
+    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `ux_strategies_name` (`name`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `historical_data` (
+    `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    `symbol` VARCHAR(191) NOT NULL,
+    `date` DATE NOT NULL,
+    `time` TIME NULL,
+    `open` DOUBLE NOT NULL,
+    `high` DOUBLE NOT NULL,
+    `low` DOUBLE NOT NULL,
+    `close` DOUBLE NOT NULL,
+    `volume` BIGINT NOT NULL,
+    `interval` VARCHAR(32) NOT NULL,
+    `adj_close` DOUBLE NULL,
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `ux_historical_data_symbol_interval` (`symbol`, `date`, `time`, `interval`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `config` (
+    `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+    `config_key` VARCHAR(191) NOT NULL,
+    `config_value` TEXT NOT NULL,
+    `description` TEXT NULL,
+    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `ux_config_key` (`config_key`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `sizing_history` (
+    `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    `symbol` VARCHAR(191) NOT NULL,
+    `action` VARCHAR(32) NOT NULL,
+    `suggested_quantity` DOUBLE NOT NULL,
+    `current_price` DOUBLE NULL,
+    `account_value` DOUBLE NULL,
+    `position_size` DOUBLE NULL,
+    `risk_percent` DOUBLE NULL,
+    `sizing_method` VARCHAR(64) NOT NULL,
+    `calculation_details` JSON NULL,
+    `g_rules_checked` JSON NULL,
+    `timestamp` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    KEY `ix_sizing_history_symbol` (`symbol`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `notification_history` (
+    `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    `channel` VARCHAR(64) NOT NULL,
+    `event_type` VARCHAR(64) NOT NULL,
+    `message` TEXT NOT NULL,
+    `status` VARCHAR(32) NOT NULL DEFAULT 'pending',
+    `retry_count` INT NOT NULL DEFAULT 0,
+    `error_message` TEXT NULL,
+    `sent_at` DATETIME NULL,
+    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    KEY `ix_notification_history_channel` (`channel`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

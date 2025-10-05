@@ -14,6 +14,7 @@ from typing import Any, Awaitable, Callable, Iterable, Mapping, Sequence
 
 from fastapi import APIRouter, HTTPException, Query
 
+from src.db import ConfigRepository, ConfigRepositoryError
 from src.ibbot.redis import (
     DEFAULT_COMMAND_QUEUE,
     DEFAULT_MARKET_STREAM,
@@ -303,16 +304,55 @@ async def _summarise_hash_category(
     return summary
 
 
+async def _summarise_config_modules(field_limit: int = 10) -> dict[str, Any]:
+    repository = ConfigRepository(logger_name="routes.config.monitor")
+    try:
+        versions = await repository.load_versions()
+    except ConfigRepositoryError as exc:
+        return {"samples": [], "has_more": False, "count": 0, "error": str(exc)}
+
+    samples: list[dict[str, Any]] = []
+    for module in sorted(versions.keys()):
+        try:
+            snapshot = await repository.load_module(module)
+        except ConfigRepositoryError as exc:
+            samples.append(
+                {
+                    "key": module,
+                    "label": module,
+                    "fields": [],
+                    "has_more_fields": False,
+                    "error": str(exc),
+                }
+            )
+            continue
+
+        fields = [
+            {"field": key, "value": value}
+            for key, value in sorted(snapshot.values.items())
+        ]
+        has_more = len(fields) > field_limit
+        samples.append(
+            {
+                "key": module,
+                "label": module,
+                "fields": fields[:field_limit],
+                "has_more_fields": has_more,
+                "error": None,
+            }
+        )
+
+    return {"samples": samples, "has_more": False, "count": len(samples), "error": None}
+
+
 async def _collect_data_fields(redis) -> dict[str, Any]:
     if redis is None:
+        configs = await _summarise_config_modules()
         return {
-            "configs": {"samples": [], "has_more": False, "count": 0, "error": "Redis unavailable"},
+            "configs": configs,
             "orders": {"samples": [], "has_more": False, "count": 0, "error": "Redis unavailable"},
             "subscriptions": {"samples": [], "has_more": False, "count": 0, "error": "Redis unavailable"},
         }
-
-    def _config_label(key: str) -> str:
-        return key.split(":", 2)[-1] if ":" in key else key
 
     def _order_label(key: str) -> str:
         return key.split(":", 2)[-1] if ":" in key else key
@@ -320,11 +360,7 @@ async def _collect_data_fields(redis) -> dict[str, Any]:
     def _subscription_label(key: str) -> str:
         return key.split(":", 2)[-1] if ":" in key else key
 
-    configs_task = _summarise_hash_category(
-        redis,
-        pattern="hash:config:*",
-        label_fn=_config_label,
-    )
+    configs_task = _summarise_config_modules()
     orders_task = _summarise_hash_category(
         redis,
         pattern="hash:ib:result:*",
