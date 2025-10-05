@@ -52,14 +52,14 @@
   - `zset:service_metrics:<service>:<metric>`：记录服务写入吞吐、延迟、队列深度等监控指标（默认保留 24 小时）。
 - **持久化**
   - MariaDB `orders`/`risk_rules`/`strategies`/`config`：保存交易指令、风险规则、策略与配置元数据。
-  - Parquet `data/market-data/*.parquet`：存储行情 K 线/DOM 快照，替代原 `market_events`/`market_prices` 表。
+- Parquet `data/market-data/*.parquet`：存储行情 K 线/DOM 快照，实时分发完全依赖 Redis。
 - **日志**
   - 每个服务使用 `foundation-libs` 的日志封装写入 `data/logs/<module>.log`。
   - 主程序读取并索引日志文件供前端展示，可结合 WebSocket 推送最新日志。
 
 ### 3.3 Pub/Sub 工作流
 1. `ib-feed-service` 从 IB 订阅行情与 DOM。
-2. 收到更新后，写入 `pubsub:ib:*` 通道，并通过 `ibbot.redis` 工具更新 `hash:market:snapshot` 与 MariaDB。
+2. 收到更新后，写入 `pubsub:ib:*` 通道，并通过 `ibbot.redis` 工具更新 `hash:market:snapshot`，必要时异步写入 Parquet 历史库。
 3. `market-data-service` 订阅对应通道，聚合为快照；提供 REST `/market/<symbol>` 和 WebSocket `/ws/market` 接口返回最新价格、DOM、账户指标。
 4. 其他模块（策略、风险、主程序）只需访问市场数据服务的接口或 Redis 快照，不再直接与 IB 服务交互。
 
@@ -109,7 +109,7 @@
 - 落库职责明确：**此服务是行情/DOM 的唯一落库者**，其他服务禁止直接写入 Parquet 历史库。
 - 验证：
   - 模拟行情流测试吞吐与落库。
-  - 对 MariaDB 查询接口编写回归测试，验证数据完整性。
+  - 对 Parquet 历史读取接口编写回归测试，验证数据完整性。
 
 ### 4.4 市场数据服务
 - 对外 API：
