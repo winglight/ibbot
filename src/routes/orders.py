@@ -1,7 +1,7 @@
 import asyncio
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from typing import Optional, Dict, Tuple, Any
+from typing import Optional, Dict, Any
 
 from fastapi import APIRouter, HTTPException, Depends
 from loguru import logger
@@ -115,14 +115,6 @@ async def place_order(order: OrderRequest, user: Optional[str] = Depends(get_cur
             except Exception as rec_err:
                 logger.warning(f"Failed to record order in OrderManager: {rec_err}")
             
-            # 失效订单缓存，避免3秒缓存导致新订单不可见
-            try:
-                global orders_cache, orders_cache_timestamp
-                orders_cache = {}
-                orders_cache_timestamp = {}
-            except Exception:
-                pass
-
             await websocket_manager.broadcast({  # 替换 manager
                 "type": "order_placed",
                 "order_id": trade.order.orderId,
@@ -793,22 +785,15 @@ async def cancel_all_orders(user: Optional[str] = Depends(get_current_user)):
         logger.error(f"Cancel all orders error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# 订单缓存，避免频繁查询数据库
-orders_cache: Dict[Tuple[int, int, Optional[str]], Dict[str, Any]] = {}
-orders_cache_timestamp: Dict[Tuple[int, int, Optional[str]], datetime] = {}
-ORDERS_CACHE_TTL = 3  # 缓存有效期（秒）
-
 @router.get("/api/orders")
 async def get_orders(user: Optional[str] = Depends(get_current_user), limit: int = 100, use_cache: bool = True,
                      start_date: Optional[str] = None, page: int = 1):
     """获取订单列表（从数据库读取，包含历史订单）
     - limit: 每页返回的订单数量，默认100条
-    - use_cache: 是否使用API级别缓存（默认 True）
+    - use_cache: 已保留用于兼容旧客户端，但不会缓存结果
     - start_date: 起始时间（ISO字符串）
     - page: 页码，从1开始
     """
-    global orders_cache, orders_cache_timestamp
-
     try:
         if 'order_manager' not in globals() or not order_manager:
             raise HTTPException(status_code=500, detail="Order manager not initialized")
@@ -826,19 +811,6 @@ async def get_orders(user: Optional[str] = Depends(get_current_user), limit: int
             limit = 100
         page = max(1, page)
         offset = (page - 1) * limit if limit else 0
-        cache_key = (limit, page, start_dt.isoformat() if start_dt else None)
-
-        if use_cache and not start_dt:
-            cached_payload = orders_cache.get(cache_key)
-            cached_timestamp = orders_cache_timestamp.get(cache_key)
-            if cached_payload and cached_timestamp:
-                cache_age = (current_time - cached_timestamp).total_seconds()
-                if cache_age < ORDERS_CACHE_TTL:
-                    logger.debug(f"Using orders cache, age: {cache_age:.1f}s")
-                    response = dict(cached_payload)
-                    response["from_cache"] = True
-                    return response
-
         loop = asyncio.get_event_loop()
         try:
             result = await asyncio.wait_for(
@@ -926,43 +898,15 @@ async def get_orders(user: Optional[str] = Depends(get_current_user), limit: int
 
             response_payload = {"success": True, "orders": converted_orders, "meta": meta, "from_cache": False}
 
-            if use_cache and not start_dt:
-                orders_cache[cache_key] = response_payload
-                orders_cache_timestamp[cache_key] = current_time
-
             return response_payload
 
         except asyncio.TimeoutError:
-            cached_payload = orders_cache.get(cache_key)
-            cache_time = orders_cache_timestamp.get(cache_key)
-            if cached_payload and cache_time:
-                cache_age = (current_time - cache_time).total_seconds()
-                logger.warning(
-                    f"Orders request timed out, returning cached data (age: {cache_age:.1f}s)"
-                    if cache_age is not None else
-                    "Orders request timed out, returning cached data"
-                )
-                response = dict(cached_payload)
-                response["from_cache"] = True
-                response["cache_warning"] = "Request timed out, showing cached data"
-                return response
-
             logger.warning("Orders request timed out and no cache available")
             return {"success": False, "error": "Orders request timed out"}
 
     except HTTPException:
         raise
     except Exception as e:
-        cached_payload = orders_cache.get(cache_key)
-        cache_time = orders_cache_timestamp.get(cache_key)
-        if cached_payload and cache_time:
-            cache_age = (current_time - cache_time).total_seconds()
-            logger.error(f"Get orders error: {e}, returning cached data (age: {cache_age:.1f}s)")
-            response = dict(cached_payload)
-            response["from_cache"] = True
-            response["cache_warning"] = "Error occurred, showing cached data"
-            return response
-
         logger.error(f"Get orders error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
