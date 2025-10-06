@@ -109,20 +109,73 @@ function ensureCoreDependencies() {
         throw new Error('MonitoringManager module is required');
     }
 
+    const MonitoringDashboardClass = resolveModule(['monitoring', 'dashboard'], 'MonitoringDashboard', globalScope.MonitoringDashboard);
+
     const RiskRulesManagerClass = resolveModule(['risk', 'manager'], 'RiskRulesManager', globalScope.RiskRulesManager);
     if (typeof RiskRulesManagerClass !== 'function') {
         throw new Error('RiskRulesManager module is required');
     }
 
+    const LoginManagerClass = resolveModule(['auth', 'login'], 'LoginManager', globalScope.LoginManager);
+    if (typeof LoginManagerClass !== 'function') {
+        throw new Error('LoginManager module is required');
+    }
+
+    const IBKRConnectionManagerClass = resolveModule(['ibkr', 'connection'], 'IBKRConnectionManager', globalScope.IBKRConnectionManager);
+    if (typeof IBKRConnectionManagerClass !== 'function') {
+        throw new Error('IBKRConnectionManager module is required');
+    }
+
+    const IBKRDataManagerClass = resolveModule(['ibkr', 'data'], 'IBKRDataManager', globalScope.IBKRDataManager);
+    if (typeof IBKRDataManagerClass !== 'function') {
+        throw new Error('IBKRDataManager module is required');
+    }
+
+    const PortfolioManagerClass = resolveModule(['portfolio'], 'PortfolioManager', globalScope.PortfolioManager);
+    if (typeof PortfolioManagerClass !== 'function') {
+        throw new Error('PortfolioManager module is required');
+    }
+
+    const LogsManagerClass = resolveModule(['logs'], 'LogsManager', globalScope.LogsManager);
+    if (typeof LogsManagerClass !== 'function') {
+        throw new Error('LogsManager module is required');
+    }
+
+    const DOMManagerClass = resolveModule(['dom', 'manager'], 'DOMManager', globalScope.DOMManager);
+    if (typeof DOMManagerClass !== 'function') {
+        throw new Error('DOMManager module is required');
+    }
+
+    const StrategiesManagerClass = resolveModule(['strategies', 'manager'], 'StrategiesManager', globalScope.StrategiesManager);
+    const StrategyDetailsControllerClass = resolveModule(['strategies', 'details'], 'StrategyDetailsController', globalScope.StrategyDetailsController);
+
+    const OrdersManagerClass = resolveModule(['orders', 'manager'], 'OrderManager', globalScope.OrderManager);
+    if (typeof OrdersManagerClass !== 'function') {
+        throw new Error('OrderManager module is required');
+    }
+
+    const NotificationsManagerClass = resolveModule(['notifications', 'manager'], 'NotificationsManager', globalScope.NotificationsManager);
+    if (typeof NotificationsManagerClass !== 'function') {
+        throw new Error('NotificationsManager module is required');
+    }
+
+    const UIControllerClass = resolveModule(['ui', 'controller'], 'UIController', globalScope.UIController);
+
     return {
         MonitoringManagerClass,
-        MonitoringDashboardClass: resolveModule(['monitoring', 'dashboard'], 'MonitoringDashboard', globalScope.MonitoringDashboard),
+        MonitoringDashboardClass,
         RiskRulesManagerClass,
-        StrategiesManagerClass: resolveModule(['strategies', 'manager'], 'StrategiesManager', globalScope.StrategiesManager),
-        StrategyDetailsControllerClass: resolveModule(['strategies', 'details'], 'StrategyDetailsController', globalScope.StrategyDetailsController),
-        OrdersManagerClass: resolveModule(['orders', 'manager'], 'OrderManager', globalScope.OrderManager),
-        NotificationsManagerClass: resolveModule(['notifications', 'manager'], 'NotificationsManager', globalScope.NotificationsManager),
-        UIControllerClass: resolveModule(['ui', 'controller'], 'UIController', globalScope.UIController),
+        LoginManagerClass,
+        IBKRConnectionManagerClass,
+        IBKRDataManagerClass,
+        PortfolioManagerClass,
+        LogsManagerClass,
+        DOMManagerClass,
+        StrategiesManagerClass,
+        StrategyDetailsControllerClass,
+        OrdersManagerClass,
+        NotificationsManagerClass,
+        UIControllerClass,
     };
 }
 
@@ -162,6 +215,12 @@ class TradingApp {
             MonitoringManagerClass,
             MonitoringDashboardClass,
             RiskRulesManagerClass,
+            LoginManagerClass,
+            IBKRConnectionManagerClass,
+            IBKRDataManagerClass,
+            PortfolioManagerClass,
+            LogsManagerClass,
+            DOMManagerClass,
             StrategiesManagerClass,
             StrategyDetailsControllerClass,
             OrdersManagerClass,
@@ -250,22 +309,18 @@ class TradingApp {
         this.panelLoadingStates = new Map();
 
         // 初始化登录管理器
-        this.loginManager = new LoginManager(this);
-        this.ibkrManager = new IBKRConnectionManager(this);
-        this.dataManager = new IBKRDataManager(this);
-        this.orderManager = typeof OrdersManagerClass === 'function'
-            ? new OrdersManagerClass(this)
-            : new OrderManager(this);
-        this.portfolioManager = new PortfolioManager(this);
-        this.logsManager = new LogsManager(
+        this.loginManager = new LoginManagerClass(this);
+        this.ibkrManager = new IBKRConnectionManagerClass(this);
+        this.dataManager = new IBKRDataManagerClass(this);
+        this.orderManager = new OrdersManagerClass(this);
+        this.portfolioManager = new PortfolioManagerClass(this);
+        this.logsManager = new LogsManagerClass(
             this,
             this.apiCall.bind(this),
             this.showAlert.bind(this),
             this.formatNumber.bind(this)
         );
-        this.notificationsManager = typeof NotificationsManagerClass === 'function'
-            ? new NotificationsManagerClass(this)
-            : new NotificationsManager(this);
+        this.notificationsManager = new NotificationsManagerClass(this);
         this.lastKnownOrderPrice = null;
         this.logsManagerInitialized = false;
         this.notificationsManagerInitialized = false;
@@ -276,7 +331,7 @@ class TradingApp {
         this.uiController = typeof UIControllerClass === 'function'
             ? new UIControllerClass(this)
             : null;
-        this.domManager = new DOMManager(this);
+        this.domManager = new DOMManagerClass(this);
 
         this.callMonitoringManager('guardChartScriptableDescriptors');
         this.init();

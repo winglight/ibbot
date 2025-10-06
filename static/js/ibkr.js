@@ -2,7 +2,13 @@
  * IBKR Connection Manager
  * 负责与Interactive Brokers的连接管理
  */
-class IBKRConnectionManager {
+(function(global) {
+    const root = global || {};
+    const appModules = root.appModules = root.appModules || {};
+    const ibkrNamespace = appModules.ibkr = appModules.ibkr || {};
+    const connectionNamespace = ibkrNamespace.connection = ibkrNamespace.connection || {};
+
+    class IBKRConnectionManager {
     constructor(app) {
         this.app = app;
         this.connected = false;
@@ -1145,18 +1151,20 @@ class IBKRConnectionManager {
     }
 }
 
-// 导出模块
-window.IBKRConnectionManager = IBKRConnectionManager;
+    connectionNamespace.IBKRConnectionManager = IBKRConnectionManager;
+    root.IBKRConnectionManager = IBKRConnectionManager;
 
-// 全局调试工具
-window.debugIBConnection = function() {
-    if (window.app && window.app.ibkrManager) {
-        return window.app.ibkrManager.debugConnectionStatus();
-    } else {
+    // 全局调试工具
+    root.debugIBConnection = function() {
+        const app = root.app;
+        if (app && app.ibkrManager) {
+            return app.ibkrManager.debugConnectionStatus();
+        }
         console.error('IBKR Manager not available');
         return null;
-    }
-};
+    };
 
-// 使用说明
-console.log('IB连接调试工具已加载，使用 debugIBConnection() 检查连接状态');
+    // 使用说明
+    console.log('IB连接调试工具已加载，使用 debugIBConnection() 检查连接状态');
+
+})(typeof window !== 'undefined' ? window : globalThis);
