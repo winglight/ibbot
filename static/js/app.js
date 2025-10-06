@@ -252,6 +252,8 @@ class TradingApp {
         this.monitoringManager = new MonitoringManagerClass(this);
         this.monitoring = this.monitoringManager;
         this.wsHandlers = new Map();
+        this.wsThrottle = {};
+        this.wsPendingMessages = [];
         this.monitoringDashboard = typeof MonitoringDashboardClass === 'function'
             ? new MonitoringDashboardClass(this)
             : null;
@@ -571,6 +573,153 @@ class TradingApp {
         return () => {
             this.unregisterWebSocketHandler(type, handler);
         };
+    }
+
+    isWebSocketOpen() {
+        if (this.ibkrManager?.ws && typeof this.ibkrManager.ws.readyState === 'number') {
+            return this.ibkrManager.ws.readyState === WebSocket.OPEN;
+        }
+        if (this.ws && typeof this.ws.readyState === 'number') {
+            return this.ws.readyState === WebSocket.OPEN;
+        }
+        return false;
+    }
+
+    queuePendingWebSocketMessage(key, payload, options = {}) {
+        if (!payload || typeof payload !== 'object') return;
+        if (!this.wsPendingMessages) {
+            this.wsPendingMessages = [];
+        }
+        const minInterval = Math.max(0, Number(options.minInterval ?? 0));
+        const entry = { key: key || payload?.type || `queued:${Date.now()}`, payload, options: { ...options, minInterval } };
+        if (key) {
+            const idx = this.wsPendingMessages.findIndex(item => item.key === key);
+            if (idx !== -1) {
+                this.wsPendingMessages[idx] = entry;
+                return;
+            }
+        }
+        this.wsPendingMessages.push(entry);
+        if (this.wsPendingMessages.length > 50) {
+            this.wsPendingMessages.shift();
+        }
+    }
+
+    flushPendingWebSocketMessages() {
+        if (!this.wsPendingMessages || this.wsPendingMessages.length === 0) {
+            return;
+        }
+        const pending = this.wsPendingMessages.slice();
+        this.wsPendingMessages.length = 0;
+        pending.forEach(({ key, payload, options }) => {
+            const retryOptions = { ...options, force: true };
+            setTimeout(() => {
+                this.sendThrottledWebSocketMessage(key, payload, retryOptions);
+            }, 0);
+        });
+    }
+
+    resetWebSocketThrottle() {
+        if (!this.wsThrottle) return;
+        Object.values(this.wsThrottle).forEach(state => {
+            if (state && state.timer) {
+                clearTimeout(state.timer);
+            }
+        });
+        this.wsThrottle = {};
+    }
+
+    handleWebSocketOpen() {
+        this.flushPendingWebSocketMessages();
+    }
+
+    handleWebSocketClosed() {
+        this.resetWebSocketThrottle();
+    }
+
+    sendWebSocketMessage(payload) {
+        if (!payload || typeof payload !== 'object') return false;
+        if (this.ibkrManager && typeof this.ibkrManager.sendMessage === 'function') {
+            return this.ibkrManager.sendMessage(payload);
+        }
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            return false;
+        }
+        try {
+            this.ws.send(JSON.stringify(payload));
+            return true;
+        } catch (error) {
+            console.error('[ws] failed to send message from app', error, payload);
+            return false;
+        }
+    }
+
+    sendThrottledWebSocketMessage(key, payload, options = {}) {
+        if (!key) return 'failed';
+        if (!this.wsThrottle) {
+            this.wsThrottle = {};
+        }
+        const minInterval = Math.max(0, Number(options.minInterval ?? 15000));
+        if (!this.wsThrottle[key]) {
+            this.wsThrottle[key] = { lastSent: 0, timer: null, queued: null };
+        }
+        const state = this.wsThrottle[key];
+        const now = Date.now();
+        const allowNow = options.force || (now - state.lastSent >= minInterval);
+        if (allowNow) {
+            if (!this.isWebSocketOpen()) {
+                state.queued = payload;
+                this.queuePendingWebSocketMessage(key, payload, { ...options, minInterval });
+                return 'queued';
+            }
+            if (state.timer) {
+                clearTimeout(state.timer);
+                state.timer = null;
+            }
+            state.lastSent = now;
+            state.queued = null;
+            return this.sendWebSocketMessage(payload) ? 'sent' : 'failed';
+        }
+
+        state.queued = payload;
+        if (!state.timer) {
+            const delay = Math.max(minInterval - (now - state.lastSent), 0) + 50;
+            state.timer = setTimeout(() => {
+                state.timer = null;
+                if (state.queued) {
+                    const queuedPayload = state.queued;
+                    state.queued = null;
+                    this.sendThrottledWebSocketMessage(key, queuedPayload, { force: true, minInterval });
+                }
+            }, delay);
+        }
+        return 'queued';
+    }
+
+    requestOrdersSnapshot(options = {}) {
+        if (typeof this.setPanelLoading === 'function') {
+            this.setPanelLoading('orders', true);
+        }
+        const payload = {
+            type: 'request_orders_snapshot',
+            limit: Number.isFinite(options.limit) ? Number(options.limit) : 10,
+        };
+        if (options.startDate) {
+            payload.start_date = options.startDate;
+        }
+        if (Number.isFinite(options.page)) {
+            payload.page = Math.max(1, Number(options.page));
+        }
+        if (options.force) payload.force = true;
+        if (options.useCache === false) payload.use_cache = false;
+        const result = this.sendThrottledWebSocketMessage('orders_snapshot', payload, {
+            force: Boolean(options.force),
+            minInterval: options.minInterval ?? 15000,
+        });
+        if (result === 'failed' && typeof this.setPanelLoading === 'function') {
+            this.setPanelLoading('orders', false);
+        }
+        return result;
     }
 
     unregisterWebSocketHandler(type, handler) {
