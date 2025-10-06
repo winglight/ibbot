@@ -204,6 +204,9 @@
     }
 
     requestOrdersSnapshot(options = {}) {
+        if (this.app && typeof this.app.requestOrdersSnapshot === 'function') {
+            return this.app.requestOrdersSnapshot(options);
+        }
         if (this.app && typeof this.app.setPanelLoading === 'function') {
             this.app.setPanelLoading('orders', true);
         }
@@ -957,6 +960,13 @@
         this.ws.onopen = () => {
             console.log('[ws] connected');
             this._resetThrottleState();
+            if (this.app && typeof this.app.handleWebSocketOpen === 'function') {
+                try {
+                    this.app.handleWebSocketOpen();
+                } catch (err) {
+                    console.error('[ws] app handleWebSocketOpen error', err);
+                }
+            }
             this._flushPendingMessages();
             this.requestConnectionStatus({ force: true });
             this.requestRiskRules({ force: true });
@@ -980,6 +990,13 @@
         this.ws.onclose = (ev) => {
             console.log('[ws] disconnected', { code: ev?.code, reason: ev?.reason });
             this._resetThrottleState();
+            if (this.app && typeof this.app.handleWebSocketClosed === 'function') {
+                try {
+                    this.app.handleWebSocketClosed();
+                } catch (err) {
+                    console.error('[ws] app handleWebSocketClosed error', err);
+                }
+            }
             // Reconnect after 5 seconds
             setTimeout(() => this.connectWebSocket(), 5000);
         };
@@ -1004,7 +1021,11 @@
                 if (this.app.ordersCache) {
                     delete this.app.ordersCache['orders_main'];
                 }
-                this.requestOrdersSnapshot({ force: true, reason: 'order_placed' });
+                if (this.app && typeof this.app.requestOrdersSnapshot === 'function') {
+                    this.app.requestOrdersSnapshot({ force: true, reason: 'order_placed' });
+                } else {
+                    this.requestOrdersSnapshot({ force: true, reason: 'order_placed' });
+                }
                 (() => {
                     const idInfo = this.app?.formatOrderIdDisplay?.(data.order_id);
                     const rawId = data?.order_id !== undefined && data?.order_id !== null
@@ -1022,7 +1043,11 @@
                 if (this.app.ordersCache) {
                     delete this.app.ordersCache['orders_main'];
                 }
-                this.requestOrdersSnapshot({ force: true, reason: 'order_cancelled' });
+                if (this.app && typeof this.app.requestOrdersSnapshot === 'function') {
+                    this.app.requestOrdersSnapshot({ force: true, reason: 'order_cancelled' });
+                } else {
+                    this.requestOrdersSnapshot({ force: true, reason: 'order_cancelled' });
+                }
                 (() => {
                     const idInfo = this.app?.formatOrderIdDisplay?.(data.order_id);
                     const rawId = data?.order_id !== undefined && data?.order_id !== null
@@ -1040,7 +1065,11 @@
                 if (this.app.ordersCache) {
                     delete this.app.ordersCache['orders_main'];
                 }
-                this.requestOrdersSnapshot({ force: true, reason: 'all_orders_cancelled' });
+                if (this.app && typeof this.app.requestOrdersSnapshot === 'function') {
+                    this.app.requestOrdersSnapshot({ force: true, reason: 'all_orders_cancelled' });
+                } else {
+                    this.requestOrdersSnapshot({ force: true, reason: 'all_orders_cancelled' });
+                }
                 this.app.showAlert('success', `已取消 ${typeof data.count === 'number' ? data.count : ''} 个订单`);
                 break;
             case 'account_update':
@@ -1066,7 +1095,11 @@
                 if (this.app.ordersCache) {
                     delete this.app.ordersCache['orders_main'];
                 }
-                this.requestOrdersSnapshot({ reason: 'order_update' });
+                if (this.app && typeof this.app.requestOrdersSnapshot === 'function') {
+                    this.app.requestOrdersSnapshot({ reason: 'order_update' });
+                } else {
+                    this.requestOrdersSnapshot({ reason: 'order_update' });
+                }
                 break;
             case 'orders_snapshot':
                 if (this.app && typeof this.app.handleWebSocketPayload === 'function') {
@@ -1109,7 +1142,11 @@
                         delete this.app.ordersCache['orders_main'];
                     }
                     console.log('Requesting orders snapshot after order_filled');
-                    this.requestOrdersSnapshot({ force: true, reason: 'order_filled' });
+                    if (this.app && typeof this.app.requestOrdersSnapshot === 'function') {
+                        this.app.requestOrdersSnapshot({ force: true, reason: 'order_filled' });
+                    } else {
+                        this.requestOrdersSnapshot({ force: true, reason: 'order_filled' });
+                    }
                 } else {
                     console.error('loadOrders method not available');
                 }

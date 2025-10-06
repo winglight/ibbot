@@ -87,12 +87,15 @@ class OrderManager {
             if (!Number.isFinite(this.pagination.page) || this.pagination.page !== safePage) {
                 this.pagination.page = safePage;
             }
-            if (this.app && this.app.ibkrManager && typeof this.app.ibkrManager.requestOrdersSnapshot === 'function') {
-                this.app.ibkrManager.requestOrdersSnapshot({
-                    limit: pageSize,
-                    force: Boolean(options.force),
-                    page: safePage,
-                });
+            const requestPayload = {
+                limit: pageSize,
+                force: Boolean(options.force),
+                page: safePage,
+            };
+            if (this.app && typeof this.app.requestOrdersSnapshot === 'function') {
+                this.app.requestOrdersSnapshot(requestPayload);
+            } else if (this.app?.ibkrManager?.requestOrdersSnapshot) {
+                this.app.ibkrManager.requestOrdersSnapshot(requestPayload);
             }
 
         } catch (error) {
