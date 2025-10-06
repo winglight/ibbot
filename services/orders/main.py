@@ -34,6 +34,21 @@ class OrderRepositoryProtocol(Protocol):
     ) -> int | None:
         ...
 
+    async def fetch_recent_orders(self, *, limit: int) -> list[Mapping[str, Any]]:
+        ...
+
+    async def paginate_orders(
+        self,
+        *,
+        offset: int,
+        limit: int,
+        start_date: datetime | None = None,
+    ) -> tuple[list[Mapping[str, Any]], int]:
+        ...
+
+    async def fetch_order(self, identifier: str) -> Mapping[str, Any] | None:
+        ...
+
 LOGGER = logging.getLogger("ibbot.services.orders")
 
 
@@ -561,8 +576,6 @@ class OrdersRuntime:
     ) = None
     command_queue: str = DEFAULT_COMMAND_QUEUE
     results_stream: str = "stream:ib:results"
-    snapshot_key: str = "json:orders:snapshot"
-    history_key: str = "list:orders:history"
     stream_poll_interval: float = 1.0
     health_interval: float = 15.0
     history_limit: int = 200
@@ -608,7 +621,7 @@ class OrdersRuntime:
             ):
                 await self._initialise_order_repository()
             self._redis = await self.redis_factory()
-            await self._load_snapshot()
+            await self._hydrate_from_repository()
             await self._publish_health()
         except Exception:
             await self._shutdown_order_repository()
@@ -657,8 +670,6 @@ class OrdersRuntime:
             self._active_orders[command_id] = entry
             self._command_to_order[command_id] = command_id
             self._last_updated_at = _utc_now()
-            await self._persist_snapshot()
-            await self._append_history({"event": "submitted", "command_id": command_id, "order": entry})
             entry_snapshot = _clone_order_record(entry)
         if entry_snapshot is not None:
             persist_result = await self._persist_order_snapshot(
@@ -698,7 +709,6 @@ class OrdersRuntime:
             "kwargs": dict(kwargs),
         }
         await enqueue_ib_command(payload, redis=self._redis, queue_key=self.command_queue)
-        await self._append_history({"event": method, "command_id": command_id, "payload": kwargs})
         await self._publish_health()
         return command_id
 
@@ -812,14 +822,6 @@ class OrdersRuntime:
                 self._history = deque(retained, maxlen=self.history_limit)
 
             self._last_updated_at = timestamp_dt
-            await self._persist_snapshot()
-            await self._append_history(
-                {
-                    "event": "fill_metrics_updated",
-                    "order_id": order_identifier,
-                    "payload": dict(updates),
-                }
-            )
 
         if record_snapshot is not None:
             persist_result = await self._persist_order_snapshot(
@@ -871,70 +873,126 @@ class OrdersRuntime:
 
         threshold_tzinfo = start_dt.tzinfo
 
-        async with self._lock:
-            combined: list[dict[str, Any]] = []
-            combined.extend(self._active_orders.values())
-            combined.extend(self._history)
-
-            normalised = [
-                _normalise_order_record(order)
-                for order in combined
-            ]
-
-            normalised.sort(
-                key=lambda item: item.get("updated_at")
-                or item.get("requested_at")
-                or "",
-                reverse=True,
-            )
-
-            def _record_timestamp(record: Mapping[str, Any]) -> datetime | None:
-                for key in (
-                    "updated_at",
-                    "submitted_at",
-                    "requested_at",
-                    "completed_at",
-                    "created_at",
-                    "timestamp",
-                ):
-                    candidate = record.get(key)
-                    parsed = _parse_datetime(candidate)
-                    if parsed is None and isinstance(candidate, str):
-                        try:
-                            parsed = datetime.fromisoformat(candidate)
-                        except Exception:
-                            continue
-                    if parsed is None:
+        def _record_timestamp(record: Mapping[str, Any]) -> datetime | None:
+            for key in (
+                "updated_at",
+                "submitted_at",
+                "requested_at",
+                "completed_at",
+                "created_at",
+                "timestamp",
+            ):
+                candidate = record.get(key)
+                parsed = _parse_datetime(candidate)
+                if parsed is None and isinstance(candidate, str):
+                    try:
+                        parsed = datetime.fromisoformat(candidate)
+                    except Exception:
                         continue
-                    if parsed.tzinfo is None:
-                        if threshold_tzinfo is not None:
-                            parsed = parsed.replace(tzinfo=threshold_tzinfo)
-                        else:
-                            parsed = parsed.replace(tzinfo=timezone.utc)
-                    elif threshold_tzinfo is not None:
-                        parsed = parsed.astimezone(threshold_tzinfo)
-                    return parsed
-                return None
+                if parsed is None:
+                    continue
+                if parsed.tzinfo is None:
+                    if threshold_tzinfo is not None:
+                        parsed = parsed.replace(tzinfo=threshold_tzinfo)
+                    else:
+                        parsed = parsed.replace(tzinfo=timezone.utc)
+                elif threshold_tzinfo is not None:
+                    parsed = parsed.astimezone(threshold_tzinfo)
+                return parsed
+            return None
 
-            filtered_orders: list[dict[str, Any]] = []
-            for order in normalised:
-                order_timestamp = _record_timestamp(order)
-                if order_timestamp is None or order_timestamp >= start_dt:
-                    filtered_orders.append(order)
+        def _record_identity(
+            record: Mapping[str, Any], fallback: str | None = None
+        ) -> tuple[str, ...]:
+            identifiers = {
+                _coerce_str(record.get("id")),
+                _coerce_str(record.get("order_id")),
+                _coerce_str(record.get("command_id")),
+                _coerce_str(record.get("client_order_id")),
+                _coerce_str(record.get("ib_order_id")),
+                _coerce_str(fallback),
+            }
+            filtered = sorted(value for value in identifiers if value)
+            if filtered:
+                return tuple(filtered)
+            return (str(id(record)),)
 
-            total = len(filtered_orders)
-            if limit:
-                sliced = filtered_orders[offset : offset + limit]
-            else:
-                sliced = filtered_orders[offset:]
+        async with self._lock:
+            in_memory_records: list[
+                tuple[tuple[str, ...], dict[str, Any], datetime | None]
+            ] = []
+            for identifier, entry in self._active_orders.items():
+                normalised = _normalise_order_record(entry)
+                identity = _record_identity(normalised, fallback=identifier)
+                timestamp = _record_timestamp(normalised)
+                if timestamp is None or timestamp >= start_dt:
+                    in_memory_records.append((identity, normalised, timestamp))
+            for entry in self._history:
+                normalised = _normalise_order_record(entry)
+                identity = _record_identity(normalised)
+                timestamp = _record_timestamp(normalised)
+                if timestamp is None or timestamp >= start_dt:
+                    in_memory_records.append((identity, normalised, timestamp))
             updated_at = self._last_updated_at
             last_event_id = self._last_message_id or ""
+
+        repository_records: list[
+            tuple[tuple[str, ...], dict[str, Any], datetime | None]
+        ] = []
+        repository_total = len(in_memory_records)
+        repository = self._order_repository
+        if repository is not None and limit:
+            try:
+                raw_records, repository_total = await repository.paginate_orders(
+                    offset=offset,
+                    limit=limit,
+                    start_date=start_dt,
+                )
+            except Exception as exc:  # pragma: no cover - defensive logging
+                self._record_repository_failure(str(exc))
+            else:
+                repository_records = []
+                for item in raw_records:
+                    if not isinstance(item, Mapping):
+                        continue
+                    normalised = _normalise_cached_record(item)
+                    identity = _record_identity(normalised)
+                    timestamp = _record_timestamp(normalised)
+                    repository_records.append((identity, normalised, timestamp))
+                self._repository_last_error = ""
+
+        combined: dict[
+            tuple[str, ...], tuple[dict[str, Any], datetime | None]
+        ] = {}
+        for identity, record, timestamp in repository_records:
+            combined[identity] = (record, timestamp)
+        for identity, record, timestamp in in_memory_records:
+            combined[identity] = (record, timestamp)
+
+        def _sort_key(
+            entry: tuple[tuple[str, ...], tuple[dict[str, Any], datetime | None]]
+        ) -> datetime:
+            timestamp = entry[1][1]
+            if timestamp is None:
+                return datetime.min.replace(tzinfo=timezone.utc)
+            return timestamp
+
+        combined_items = list(combined.items())
+        combined_items.sort(key=_sort_key, reverse=True)
+        ordered_records = [payload for _, (payload, _) in combined_items]
+
+        total_records = max(repository_total, len(ordered_records))
+        if limit:
+            sliced = ordered_records[offset : offset + limit]
             page = offset // limit if limit else 0
+        else:
+            sliced = ordered_records[offset:]
+            page = 0
 
         start_iso = _serialise_datetime(start_dt)
         return {
             "orders": sliced,
-            "total": total,
+            "total": total_records,
             "limit": limit,
             "offset": offset,
             "page": page,
@@ -952,12 +1010,43 @@ class OrdersRuntime:
             record = self._find_order_unlocked(identifier)
             updated_at = _normalise_timestamp(self._last_updated_at)
             last_event_id = self._last_message_id or ""
-        if record is None and self._redis is not None:
-            await self._load_snapshot()
-            async with self._lock:
-                record = self._find_order_unlocked(identifier)
-                updated_at = _normalise_timestamp(self._last_updated_at)
-                last_event_id = self._last_message_id or last_event_id
+        if record is None and self._order_repository is not None:
+            repository_record: Mapping[str, Any] | None = None
+            try:
+                repository_record = await self._order_repository.fetch_order(identifier)
+            except Exception as exc:  # pragma: no cover - defensive logging
+                self._record_repository_failure(str(exc))
+            else:
+                if repository_record is not None:
+                    self._repository_last_error = ""
+            if repository_record is not None:
+                normalised_repository_record = _normalise_cached_record(repository_record)
+                record = normalised_repository_record
+                status_value = _coerce_str(normalised_repository_record.get("status")) or ""
+                canonical_identifier = (
+                    _coerce_str(normalised_repository_record.get("command_id"))
+                    or _coerce_str(normalised_repository_record.get("order_id"))
+                    or _coerce_str(normalised_repository_record.get("id"))
+                    or identifier
+                )
+                snapshot = _clone_order_record(normalised_repository_record)
+                async with self._lock:
+                    existing = self._find_order_unlocked(identifier)
+                    if existing is None:
+                        if status_value.lower() in _TERMINAL_STATUSES:
+                            self._history.appendleft(snapshot)
+                        else:
+                            self._active_orders[canonical_identifier] = snapshot
+                        if canonical_identifier:
+                            self._command_to_order[canonical_identifier] = canonical_identifier
+                        if snapshot.get("command_id"):
+                            self._command_to_order[str(snapshot["command_id"])] = canonical_identifier
+                        if snapshot.get("order_id"):
+                            self._command_to_order[str(snapshot["order_id"])] = canonical_identifier
+                        if snapshot.get("id"):
+                            self._command_to_order[str(snapshot["id"])] = canonical_identifier
+                        updated_at = _normalise_timestamp(self._last_updated_at)
+                        last_event_id = self._last_message_id or last_event_id
         if record is None:
             raise KeyError(order_id)
         order_payload = _normalise_order_record(record)
@@ -1064,44 +1153,64 @@ class OrdersRuntime:
             except asyncio.TimeoutError:
                 continue
 
-    async def _load_snapshot(self) -> None:
-        if self._redis is None:
+    async def _hydrate_from_repository(self) -> None:
+        repository = self._order_repository
+        if repository is None:
+            async with self._lock:
+                self._active_orders = {}
+                self._history = deque(maxlen=self.history_limit)
+                self._command_to_order = {}
+                self._ib_only_orders = set()
+                self._last_updated_at = None
             return
+
+        fetch_limit = max(self.history_limit + 50, self.history_limit)
         try:
-            raw = await self._redis.get(self.snapshot_key)
-        except Exception:
-            raw = None
-        if not raw:
+            records = await repository.fetch_recent_orders(limit=fetch_limit)
+        except Exception as exc:  # pragma: no cover - defensive logging
+            self._record_repository_failure(str(exc))
             return
-        try:
-            payload = json.loads(raw)
-        except Exception:
-            return
-        active_payload = payload.get("active_orders")
-        history_payload = payload.get("history")
-        if active_payload is None and payload.get("orders") is not None:
-            active_payload = payload.get("orders")
-        active_items: Iterable[Any]
-        if isinstance(active_payload, Mapping):
-            active_items = active_payload.values()
-        elif isinstance(active_payload, Iterable):
-            active_items = active_payload
-        else:
-            active_items = []
-        history_items: Iterable[Any]
-        if isinstance(history_payload, Iterable):
-            history_items = history_payload
-        else:
-            history_items = []
+
+        active_items: list[dict[str, Any]] = []
+        history_items: list[dict[str, Any]] = []
+        for item in records:
+            if not isinstance(item, Mapping):
+                continue
+            record = _normalise_cached_record(item)
+            status_value = _coerce_str(record.get("status")) or ""
+            if status_value.lower() in _TERMINAL_STATUSES:
+                history_items.append(record)
+            else:
+                active_items.append(record)
+
         async with self._lock:
             self._active_orders = {}
             self._history = deque(maxlen=self.history_limit)
             self._command_to_order = {}
             self._ib_only_orders = set()
-            for item in active_items:
-                if not isinstance(item, Mapping):
-                    continue
-                record = _normalise_cached_record(item)
+            latest_timestamp: datetime | None = None
+
+            def _register_timestamp(candidate: Mapping[str, Any]) -> None:
+                nonlocal latest_timestamp
+                for key in (
+                    "updated_at",
+                    "submitted_at",
+                    "requested_at",
+                    "completed_at",
+                    "created_at",
+                    "timestamp",
+                ):
+                    value = candidate.get(key)
+                    parsed = _parse_datetime(value)
+                    if parsed is None:
+                        continue
+                    if parsed.tzinfo is None:
+                        parsed = parsed.replace(tzinfo=timezone.utc)
+                    if latest_timestamp is None or parsed > latest_timestamp:
+                        latest_timestamp = parsed
+                    break
+
+            for record in active_items:
                 identifier = str(
                     record.get("id")
                     or record.get("order_id")
@@ -1121,7 +1230,7 @@ class OrdersRuntime:
                 ):
                     self._ib_only_orders.add(command_id_value)
                     self.logger.info(
-                        "Dropping IB-only order %s from snapshot",
+                        "Dropping IB-only order %s from repository hydration",
                         command_id_value,
                     )
                     continue
@@ -1131,10 +1240,11 @@ class OrdersRuntime:
                     self._command_to_order[str(record["command_id"])] = identifier
                 if record.get("order_id"):
                     self._command_to_order[str(record["order_id"])] = identifier
-            for item in history_items:
-                if not isinstance(item, Mapping):
-                    continue
-                record = _normalise_cached_record(item)
+                if record.get("id"):
+                    self._command_to_order[str(record["id"])] = identifier
+                _register_timestamp(record)
+
+            for record in history_items:
                 identifier = str(
                     record.get("id")
                     or record.get("order_id")
@@ -1151,7 +1261,7 @@ class OrdersRuntime:
                 ):
                     self._ib_only_orders.add(command_id_value)
                     self.logger.info(
-                        "Dropping IB-only historical order %s from snapshot",
+                        "Dropping IB-only historical order %s from repository hydration",
                         command_id_value,
                     )
                     continue
@@ -1159,42 +1269,15 @@ class OrdersRuntime:
                     self._command_to_order[str(record.get("command_id", identifier))] = identifier
                 if record.get("order_id"):
                     self._command_to_order[str(record["order_id"])] = identifier
+                if record.get("id"):
+                    self._command_to_order[str(record["id"])] = identifier
                 self._history.appendleft(record)
-            timestamp = payload.get("updated_at")
-            if isinstance(timestamp, str) and timestamp:
-                try:
-                    self._last_updated_at = datetime.fromisoformat(timestamp)
-                except Exception:
-                    self._last_updated_at = None
-            last_event_id = payload.get("last_event_id")
-            if isinstance(last_event_id, str) and last_event_id:
-                self._last_message_id = last_event_id
+                _register_timestamp(record)
 
-    async def _persist_snapshot(self) -> None:
-        if self._redis is None:
-            return
-        active_orders = [_clone_order_record(order) for order in self._active_orders.values()]
-        history_orders = [_clone_order_record(order) for order in list(self._history)]
-        snapshot = {
-            "active_orders": active_orders,
-            "history": history_orders,
-            "updated_at": _serialise_datetime(self._last_updated_at),
-            "last_event_id": self._last_message_id or "",
-        }
-        try:
-            await self._redis.set(self.snapshot_key, json.dumps(snapshot))
-        except Exception as exc:  # pragma: no cover - defensive guard
-            self.logger.debug("Failed to persist order snapshot: %s", exc)
-
-    async def _append_history(self, entry: Mapping[str, Any]) -> None:
-        if self._redis is None:
-            return
-        payload = dict(entry)
-        payload.setdefault("timestamp", _serialise_datetime(_utc_now()))
-        try:
-            await self._redis.rpush(self.history_key, json.dumps(payload))
-        except Exception as exc:  # pragma: no cover - defensive guard
-            self.logger.debug("Failed to append order history: %s", exc)
+            self._last_updated_at = latest_timestamp
+            if not self._last_message_id:
+                self._last_message_id = ""
+            self._repository_last_error = ""
 
     def _build_repository_order_payload(
         self,
@@ -1403,8 +1486,6 @@ class OrdersRuntime:
         if updated:
             async with self._lock:
                 self._last_updated_at = _utc_now()
-                await self._persist_snapshot()
-            await self._append_history({"event": "stream", "message_id": message_id, "payload": payload})
 
     async def _apply_order_event(self, payload: Mapping[str, Any]) -> bool:
         command_id = str(

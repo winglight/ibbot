@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 import uuid
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping, Sequence
 
 from src.db.async_support import run_in_thread
 from src.db.mariadb import MariaDBConfigurationError
@@ -13,6 +14,7 @@ from src.ibbot.logging import get_logger
 from .base import (
     RepositoryError,
     RepositoryValidationError,
+    format_datetime_for_db,
     is_sqlite,
     json_dumps,
     use_connection,
@@ -459,6 +461,47 @@ class OrderRepository:
             )
             raise OrderRepositoryError(f"Failed to {operation} order") from exc
 
+    @staticmethod
+    def _timestamp_expression() -> str:
+        return "COALESCE(updated_at, order_timestamp, created_at)"
+
+    async def fetch_recent_orders(self, *, limit: int) -> list[Mapping[str, Any]]:
+        limit_value = int(limit)
+        if limit_value <= 0:
+            return []
+        try:
+            return await run_in_thread(self._fetch_recent_orders_sync, limit_value)
+        except Exception as exc:  # pragma: no cover - defensive logging
+            self._logger.exception("Failed to fetch recent orders")
+            raise OrderRepositoryError("Failed to fetch recent orders") from exc
+
+    async def paginate_orders(
+        self,
+        *,
+        offset: int,
+        limit: int,
+        start_date: datetime | None = None,
+    ) -> tuple[list[Mapping[str, Any]], int]:
+        limit_value = max(int(limit), 0)
+        offset_value = max(int(offset), 0)
+        try:
+            return await run_in_thread(
+                self._paginate_orders_sync,
+                offset_value,
+                limit_value,
+                start_date,
+            )
+        except Exception as exc:  # pragma: no cover - defensive logging
+            self._logger.exception("Failed to paginate orders")
+            raise OrderRepositoryError("Failed to paginate orders") from exc
+
+    async def fetch_order(self, identifier: str) -> Mapping[str, Any] | None:
+        try:
+            return await run_in_thread(self._fetch_order_sync, identifier)
+        except Exception as exc:  # pragma: no cover - defensive logging
+            self._logger.exception("Failed to fetch order %s", identifier)
+            raise OrderRepositoryError("Failed to fetch order") from exc
+
     def _prepare_order_row(
         self,
         row: Mapping[str, Any],
@@ -749,3 +792,143 @@ class OrderRepository:
             assignments=assignments, column=match_column
         )
         cursor.execute(sql, params)
+
+    def _fetch_recent_orders_sync(self, limit: int) -> list[Mapping[str, Any]]:
+        with use_connection() as connection:
+            placeholder = "?" if is_sqlite(connection) else "%s"
+            timestamp_expr = self._timestamp_expression()
+            sql = (
+                "SELECT * FROM orders "
+                "WHERE is_deleted = 0 "
+                f"ORDER BY {timestamp_expr} DESC "
+                f"LIMIT {placeholder}"
+            )
+            cursor = connection.cursor()
+            try:
+                cursor.execute(sql, (limit,))
+                rows = cursor.fetchall()
+                columns = [col[0] for col in cursor.description or ()]
+            finally:
+                try:
+                    cursor.close()
+                except Exception:  # pragma: no cover - defensive
+                    pass
+        return self._rows_to_orders(rows, columns)
+
+    def _paginate_orders_sync(
+        self,
+        offset: int,
+        limit: int,
+        start_date: datetime | None,
+    ) -> tuple[list[Mapping[str, Any]], int]:
+        with use_connection() as connection:
+            placeholder = "?" if is_sqlite(connection) else "%s"
+            timestamp_expr = self._timestamp_expression()
+            where_clauses = ["is_deleted = 0"]
+            params: list[Any] = []
+            if start_date is not None:
+                formatted = format_datetime_for_db(start_date)
+                where_clauses.append(f"{timestamp_expr} >= {placeholder}")
+                params.append(formatted)
+            where_sql = " AND ".join(where_clauses)
+            count_sql = f"SELECT COUNT(*) FROM orders WHERE {where_sql}"
+            cursor = connection.cursor()
+            try:
+                cursor.execute(count_sql, tuple(params))
+                total_row = cursor.fetchone()
+                total = int(total_row[0]) if total_row else 0
+                order_sql = (
+                    "SELECT * FROM orders "
+                    f"WHERE {where_sql} "
+                    f"ORDER BY {timestamp_expr} DESC "
+                    f"LIMIT {placeholder} OFFSET {placeholder}"
+                )
+                query_params: list[Any] = list(params)
+                query_params.extend([limit, offset])
+                cursor.execute(order_sql, tuple(query_params))
+                rows = cursor.fetchall()
+                columns = [col[0] for col in cursor.description or ()]
+            finally:
+                try:
+                    cursor.close()
+                except Exception:  # pragma: no cover - defensive
+                    pass
+        return self._rows_to_orders(rows, columns), total
+
+    def _fetch_order_sync(self, identifier: str) -> Mapping[str, Any] | None:
+        identifier_text = str(identifier or "").strip()
+        if not identifier_text:
+            return None
+        with use_connection() as connection:
+            placeholder = "?" if is_sqlite(connection) else "%s"
+            timestamp_expr = self._timestamp_expression()
+            where_parts: list[str] = [
+                f"command_id = {placeholder}",
+                f"order_id = {placeholder}",
+                f"client_order_id = {placeholder}",
+                f"ib_order_id = {placeholder}",
+            ]
+            params: list[Any] = [identifier_text] * 4
+            try:
+                identifier_int = int(identifier_text)
+            except ValueError:
+                identifier_int = None
+            if identifier_int is not None:
+                where_parts.append(f"id = {placeholder}")
+                params.append(identifier_int)
+            where_sql = " OR ".join(where_parts)
+            sql = (
+                "SELECT * FROM orders "
+                "WHERE is_deleted = 0 AND ("
+                f"{where_sql}"
+                ") "
+                f"ORDER BY {timestamp_expr} DESC "
+                "LIMIT 1"
+            )
+            cursor = connection.cursor()
+            try:
+                cursor.execute(sql, tuple(params))
+                row = cursor.fetchone()
+                columns = [col[0] for col in cursor.description or ()]
+            finally:
+                try:
+                    cursor.close()
+                except Exception:  # pragma: no cover - defensive
+                    pass
+        if not row:
+            return None
+        rows = self._rows_to_orders([row], columns)
+        return rows[0] if rows else None
+
+    def _rows_to_orders(
+        self, rows: Iterable[Any], columns: Sequence[str] | None
+    ) -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
+        for row in rows:
+            if isinstance(row, Mapping):
+                data = dict(row)
+            else:
+                if columns is None:
+                    raise OrderRepositoryError("Unable to map order row")
+                data = {
+                    columns[index]: row[index]
+                    for index in range(min(len(columns), len(row)))
+                }
+            raw_payload = data.get("raw_payload")
+            if isinstance(raw_payload, (bytes, bytearray)):
+                try:
+                    raw_payload = raw_payload.decode("utf-8")
+                except Exception:
+                    pass
+            if isinstance(raw_payload, str):
+                try:
+                    data["raw_payload"] = json.loads(raw_payload)
+                except Exception:
+                    data["raw_payload"] = raw_payload
+            for field in ("created_at", "updated_at", "order_timestamp", "executed_at"):
+                value = data.get(field)
+                parsed = _parse_datetime(value)
+                if parsed is not None:
+                    data[field] = parsed.isoformat()
+            results.append(data)
+        return results

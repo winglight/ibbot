@@ -7,16 +7,52 @@ from typing import Any, Dict, List, Optional
 import pytest
 from fastapi.testclient import TestClient
 
-from src.ibbot.redis import IBCommandError, IBCommandTimeout
+from src.routes.service_clients import ServiceClientError, ServiceUnavailableError
 
 from services.account.main import (
     ACCOUNT_SERVICE_NAME,
     DEFAULT_DAILY_SUMMARY_COMMAND,
     DEFAULT_ORDER_LIMIT,
-    DEFAULT_ORDERS_SNAPSHOT_KEY,
     app,
     _state,
 )
+
+
+class OrdersClientStub:
+    def __init__(
+        self,
+        *,
+        orders: Optional[list[Dict[str, Any]]] = None,
+        total: Optional[int] = None,
+        updated_at: Optional[str] = None,
+        source: str = "orders-service",
+        exception: Exception | None = None,
+    ) -> None:
+        self.orders = list(orders or [])
+        self.total = total if total is not None else len(self.orders)
+        self.updated_at = updated_at
+        self.source = source
+        self.exception = exception
+        self.calls: List[Dict[str, Any]] = []
+
+    async def list_orders(
+        self, *, limit: Optional[int] = None, offset: Optional[int] = None, start_date: Optional[str] = None
+    ) -> Dict[str, Any]:
+        self.calls.append({"limit": limit, "offset": offset, "start_date": start_date})
+        if self.exception is not None:
+            raise self.exception
+        offset_value = int(offset or 0)
+        if limit is None or limit < 0:
+            slice_orders = list(self.orders[offset_value:])
+        else:
+            slice_orders = list(self.orders[offset_value : offset_value + limit])
+        return {
+            "orders": slice_orders,
+            "total": self.total,
+            "updated_at": self.updated_at,
+            "source": self.source,
+            "stale": False,
+        }
 
 
 @pytest.fixture(autouse=True)
@@ -184,14 +220,6 @@ def _write_snapshot(client: Any, key: str, payload: Dict[str, Any]) -> None:
 
     asyncio.run(_set())
 
-
-def _write_orders_snapshot(client: Any, payload: Dict[str, Any]) -> None:
-    async def _set() -> None:
-        await client.set(DEFAULT_ORDERS_SNAPSHOT_KEY, json.dumps(payload))
-
-    asyncio.run(_set())
-
-
 def _write_daily_summary_cache(
     client: Any,
     totals: Dict[str, Dict[str, Any]],
@@ -280,24 +308,29 @@ def test_refresh_endpoint_sets_timestamp(test_client: TestClient, monkeypatch: p
     assert triggered["called"] is True
 
 
-def test_account_orders_snapshot_success_updates_metrics(
+def test_account_orders_service_success_updates_metrics(
     capture_service_health: List[Dict[str, Any]],
     test_client: TestClient,
-    fake_redis: Any,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    orders_snapshot = {
-        "active_orders": [
+    response_payload = {
+        "orders": [
             {"id": "1", "symbol": "AAPL", "quantity": 10},
             {"id": "2", "symbol": "MSFT", "quantity": 5},
-        ],
-        "history": [
             {"id": "3", "symbol": "GOOG", "quantity": 1},
         ],
+        "total": 3,
         "updated_at": "2024-01-01T05:00:00+00:00",
         "source": "orders-service",
         "stale": False,
     }
-    _write_orders_snapshot(fake_redis, orders_snapshot)
+    stub = OrdersClientStub(
+        orders=response_payload["orders"],
+        total=response_payload["total"],
+        updated_at=response_payload["updated_at"],
+        source=response_payload["source"],
+    )
+    monkeypatch.setattr("services.account.main._ORDERS_CLIENT", stub)
 
     response = test_client.get("/account/orders")
     assert response.status_code == 200
@@ -313,32 +346,30 @@ def test_account_orders_snapshot_success_updates_metrics(
         "has_more": False,
     }
     assert payload["source"] == "orders-service"
-    assert payload["snapshot_updated_at"] == orders_snapshot["updated_at"]
-    assert payload["from_cache"] is True
+    assert payload["snapshot_updated_at"] == response_payload["updated_at"]
+    assert payload["from_cache"] is False
     assert payload.get("stale") is False
 
     assert capture_service_health
     metrics = capture_service_health[-1]["metrics"]
     assert capture_service_health[-1]["service"] == ACCOUNT_SERVICE_NAME
-    assert metrics.get("orders_last_refreshed_at") == orders_snapshot["updated_at"]
+    assert metrics.get("orders_last_refreshed_at") == response_payload["updated_at"]
     assert metrics.get("orders_source") == "orders-service"
+    assert metrics.get("orders_from_cache") is False
 
 
-def test_account_orders_missing_sources_returns_503(
+def test_account_orders_service_unavailable_returns_503(
     capture_service_health: List[Dict[str, Any]],
     test_client: TestClient,
-    fake_redis: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def _error(method: str, **_: Any) -> Dict[str, Any]:
-        raise IBCommandError("orders failed", command_id="orders", payload={"method": method})
-
-    monkeypatch.setattr("services.account.main.request_ib_command", _error)
+    stub = OrdersClientStub(exception=ServiceUnavailableError("orders failed"))
+    monkeypatch.setattr("services.account.main._ORDERS_CLIENT", stub)
 
     response = test_client.get("/account/orders")
     assert response.status_code == 503
     detail = response.json()["detail"]
-    assert "orders command" in detail.lower()
+    assert "orders service" in detail.lower() or "orders" in detail.lower()
     assert "orders failed" in detail.lower()
 
     assert capture_service_health
@@ -636,20 +667,19 @@ def test_positions_stale_snapshot_force_refresh_updates_metadata_and_metrics(
     assert metrics.get("snapshot_updated_at") == refreshed["updated_at"]
 
 
-def test_account_orders_snapshot_pagination(
-    test_client: TestClient, fake_redis: Any
+def test_account_orders_pagination(
+    test_client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    orders_snapshot = {
-        "active_orders": [
-            {"id": "1", "symbol": "AAPL"},
-            {"id": "2", "symbol": "MSFT"},
-            {"id": "3", "symbol": "TSLA"},
-        ],
-        "updated_at": "2024-01-01T06:00:00+00:00",
-        "source": "orders-snapshot",
-        "stale": False,
-    }
-    _write_orders_snapshot(fake_redis, orders_snapshot)
+    orders = [
+        {"id": "1", "symbol": "AAPL"},
+        {"id": "2", "symbol": "MSFT"},
+        {"id": "3", "symbol": "TSLA"},
+    ]
+    stub = OrdersClientStub(
+        orders=orders,
+        updated_at="2024-01-01T06:00:00+00:00",
+    )
+    monkeypatch.setattr("services.account.main._ORDERS_CLIENT", stub)
 
     response = test_client.get(
         "/account/orders",
@@ -665,14 +695,19 @@ def test_account_orders_snapshot_pagination(
         "returned": 1,
         "has_more": True,
     }
-    assert payload["source"] == "orders-snapshot"
-    assert payload["snapshot_updated_at"] == orders_snapshot["updated_at"]
-    assert payload["from_cache"] is True
+    assert payload["source"] == "orders-service"
+    assert payload["snapshot_updated_at"] == "2024-01-01T06:00:00+00:00"
+    assert payload["from_cache"] is False
     assert payload.get("stale") is False
+
+    assert stub.calls
+    call = stub.calls[-1]
+    assert call["limit"] == 1
+    assert call["offset"] == 1
 
 
 def test_account_orders_force_refresh_triggers_snapshot_refresh(
-    test_client: TestClient, fake_redis: Any
+    test_client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     service = _state.snapshot_service
     assert service is not None
@@ -681,6 +716,9 @@ def test_account_orders_force_refresh_triggers_snapshot_refresh(
         return None
 
     service.on_refresh_both = _noop_refresh
+
+    stub = OrdersClientStub(orders=[], updated_at="2024-01-02T00:00:00+00:00")
+    monkeypatch.setattr("services.account.main._ORDERS_CLIENT", stub)
 
     response = test_client.get(
         "/account/orders",
@@ -693,17 +731,15 @@ def test_account_orders_force_refresh_triggers_snapshot_refresh(
     assert last_call["fast_positions"] is False
 
 
-def test_account_orders_command_timeout_returns_504(
-    test_client: TestClient, fake_redis: Any, monkeypatch: pytest.MonkeyPatch
+def test_account_orders_service_error_returns_502(
+    test_client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    async def _timeout(method: str, **_: Any) -> Dict[str, Any]:
-        raise IBCommandTimeout("timeout", command_id="cmd", payload={"method": method})
-
-    monkeypatch.setattr("services.account.main.request_ib_command", _timeout)
+    stub = OrdersClientStub(exception=ServiceClientError("bad response"))
+    monkeypatch.setattr("services.account.main._ORDERS_CLIENT", stub)
 
     response = test_client.get("/account/orders")
-    assert response.status_code == 504
-    assert "timed out" in response.json()["detail"].lower()
+    assert response.status_code == 502
+    assert "orders service" in response.json()["detail"].lower()
 
 
 def test_daily_summary_missing_triggers_command_and_returns_503(
