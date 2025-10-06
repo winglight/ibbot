@@ -144,6 +144,19 @@ def _coerce_str(value: Any) -> str | None:
     return str(value)
 
 
+def _looks_like_uuid(value: Any) -> bool:
+    if value is None:
+        return False
+    text = str(value).strip()
+    if not text:
+        return False
+    try:
+        uuid.UUID(text)
+    except (ValueError, AttributeError, TypeError):
+        return False
+    return True
+
+
 def _first_nonempty(*candidates: Any) -> Any:
     for candidate in candidates:
         if isinstance(candidate, Mapping):
@@ -1098,6 +1111,20 @@ class OrdersRuntime:
                 )
                 if not identifier:
                     continue
+                command_id_value = _coerce_str(record.get("command_id"))
+                order_id_value = _coerce_str(record.get("order_id"))
+                if (
+                    command_id_value
+                    and order_id_value
+                    and command_id_value == order_id_value
+                    and not _looks_like_uuid(command_id_value)
+                ):
+                    self._ib_only_orders.add(command_id_value)
+                    self.logger.info(
+                        "Dropping IB-only order %s from snapshot",
+                        command_id_value,
+                    )
+                    continue
                 record.setdefault("command_id", identifier)
                 self._active_orders[identifier] = record
                 if record.get("command_id"):
@@ -1114,6 +1141,20 @@ class OrdersRuntime:
                     or record.get("command_id")
                     or ""
                 )
+                command_id_value = _coerce_str(record.get("command_id"))
+                order_id_value = _coerce_str(record.get("order_id"))
+                if (
+                    command_id_value
+                    and order_id_value
+                    and command_id_value == order_id_value
+                    and not _looks_like_uuid(command_id_value)
+                ):
+                    self._ib_only_orders.add(command_id_value)
+                    self.logger.info(
+                        "Dropping IB-only historical order %s from snapshot",
+                        command_id_value,
+                    )
+                    continue
                 if identifier:
                     self._command_to_order[str(record.get("command_id", identifier))] = identifier
                 if record.get("order_id"):
@@ -1389,8 +1430,10 @@ class OrdersRuntime:
         updated = False
         record_snapshot: dict[str, Any] | None = None
         record_identifier_for_repo: str | None = None
-        created_from_ib_event = False
         matched_existing = False
+        skip_ib_only_event = False
+        ib_only_identifier: str | None = None
+        ib_only_first_seen = False
         async with self._lock:
             record_identifier = identifier
             record = self._active_orders.get(record_identifier)
@@ -1415,96 +1458,125 @@ class OrdersRuntime:
                         from_history = True
                         matched_existing = True
                         break
-            if record is None:
-                record_identifier = identifier
-                record = {
-                    "id": identifier,
-                    "command_id": command_id or identifier,
-                    "events": [],
-                }
-                created_from_ib_event = not bool(command_id)
-                if created_from_ib_event:
-                    self._ib_only_orders.add(record_identifier)
-                else:
-                    self._ib_only_orders.discard(record_identifier)
-            if "events" not in record or not isinstance(record["events"], list):
-                record["events"] = list(record.get("events", []))
-            record.setdefault("id", record_identifier)
-            self._command_to_order.setdefault(record_identifier, record_identifier)
-            if command_id:
-                record["command_id"] = command_id
-                self._command_to_order[command_id] = record_identifier
-            if order_id:
-                record["order_id"] = order_id
-                self._command_to_order[order_id] = record_identifier
-            record.setdefault("request", {})
-            request_mapping = _coerce_mapping(parsed_payload.get("request"))
-            if request_mapping is not None:
-                record["request"] = request_mapping
-                _apply_field_aliases(record, request_mapping, aliases=_REQUEST_FIELD_ALIASES)
-            if result_mapping is not None:
-                record.setdefault("result", {})
-                existing_result = (
-                    dict(record["result"])
-                    if isinstance(record.get("result"), Mapping)
-                    else {}
-                )
-                existing_result.update(result_mapping)
-                record["result"] = existing_result
-            if response_mapping is not None:
-                record["response"] = response_mapping
-                _apply_field_aliases(record, response_mapping, aliases=_RESULT_FIELD_ALIASES)
-            _apply_field_aliases(record, parsed_payload, aliases=_REQUEST_FIELD_ALIASES)
-            if result_mapping is not None:
-                _apply_field_aliases(record, result_mapping, aliases=_REQUEST_FIELD_ALIASES)
-                _apply_field_aliases(record, result_mapping, aliases=_RESULT_FIELD_ALIASES)
-            _apply_field_aliases(record, parsed_payload, aliases=_RESULT_FIELD_ALIASES)
-            status_lower = status.lower() if isinstance(status, str) else ""
-            if status:
-                record["status"] = status
-            record["updated_at"] = event_time
-            if status_lower in {"filled", "cancelled"}:
-                record.setdefault("completed_at", event_time)
-            elif status_lower in _TERMINAL_STATUSES:
-                record.setdefault("completed_at", event_time)
-            record.setdefault("events", [])
-            record["events"].append(
-                {
-                    "type": parsed_payload.get("type") or parsed_payload.get("category") or "event",
-                    "timestamp": event_time,
-                    "payload": parsed_payload,
-                }
-            )
-            if from_history and status_lower not in _TERMINAL_STATUSES:
-                retained = [
-                    _clone_order_record(item)
-                    for item in self._history
-                    if not _record_matches(item, record_identifier, order_id, command_id)
-                ]
-                self._history = deque(retained, maxlen=self.history_limit)
-                from_history = False
-                self._active_orders[record_identifier] = record
-            if not from_history:
-                self._active_orders[record_identifier] = record
-            if status_lower in _TERMINAL_STATUSES:
+            if record is None and not command_id:
+                skip_ib_only_event = True
+                ib_only_identifier = record_identifier
+                ib_only_first_seen = record_identifier not in self._ib_only_orders
+                self._ib_only_orders.add(record_identifier)
                 self._active_orders.pop(record_identifier, None)
-                # remove duplicates from history then add latest snapshot
-                existing_history = [
-                    _clone_order_record(item)
-                    for item in self._history
-                    if not _record_matches(item, record_identifier, order_id, command_id)
-                ]
-                existing_history.insert(0, _clone_order_record(record))
-                self._history = deque(existing_history, maxlen=self.history_limit)
-            record_snapshot = _clone_order_record(record)
-            record_identifier_for_repo = record_identifier
-            if status_lower in _TERMINAL_STATUSES:
+                aliases_to_remove = {record_identifier}
+                if order_id:
+                    aliases_to_remove.add(order_id)
+                if command_id:
+                    aliases_to_remove.add(command_id)
+                for alias in list(aliases_to_remove):
+                    if alias:
+                        self._command_to_order.pop(alias, None)
+                if self._history:
+                    retained_history = [
+                        item
+                        for item in self._history
+                        if not _record_matches(item, record_identifier, order_id, command_id)
+                    ]
+                    if len(retained_history) != len(self._history):
+                        self._history = deque(retained_history, maxlen=self.history_limit)
+            if skip_ib_only_event:
+                record = None
+            else:
+                if record is None:
+                    record_identifier = identifier
+                    record = {
+                        "id": identifier,
+                        "command_id": command_id or identifier,
+                        "events": [],
+                    }
+                if "events" not in record or not isinstance(record["events"], list):
+                    record["events"] = list(record.get("events", []))
+                record.setdefault("id", record_identifier)
+                self._command_to_order.setdefault(record_identifier, record_identifier)
+                if command_id:
+                    record["command_id"] = command_id
+                    self._command_to_order[command_id] = record_identifier
+                if order_id:
+                    record["order_id"] = order_id
+                    self._command_to_order[order_id] = record_identifier
                 self._ib_only_orders.discard(record_identifier)
-            updated = True
+                record.setdefault("request", {})
+                request_mapping = _coerce_mapping(parsed_payload.get("request"))
+                if request_mapping is not None:
+                    record["request"] = request_mapping
+                    _apply_field_aliases(record, request_mapping, aliases=_REQUEST_FIELD_ALIASES)
+                if result_mapping is not None:
+                    record.setdefault("result", {})
+                    existing_result = (
+                        dict(record["result"])
+                        if isinstance(record.get("result"), Mapping)
+                        else {}
+                    )
+                    existing_result.update(result_mapping)
+                    record["result"] = existing_result
+                if response_mapping is not None:
+                    record["response"] = response_mapping
+                    _apply_field_aliases(record, response_mapping, aliases=_RESULT_FIELD_ALIASES)
+                _apply_field_aliases(record, parsed_payload, aliases=_REQUEST_FIELD_ALIASES)
+                if result_mapping is not None:
+                    _apply_field_aliases(record, result_mapping, aliases=_REQUEST_FIELD_ALIASES)
+                    _apply_field_aliases(record, result_mapping, aliases=_RESULT_FIELD_ALIASES)
+                _apply_field_aliases(record, parsed_payload, aliases=_RESULT_FIELD_ALIASES)
+                status_lower = status.lower() if isinstance(status, str) else ""
+                if status:
+                    record["status"] = status
+                record["updated_at"] = event_time
+                if status_lower in {"filled", "cancelled"}:
+                    record.setdefault("completed_at", event_time)
+                elif status_lower in _TERMINAL_STATUSES:
+                    record.setdefault("completed_at", event_time)
+                record.setdefault("events", [])
+                record["events"].append(
+                    {
+                        "type": parsed_payload.get("type")
+                        or parsed_payload.get("category")
+                        or "event",
+                        "timestamp": event_time,
+                        "payload": parsed_payload,
+                    }
+                )
+                if from_history and status_lower not in _TERMINAL_STATUSES:
+                    retained = [
+                        _clone_order_record(item)
+                        for item in self._history
+                        if not _record_matches(item, record_identifier, order_id, command_id)
+                    ]
+                    self._history = deque(retained, maxlen=self.history_limit)
+                    from_history = False
+                    self._active_orders[record_identifier] = record
+                if not from_history:
+                    self._active_orders[record_identifier] = record
+                if status_lower in _TERMINAL_STATUSES:
+                    self._active_orders.pop(record_identifier, None)
+                    # remove duplicates from history then add latest snapshot
+                    existing_history = [
+                        _clone_order_record(item)
+                        for item in self._history
+                        if not _record_matches(item, record_identifier, order_id, command_id)
+                    ]
+                    existing_history.insert(0, _clone_order_record(record))
+                    self._history = deque(existing_history, maxlen=self.history_limit)
+                record_snapshot = _clone_order_record(record)
+                record_identifier_for_repo = record_identifier
+                if status_lower in _TERMINAL_STATUSES:
+                    self._ib_only_orders.discard(record_identifier)
+                updated = True
+        if skip_ib_only_event:
+            if ib_only_first_seen:
+                identifier_for_log = ib_only_identifier or order_id or command_id or "unknown"
+                self.logger.warning(
+                    "Ignoring IB-only order event without command_id: %s",
+                    identifier_for_log,
+                )
+            return False
         if record_snapshot is not None:
             persist_mode = "update" if matched_existing else "insert"
-            if created_from_ib_event:
-                persist_mode = "update"
             persist_result = await self._persist_order_snapshot(
                 record_snapshot,
                 timestamp=event_time,
@@ -1528,31 +1600,24 @@ class OrdersRuntime:
                     or _coerce_str(record_snapshot.get("command_id"))
                     or "unknown"
                 )
-                if created_from_ib_event:
-                    self.logger.warning(
-                        "Repository missing persisted order %s for IB callback;"
-                        " skipping insert",
-                        identifier_for_log,
-                    )
-                else:
-                    self.logger.warning(
-                        "Repository missing persisted order %s for update; retrying insert",
-                        identifier_for_log,
-                    )
-                    retry_result = await self._persist_order_snapshot(
+                self.logger.warning(
+                    "Repository missing persisted order %s for update; retrying insert",
+                    identifier_for_log,
+                )
+                retry_result = await self._persist_order_snapshot(
+                    record_snapshot,
+                    timestamp=event_time,
+                    mode="insert",
+                )
+                if (
+                    retry_result.inserted_id is not None
+                    and record_identifier_for_repo is not None
+                ):
+                    await self._register_persisted_order_id(
+                        record_identifier_for_repo,
                         record_snapshot,
-                        timestamp=event_time,
-                        mode="insert",
+                        retry_result,
                     )
-                    if (
-                        retry_result.inserted_id is not None
-                        and record_identifier_for_repo is not None
-                    ):
-                        await self._register_persisted_order_id(
-                            record_identifier_for_repo,
-                            record_snapshot,
-                            retry_result,
-                        )
         return updated
 
     def _extract_order_id(
