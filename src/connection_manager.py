@@ -142,6 +142,24 @@ class ConnectionManager:
         self._connect_wait_limit_sec: float = max(
             1.0, _get_env_float("IBKR_CONNECT_WAIT_LIMIT_SEC", 8.0)
         )
+        self._connect_async_timeout_sec: float = max(
+            1.0, _get_env_float("IBKR_CONNECT_ASYNC_TIMEOUT_SEC", 8.0)
+        )
+        self._connect_handshake_grace_sec: float = max(
+            0.0, _get_env_float("IBKR_CONNECT_HANDSHAKE_GRACE_SEC", 15.0)
+        )
+        self._connect_handshake_poll_interval_sec: float = max(
+            0.05, _get_env_float("IBKR_CONNECT_HANDSHAKE_POLL_INTERVAL_SEC", 0.2)
+        )
+        default_result_timeout = max(
+            self._connect_async_timeout_sec + self._connect_handshake_grace_sec + 5.0,
+            15.0,
+        )
+        self._connect_result_timeout_sec: float = max(
+            default_result_timeout,
+            _get_env_float("IBKR_CONNECT_RESULT_TIMEOUT_SEC", default_result_timeout),
+        )
+        self._connect_result_event: Optional[threading.Event] = None
         self._project_root = Path(__file__).resolve().parents[1]
         self._pre_restart_script = self._project_root / "vps-setup" / "quick-start.sh"
         self._pre_restart_attempted = False
@@ -616,9 +634,19 @@ class ConnectionManager:
         wrapper.error = types.MethodType(error_handler, wrapper)
         setattr(wrapper, "_ibbot_error_handler_installed", True)
         connection_logger.debug("Added IBKR error handler for order rejection detection")
-    
+
+    def _notify_connect_waiters(self) -> None:
+        try:
+            if self._connect_result_event:
+                self._connect_result_event.set()
+        except Exception:
+            pass
+        with self._connect_state_cond:
+            self._connect_state_cond.notify_all()
+
     def _connect_in_thread(self) -> bool:
         """在独立线程中连接到IBKR服务器"""
+        self._connect_result_event = threading.Event()
         async def connect_worker():
             try:
                 # 获取当前事件循环
@@ -651,30 +679,59 @@ class ConnectionManager:
                     self.config.client_id = try_client_id
                     try:
                         connection_logger.info(f"尝试连接IBKR，客户端ID: {try_client_id}")
-                        # 使用asyncio.wait_for添加额外的超时保护
-                        await asyncio.wait_for(
-                            self.ib.connectAsync(
+                        connect_timeout = max(self._connect_async_timeout_sec, 1.0)
+                        grace_deadline = (
+                            loop.time() + self._connect_handshake_grace_sec
+                            if self._connect_handshake_grace_sec > 0
+                            else None
+                        )
+
+                        try:
+                            await self.ib.connectAsync(
                                 host=self.config.host,
                                 port=self.config.port,
                                 clientId=try_client_id,
-                                timeout=8  # 减少内部超时
-                            ),
-                            timeout=10  # 外部超时保护
-                        )
-                                # 验证连接是否真正建立
+                                timeout=connect_timeout,
+                            )
+                        except asyncio.TimeoutError:
+                            connection_logger.warning(
+                                "connectAsync timed out; entering handshake grace period",
+                                client_id=try_client_id,
+                                timeout_sec=round(connect_timeout, 1),
+                            )
+
+                        if not self.ib.isConnected() and grace_deadline is not None:
+                            last_state: Optional[int] = None
+                            while loop.time() < grace_deadline:
+                                client = getattr(self.ib, "client", None)
+                                conn_state = getattr(client, "connState", None)
+                                if conn_state != last_state:
+                                    last_state = conn_state
+                                    connection_logger.debug(
+                                        "Waiting for IBKR handshake to complete",
+                                        client_id=try_client_id,
+                                        conn_state=conn_state,
+                                        grace_remaining=round(grace_deadline - loop.time(), 1),
+                                    )
+                                if self.ib.isConnected():
+                                    break
+                                await asyncio.sleep(self._connect_handshake_poll_interval_sec)
+
                         if self.ib.isConnected():
-                            # 连接成功，更新配置中的客户端ID
                             connected = True
                             self._last_connect_error = None
                             self._next_client_id_hint = try_client_id
                             connection_logger.info(f"成功连接IBKR，使用客户端ID: {try_client_id}")
                             break
-                        else:
-                            raise Exception(f"连接建立失败 - 端口 {self.config.port} 不可达或TWS/Gateway未运行")
-                    except asyncio.TimeoutError:
-                        self._last_connect_error = f"连接超时 - 请检查TWS/Gateway是否启用API连接 (端口: {self.config.port})"
-                        connection_logger.error(f"客户端ID {try_client_id} 连接超时")
-                        raise Exception(self._last_connect_error)
+
+                        if grace_deadline is not None:
+                            raise TimeoutError(
+                                f"IBKR handshake timed out after {self._connect_handshake_grace_sec:.1f}s"
+                            )
+
+                        raise Exception(
+                            f"连接建立失败 - 端口 {self.config.port} 不可达或TWS/Gateway未运行"
+                        )
                     except Exception as conn_error:
                         if self._client_id_conflict_detected:
                             self._client_id_conflict_detected = False
@@ -702,7 +759,11 @@ class ConnectionManager:
                             )
                             try_client_id = next_id
                             continue
-                        elif "TimeoutError" in error_msg or "timeout" in error_msg.lower():
+                        elif (
+                            "TimeoutError" in error_msg
+                            or "timeout" in lower_error
+                            or "timed out" in lower_error
+                        ):
                             self._last_connect_error = f"连接超时 - 请检查TWS/Gateway是否启用API连接 (端口: {self.config.port})"
                             raise Exception(self._last_connect_error)
                         elif "ConnectionRefusedError" in error_msg or "refused" in error_msg.lower():
@@ -829,6 +890,8 @@ class ConnectionManager:
                 account_type = "Paper" if self.config.paper_trading else "Live"
                 connection_logger.info(f"Connected to IBKR {account_type} account at {self.config.host}:{self.config.port}")
 
+                self._notify_connect_waiters()
+
                 self._request_account_refresh("connection_established")
                 
                 # 保存事件循环引用
@@ -901,6 +964,7 @@ class ConnectionManager:
                     self._last_connect_error = str(e)
                 except Exception:
                     self._last_connect_error = "Unknown connection error"
+                self._notify_connect_waiters()
                      
                  
         
@@ -943,6 +1007,7 @@ class ConnectionManager:
                 connection_logger.error(f"Event loop error: {e}")
                 # 设置错误状态，让主线程知道出现了问题
                 self._last_connect_error = f"Event loop error: {e}"
+                self._notify_connect_waiters()
             finally:
                 # 确保任务能够正确完成，避免 "Task was destroyed but it is pending" 警告
                 try:
@@ -979,39 +1044,41 @@ class ConnectionManager:
         # 使用守护线程而不是线程池，确保线程能够持续运行
         self._connection_thread = threading.Thread(target=run_worker, daemon=True)
         self._connection_thread.start()
-        
-        # 等待连接建立或快速失败，增加更强的超时保护
-        max_wait = 15  # 增加等待时间，但添加更多检查点
-        wait_time = 0
-        check_interval = 0.1  # 更频繁的检查
-        
-        while wait_time < max_wait:
-            time.sleep(check_interval)
-            wait_time += check_interval
-            
-            # 若连接成功
+
+        deadline = time.monotonic() + self._connect_result_timeout_sec
+        event = self._connect_result_event
+
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+
+            wait_for = min(self._connect_handshake_poll_interval_sec, max(0.05, remaining))
+            if event is not None:
+                event.wait(timeout=wait_for)
+            else:
+                time.sleep(wait_for)
+
             if self.connected:
                 connection_logger.info("IBKR connection established successfully")
                 return True
-                
-            # 若出现错误则立即失败返回
+
             if self._last_connect_error:
                 connection_logger.error(f"IBKR connection failed fast: {self._last_connect_error}")
-                # 确保清理连接线程
                 self._force_stop_connection_thread()
                 return False
-                
-            # 检查连接线程是否还活着
+
             if not self._connection_thread or not self._connection_thread.is_alive():
                 connection_logger.error("Connection thread died unexpectedly")
                 self._last_connect_error = "Connection thread terminated unexpectedly"
                 return False
-        
-        # 超时处理
-        connection_logger.error(f"IBKR connection timeout after {max_wait} seconds")
-        self._last_connect_error = f"Connection timeout after {max_wait} seconds"
-        
-        # 强制停止连接线程，防止资源泄漏
+
+        connection_logger.error(
+            f"IBKR connection timeout after {self._connect_result_timeout_sec} seconds"
+        )
+        self._last_connect_error = (
+            f"Connection timeout after {self._connect_result_timeout_sec} seconds"
+        )
         self._force_stop_connection_thread()
         return False
 
@@ -1153,7 +1220,7 @@ class ConnectionManager:
                 self.disconnect()
 
         wait_logged = False
-        force_abort_existing = False
+        limit_warning_logged = False
         with self._connect_state_cond:
             while self._connect_in_progress:
                 if not wait_logged:
@@ -1170,16 +1237,26 @@ class ConnectionManager:
                 if started_at is not None:
                     elapsed = time.monotonic() - started_at
                     if elapsed >= self._connect_wait_limit_sec:
-                        connection_logger.warning(
-                            "Existing IBKR connection attempt exceeded wait limit; forcing new attempt",
-                            elapsed_seconds=round(elapsed, 1),
-                            wait_limit=self._connect_wait_limit_sec,
-                        )
-                        self._connect_in_progress = False
-                        self._connect_attempt_started_at = None
-                        self._connect_state_cond.notify_all()
-                        force_abort_existing = True
-                        break
+                        if not limit_warning_logged:
+                            connection_logger.warning(
+                                "Existing IBKR connection attempt exceeded wait limit; continuing to wait",
+                                elapsed_seconds=round(elapsed, 1),
+                                wait_limit=self._connect_wait_limit_sec,
+                            )
+                            limit_warning_logged = True
+
+                if self._last_connect_error:
+                    self._connect_state_cond.wait(timeout=0.1)
+                    continue
+
+                thread = self._connection_thread
+                if thread and not thread.is_alive():
+                    connection_logger.warning(
+                        "Existing IBKR connection attempt thread is no longer running; allowing new attempt"
+                    )
+                    self._connect_in_progress = False
+                    self._connect_attempt_started_at = None
+                    break
 
                 # 等待其他连接尝试完成
                 self._connect_state_cond.wait(timeout=1.0)
@@ -1193,9 +1270,6 @@ class ConnectionManager:
             # 标记当前正在尝试连接，阻止其他线程同时发起连接
             self._connect_in_progress = True
             self._connect_attempt_started_at = time.monotonic()
-
-        if force_abort_existing:
-            self._force_stop_connection_thread()
 
         connection_logger.info("Connecting to IBKR...")
         success = False
@@ -1240,6 +1314,7 @@ class ConnectionManager:
         self.ib = None
         self._loop = None
         self._connection_thread = None
+        self._notify_connect_waiters()
 
     def disconnect(self) -> None:
         """断开与IBKR服务器的连接，并停止事件循环"""
