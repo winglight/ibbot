@@ -9,6 +9,7 @@ import importlib
 from collections.abc import AsyncIterator, Awaitable, Mapping
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 import secrets
 from typing import Any, Callable
 
@@ -537,6 +538,33 @@ class StrategyRuntime:
         async with self._lock:
             for document in self._strategies.values():
                 entries.update(self._extract_metadata_files(document.metadata))
+        try:
+            settings = await load_strategy_settings(self._redis)
+        except Exception:  # pragma: no cover - defensive guard
+            settings = dict(DEFAULT_SETTINGS)
+
+        strategy_path = settings.get("strategy_path") or DEFAULT_SETTINGS["strategy_path"]
+        if isinstance(strategy_path, str):
+            candidate = strategy_path.strip()
+            if candidate:
+                base_path = Path(candidate).expanduser()
+                if not base_path.is_absolute():
+                    base_path = Path.cwd() / base_path
+                try:
+                    if base_path.is_dir():
+                        for file_path in base_path.rglob("*.py"):
+                            if not file_path.is_file():
+                                continue
+                            try:
+                                relative = file_path.relative_to(base_path)
+                                normalised = str(relative).replace("\\", "/")
+                            except ValueError:
+                                normalised = file_path.name
+                            entries.add(normalised)
+                except Exception:  # pragma: no cover - defensive guard
+                    self._logger.debug(
+                        "Failed to enumerate strategy files in %s", base_path, exc_info=True
+                    )
         return sorted(entries)
 
     async def enqueue_task(self, name: str, payload: StrategyRunRequest) -> StrategyRunResponse:
