@@ -83,7 +83,7 @@ class StrategyDocument(BaseModel):
 
 
 class StrategyUpsertRequest(BaseModel):
-    """Payload for creating or updating a strategy definition."""
+    """Request payload for creating or updating a strategy."""
 
     name: str
     factory: str | None = None
@@ -91,6 +91,20 @@ class StrategyUpsertRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
     description: str | None = None
     enabled: bool = True
+    strategy_type: str | None = None  # For backward compatibility with frontend
+    
+    # Additional fields from frontend
+    use_template: bool | None = None
+    selected_file: str | None = None
+    sl_enabled: bool | None = None
+    tp_enabled: bool | None = None
+    sl_price: float | None = None
+    tp_price: float | None = None
+    sl_type: str | None = None
+    tp_type: str | None = None
+    data_subscription: str | None = None
+    position_add_cooldown_minutes: int | None = None
+    close_before_close_minutes: int | None = None
 
     @field_validator("name")
     @classmethod
@@ -485,7 +499,38 @@ class StrategyRuntime:
         self._health_signal.set()
         return command
     async def upsert_strategy(self, payload: StrategyUpsertRequest) -> tuple[StrategyDocument, bool]:
-        record, created = await self._repository.upsert_strategy(payload.model_dump())
+        # Convert payload to dict and handle strategy_type field
+        payload_dict = payload.model_dump()
+        
+        # Handle backward compatibility: convert strategy_type to factory if needed
+        strategy_type = payload_dict.pop("strategy_type", None)
+        if strategy_type and not payload_dict.get("factory"):
+            # Set factory based on strategy_type for backward compatibility
+            if strategy_type == "internal":
+                payload_dict["factory"] = "internal"
+            elif strategy_type == "external":
+                payload_dict["factory"] = "external"
+            # For other strategy_type values, leave factory as None
+        
+        # Extract frontend-specific fields and move them to params/metadata
+        frontend_fields = [
+            "use_template", "selected_file", "sl_enabled", "tp_enabled", 
+            "sl_price", "tp_price", "sl_type", "tp_type", "data_subscription",
+            "position_add_cooldown_minutes", "close_before_close_minutes"
+        ]
+        
+        # Initialize params and metadata if not present
+        if "params" not in payload_dict:
+            payload_dict["params"] = {}
+        if "metadata" not in payload_dict:
+            payload_dict["metadata"] = {}
+        
+        # Move frontend fields to params (for strategy configuration)
+        for field in frontend_fields:
+            if field in payload_dict and payload_dict[field] is not None:
+                payload_dict["params"][field] = payload_dict.pop(field)
+        
+        record, created = await self._repository.upsert_strategy(payload_dict)
         document = self._record_to_document(record)
         async with self._lock:
             self._strategies[document.name] = document
