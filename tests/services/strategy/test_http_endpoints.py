@@ -21,6 +21,8 @@ from services.strategy.http import (
 import src.utils.strategy_cache as strategy_cache_module
 from tests.services.redis_utils import InMemoryRedis
 import tests.services.strategy.sample as sample_strategy
+from src.db.mariadb import set_engine
+from src.db.repositories import StrategyRepository
 
 
 _CURRENT_REPOSITORY: StrategyRepository | None = None
@@ -104,35 +106,16 @@ def _build_client(
     return client
 
 
-def _seed_strategy_metadata(
-    redis: InMemoryRedis,
-    entries: Mapping[str, Mapping[str, Any]],
-) -> None:
-    index: list[str] = []
-    for name, payload in entries.items():
-        now = datetime.now(timezone.utc).isoformat()
-        document = {
-            "name": name,
-            "factory": payload.get("factory"),
-            "params": dict(payload.get("params", {})),
-            "metadata": dict(payload.get("metadata", {})),
-            "description": payload.get("description"),
-            "enabled": bool(payload.get("enabled", True)),
-            "created_at": payload.get("created_at", now),
-            "updated_at": payload.get("updated_at", now),
-        }
-        asyncio.run(redis.set(f"json:strategy:{name}", json.dumps(document)))
-        index.append(name)
-    asyncio.run(redis.set("json:strategy:index", json.dumps(index)))
-
-
-def _read_metadata(redis: InMemoryRedis, name: str) -> dict[str, object]:
-    raw = asyncio.run(redis.get(f"json:strategy:{name}"))
-    if not raw:
-        return {}
-    if isinstance(raw, str):
-        return json.loads(raw)
-    return dict(raw)
+def _fetch_strategy(
+    repository: StrategyRepository, name: str
+) -> dict[str, Any] | None:
+    record = asyncio.run(repository.get_strategy(name))
+    if record is None:
+        return None
+    try:
+        return record.to_payload()
+    except AttributeError:
+        return dict(record)  # type: ignore[arg-type]
 
 
 def _install_strategy_cache_stubs(redis: InMemoryRedis, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -166,18 +149,20 @@ def _prepare_recent_fills(redis: InMemoryRedis, name: str, fills: list[dict[str,
         asyncio.run(redis.rpush(key, json.dumps(fill)))
 
 
-def test_seeded_strategy_available_on_start(redis_client: InMemoryRedis) -> None:
-    _seed_strategy_metadata(
-        redis_client,
-        {
-            "BuyTheDipStrategy": {
+def test_seeded_strategy_available_on_start(
+    redis_client: InMemoryRedis, strategy_repository: StrategyRepository
+) -> None:
+    asyncio.run(
+        strategy_repository.upsert_strategy(
+            {
+                "name": "BuyTheDipStrategy",
                 "factory": "tests.services.strategy.sample:factory",
                 "metadata": {"file": "src/strategies/buy_the_dip_strategy.py"},
                 "description": "Sample",
             }
-        },
+        )
     )
-    client = _build_client(redis_client)
+    client = _build_client(redis_client, strategy_repository)
 
     with client:
         response = client.get("/strategy")
@@ -189,7 +174,7 @@ def test_seeded_strategy_available_on_start(redis_client: InMemoryRedis) -> None
 
 
 def test_strategy_files_listing_requires_metadata(
-    redis_client: InMemoryRedis, tmp_path: Path
+    redis_client: InMemoryRedis, strategy_repository: StrategyRepository, tmp_path: Path
 ) -> None:
     strategy_dir = tmp_path / "strategies"
     strategy_dir.mkdir()
@@ -199,7 +184,7 @@ def test_strategy_files_listing_requires_metadata(
     settings = {**DEFAULT_SETTINGS, "strategy_path": str(strategy_dir)}
     asyncio.run(persist_strategy_settings(redis_client, settings))
 
-    client = _build_client(redis_client)
+    client = _build_client(redis_client, strategy_repository)
 
     with client:
         files_response = client.get("/strategy/files")
@@ -208,14 +193,14 @@ def test_strategy_files_listing_requires_metadata(
         assert files_payload["success"] is True
         assert files_payload["files"] == []
 
-        _seed_strategy_metadata(
-            redis_client,
-            {
-                "FilesystemAlpha": {
+        asyncio.run(
+            strategy_repository.upsert_strategy(
+                {
+                    "name": "FilesystemAlpha",
                     "factory": "tests.services.strategy.sample:factory",
                     "metadata": {"file": "filesystem_alpha.py"},
                 }
-            },
+            )
         )
 
         updated_response = client.get("/strategy/files")
@@ -608,8 +593,10 @@ def test_strategy_settings_endpoints(redis_client: InMemoryRedis) -> None:
         assert persisted["auth_token"] == token_payload["token"]
 
 
-def test_strategy_toggle_aliases(redis_client: InMemoryRedis) -> None:
-    client = _build_client(redis_client)
+def test_strategy_toggle_aliases(
+    redis_client: InMemoryRedis, strategy_repository: StrategyRepository
+) -> None:
+    client = _build_client(redis_client, strategy_repository)
 
     payload = {
         "name": "switch",
@@ -628,7 +615,8 @@ def test_strategy_toggle_aliases(redis_client: InMemoryRedis) -> None:
         assert data["success"] is True
         assert data["strategy"]["enabled"] is False
 
-        stored = _read_metadata(redis_client, "switch")
+        stored = _fetch_strategy(strategy_repository, "switch")
+        assert stored is not None
         assert stored["enabled"] is False
 
         toggle_resp = client.post("/strategy/switch/toggle", json={"enabled": True})
@@ -636,7 +624,8 @@ def test_strategy_toggle_aliases(redis_client: InMemoryRedis) -> None:
         data = toggle_resp.json()
         assert data["strategy"]["enabled"] is True
 
-        stored = _read_metadata(redis_client, "switch")
+        stored = _fetch_strategy(strategy_repository, "switch")
+        assert stored is not None
         assert stored["enabled"] is True
 
         bad_resp = client.post("/strategy/switch/toggle")
@@ -717,8 +706,10 @@ def test_strategy_status_and_data_push_updates_state(redis_client: InMemoryRedis
         assert refreshed_state["status_reason"] == "handler"
 
 
-def test_strategy_reset_aliases(redis_client: InMemoryRedis) -> None:
-    client = _build_client(redis_client)
+def test_strategy_reset_aliases(
+    redis_client: InMemoryRedis, strategy_repository: StrategyRepository
+) -> None:
+    client = _build_client(redis_client, strategy_repository)
 
     payload = {
         "name": "resetme",
@@ -739,7 +730,8 @@ def test_strategy_reset_aliases(redis_client: InMemoryRedis) -> None:
         assert data["strategy"]["params"] == {}
         assert data["strategy"]["metadata"] == {}
 
-        stored = _read_metadata(redis_client, "resetme")
+        stored = _fetch_strategy(strategy_repository, "resetme")
+        assert stored is not None
         assert stored["enabled"] is True
         assert stored["params"] == {}
         assert stored["metadata"] == {}
@@ -751,8 +743,10 @@ def test_strategy_reset_aliases(redis_client: InMemoryRedis) -> None:
     assert missing_resp.status_code == 404
 
 
-def test_strategy_rename_endpoint_rewrites_metadata(redis_client: InMemoryRedis) -> None:
-    client = _build_client(redis_client)
+def test_strategy_rename_endpoint_rewrites_metadata(
+    redis_client: InMemoryRedis, strategy_repository: StrategyRepository
+) -> None:
+    client = _build_client(redis_client, strategy_repository)
     payload = {
         "name": "rename-me",
         "factory": "tests.services.strategy.sample:factory",
@@ -777,7 +771,8 @@ def test_strategy_rename_endpoint_rewrites_metadata(redis_client: InMemoryRedis)
         assert renamed["name"] == "renamed"
 
     assert asyncio.run(redis_client.get("json:strategy:rename-me")) is None
-    renamed_meta = _read_metadata(redis_client, "renamed")
+    renamed_meta = _fetch_strategy(strategy_repository, "renamed")
+    assert renamed_meta is not None
     assert renamed_meta["name"] == "renamed"
     risk_state = asyncio.run(redis_client.get("json:strategy:renamed:risk-settings"))
     assert risk_state is not None

@@ -6,7 +6,6 @@ import asyncio
 import contextlib
 import json
 import importlib
-import time
 from collections.abc import AsyncIterator, Awaitable, Mapping
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -17,6 +16,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, s
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from services.strategy import StrategyTaskConsumer
+from src.db.repositories import StrategyRecord, StrategyRepository, StrategyRepositoryError
 from src.ibbot import update_service_health
 from src.ibbot.logging import get_logger
 from src.ibbot.redis import DEFAULT_REDIS_URL, close_global_client, get_redis_client
@@ -247,7 +247,6 @@ class StrategyRuntime:
         self.pending_tasks: int = 0
         self.last_event_at: str | None = None
         self._metadata_sync_lock = asyncio.Lock()
-        self._last_metadata_sync: float | None = None
 
     def _record_to_document(self, record: StrategyRecord) -> StrategyDocument:
         try:
@@ -1025,14 +1024,27 @@ class StrategyRuntime:
 
     async def _synchronise_metadata(self, *, force: bool = False) -> None:
         async with self._metadata_sync_lock:
-            if not force and self._last_metadata_sync is not None:
+            if not force and self._strategies:
                 return
             try:
-                await self._load_metadata()
+                records = await self._repository.list_strategies()
             except Exception:  # pragma: no cover - defensive guard
-                self._logger.warning("Failed to refresh strategy metadata", exc_info=True)
+                self._logger.warning(
+                    "Failed to refresh strategy metadata from repository", exc_info=True
+                )
                 return
-            self._last_metadata_sync = time.monotonic()
+
+        documents: dict[str, StrategyDocument] = {}
+        for record in records:
+            try:
+                document = self._record_to_document(record)
+            except StrategyRepositoryError:
+                continue
+            documents[document.name] = document
+
+        async with self._lock:
+            self._strategies.clear()
+            self._strategies.update(documents)
 
     @classmethod
     def _extract_metadata_files(cls, metadata: Mapping[str, Any]) -> set[str]:
@@ -1060,33 +1072,6 @@ class StrategyRuntime:
         if isinstance(value, (list, tuple, set)):
             for item in value:
                 cls._collect_file_values(item, entries)
-
-    async def _load_metadata(self) -> None:
-        raw_index = await self._redis.get(self._metadata_index_key)
-        names = []
-        if isinstance(raw_index, str):
-            try:
-                decoded = json.loads(raw_index)
-            except json.JSONDecodeError:
-                decoded = []
-            if isinstance(decoded, list):
-                names = [str(entry) for entry in decoded]
-        elif isinstance(raw_index, list):
-            names = [str(entry) for entry in raw_index]
-        async with self._lock:
-            self._strategies.clear()
-            for name in names:
-                raw = await self._redis.get(self._metadata_key(name))
-                if not raw:
-                    continue
-                payload = _normalise_json_payload(raw)
-                if not payload:
-                    continue
-                try:
-                    document = StrategyDocument.model_validate(payload)
-                except ValidationError:
-                    continue
-                self._strategies[name] = document
 
     async def _event_loop(self) -> None:
         try:

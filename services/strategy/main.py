@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import signal
 from contextlib import AsyncExitStack, suppress
-from typing import Any, Mapping
+from typing import Any
 
 from services.strategy import StrategyAdapter, StrategyTaskConsumer
 from src.ibbot import update_service_health
@@ -19,6 +18,7 @@ from src.ibbot.redis import (
     close_global_client,
     get_redis_client,
 )
+from src.db.repositories import StrategyRepository, StrategyRepositoryError
 
 SERVICE_NAME = "strategy"
 DEFAULT_STRATEGY_QUEUE = "list:queue:strategy"
@@ -33,18 +33,34 @@ def _resolve_redis_url(override_key: str) -> str:
     return DEFAULT_REDIS_URL
 
 
-def _parse_strategies(config: Mapping[str, str]) -> Mapping[str, Any]:
-    raw = config.get("strategies")
-    if not raw:
+async def _load_repository_strategies(
+    repository: StrategyRepository,
+    logger: Any,
+) -> dict[str, Any]:
+    try:
+        records = await repository.list_strategies()
+    except StrategyRepositoryError as exc:
+        logger.error("Failed to load strategies from repository: %s", exc)
         return {}
-    if isinstance(raw, str):
-        try:
-            return json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError(f"invalid strategy configuration payload: {exc}") from exc
-    if isinstance(raw, Mapping):
-        return raw
-    raise RuntimeError("strategies configuration must be JSON or mapping")
+    except Exception as exc:  # pragma: no cover - defensive guard
+        logger.warning("Unexpected repository failure while loading strategies: %s", exc)
+        return {}
+
+    strategies: dict[str, Any] = {}
+    for record in records:
+        if not record.enabled:
+            continue
+        factory = record.factory
+        if not factory:
+            logger.warning(
+                "Strategy %s skipped: repository entry missing factory", record.name
+            )
+            continue
+        strategies[record.name] = {
+            "factory": factory,
+            "params": dict(record.params),
+        }
+    return strategies
 
 
 async def run_service() -> None:
@@ -77,7 +93,8 @@ async def run_service() -> None:
     snapshot_prefix = config.get("snapshot_prefix", "hash:market:snapshot")
     poll_timeout = float(config.get("poll_timeout", 1.0))
 
-    strategies = _parse_strategies(config)
+    repository = StrategyRepository()
+    strategies = await _load_repository_strategies(repository, logger)
     consumer: StrategyTaskConsumer | None = None
     consumer_task: asyncio.Task[None] | None = None
     idle_health_task: asyncio.Task[None] | None = None
@@ -147,6 +164,7 @@ async def run_service() -> None:
     async with AsyncExitStack() as stack:
         stack.push_async_callback(provider.close)
         stack.push_async_callback(close_global_client)
+        stack.push_async_callback(repository.aclose)
         if consumer is None:
             idle_health_task = asyncio.create_task(_publish_idle_health())
             stack.callback(idle_health_task.cancel)
