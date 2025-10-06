@@ -14,6 +14,7 @@ from src.ibbot.logging import get_logger
 from .base import (
     RepositoryError,
     execute_write,
+    format_datetime_for_db,
     is_sqlite,
     json_dumps,
     use_connection,
@@ -70,6 +71,26 @@ def _serialise_datetime(value: Any) -> str | None:
         return timestamp.isoformat()
     text = str(value)
     return text or None
+
+
+def _normalise_datetime_for_db(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return format_datetime_for_db(value)
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return text
+    return format_datetime_for_db(parsed)
 
 
 def _parse_json_column(value: Any) -> dict[str, Any]:
@@ -131,7 +152,7 @@ class StrategyRepository:
         except StrategyRepositoryError:
             raise
         except Exception as exc:  # pragma: no cover - defensive logging
-            self._logger.exception("Failed to upsert strategy", payload=payload)
+            self._logger.exception("Failed to upsert strategy payload=%s", payload)
             raise StrategyRepositoryError("Failed to persist strategy") from exc
 
     async def update_strategy(
@@ -291,7 +312,7 @@ class StrategyRepository:
                     raise StrategyRepositoryError(f"unknown strategy: {source}")
                 return record
 
-            params = (target, _utc_now_text(), source)
+            params = (target, _normalise_datetime_for_db(_utc_now_text()), source)
             if is_sqlite(connection):
                 sql = "UPDATE strategies SET name = ?, updated_at = ? WHERE name = ?"
             else:
@@ -495,10 +516,10 @@ class StrategyRepository:
             payload["metadata"],
             payload["description"],
             payload["enabled"],
-            payload["enabled_at"],
-            payload["disabled_at"],
-            payload["created_at"],
-            payload["updated_at"],
+            _normalise_datetime_for_db(payload["enabled_at"]),
+            _normalise_datetime_for_db(payload["disabled_at"]),
+            _normalise_datetime_for_db(payload["created_at"]),
+            _normalise_datetime_for_db(payload["updated_at"]),
         )
         if is_sqlite(connection):
             sql = (
@@ -525,9 +546,9 @@ class StrategyRepository:
             payload["metadata"],
             payload["description"],
             payload["enabled"],
-            payload["enabled_at"],
-            payload["disabled_at"],
-            payload["updated_at"],
+            _normalise_datetime_for_db(payload["enabled_at"]),
+            _normalise_datetime_for_db(payload["disabled_at"]),
+            _normalise_datetime_for_db(payload["updated_at"]),
             name,
         )
         if is_sqlite(connection):
