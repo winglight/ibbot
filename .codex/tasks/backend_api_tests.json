@@ -1,0 +1,112 @@
+{
+  "schema_version": "1.0",
+  "name": "Backend API Test Coverage",
+  "description": "Actionable tasks to implement the missing backend API tests referenced in docs/backend_api_test_coverage.md.",
+  "tasks": [
+    {
+      "id": "backend-api-tests-account-daily-summary",
+      "title": "Account: cover /api/account/daily-summary",
+      "description": "Add tests for the account daily summary endpoint, including cache hits, cache misses, and invalid query parameters.",
+      "commands": [
+        "pytest tests/routes/account -k daily_summary"
+      ]
+    },
+    {
+      "id": "backend-api-tests-api-docs-services",
+      "title": "API Docs: cover /api/docs/services",
+      "description": "Write tests that validate the merged service catalog returned by /api/docs/services, stubbing dependent service clients as needed.",
+      "commands": [
+        "pytest tests/routes -k docs_services"
+      ]
+    },
+    {
+      "id": "backend-api-tests-config-endpoints",
+      "title": "Config: cover module list/history/update/rollback endpoints",
+      "description": "Implement tests for the config routes (REST and legacy aliases), including Redis success, permission errors, and rollback flows.",
+      "commands": [
+        "pytest tests/routes/config"
+      ]
+    },
+    {
+      "id": "backend-api-tests-dom-endpoints",
+      "title": "DOM: cover configuration, control, and alert endpoints",
+      "description": "Ensure DOM routes are tested for reading/updating config, starting/stopping DOM streams, alert acknowledgements, and history snapshots.",
+      "commands": [
+        "pytest tests/routes/dom"
+      ]
+    },
+    {
+      "id": "backend-api-tests-logs-endpoints",
+      "title": "Logs: cover listing/modules/stats endpoints",
+      "description": "Add tests for log retrieval endpoints, including pagination, missing files, and stats aggregation branches.",
+      "commands": [
+        "pytest tests/routes/logs"
+      ]
+    },
+    {
+      "id": "backend-api-tests-market-data-backfill",
+      "title": "Market Data: cover storage proxy and backfill",
+      "description": "Test /market/storage and /market/backfill happy paths and error responses by stubbing MarketDataServiceClient interactions.",
+      "commands": [
+        "pytest tests/routes/market_data -k 'storage or backfill'"
+      ]
+    },
+    {
+      "id": "backend-api-tests-monitoring-clear-cache",
+      "title": "Monitoring: cover queue cache clearing",
+      "description": "Cover the /api/monitoring/queues/clear-cache route for successful clears and Redis/flush exceptions.",
+      "commands": [
+        "pytest tests/routes -k clear_cache"
+      ]
+    },
+    {
+      "id": "backend-api-tests-notifications-test-endpoint",
+      "title": "Notifications: cover /api/notifications/test",
+      "description": "Write tests verifying channel resolution and dispatch for the notifications test endpoint.",
+      "commands": [
+        "pytest tests/routes -k notifications_test"
+      ]
+    },
+    {
+      "id": "backend-api-tests-runbooks-endpoints",
+      "title": "Runbooks: cover list/detail/start endpoints",
+      "description": "Mock runbook_manager to cover retrieval, 404, and conflict responses for runbook routes.",
+      "commands": [
+        "pytest tests/routes/runbooks"
+      ]
+    },
+    {
+      "id": "backend-api-tests-strategy-endpoints",
+      "title": "Strategy: cover remaining CRUD and error paths",
+      "description": "Extend strategy route tests to cover untested endpoints, payload validation, and service error handling.",
+      "commands": [
+        "pytest tests/routes/strategy"
+      ]
+    },
+    {
+      "id": "backend-api-tests-cleanup-outdated",
+      "title": "Cleanup: remove outdated or dead route tests",
+      "description": "Identify and delete tests that reference removed endpoints or obsolete behaviors while refactoring shared fixtures.",
+      "commands": [
+        "pytest tests/routes"
+      ]
+    },
+    {
+      "id": "backend-api-tests-update-coverage-doc",
+      "title": "Documentation: update backend API coverage report",
+      "description": "Refresh docs/backend_api_test_coverage.md with the new test coverage status after implementing the missing suites.",
+      "commands": [
+        "pytest tests/routes"
+      ]
+    },
+    {
+      "id": "backend-api-tests-run-pytest-suite",
+      "title": "Verification: run focused and full pytest",
+      "description": "Execute focused pytest runs for changed modules followed by the full test suite to confirm stability.",
+      "commands": [
+        "pytest tests/routes",
+        "pytest"
+      ]
+    }
+  ]
+}
