@@ -17,6 +17,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, s
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from services.strategy import StrategyTaskConsumer
+from src.db.repositories.strategy import StrategyRepository
 from src.ibbot import update_service_health
 from src.ibbot.logging import get_logger
 from src.ibbot.redis import DEFAULT_REDIS_URL, close_global_client, get_redis_client

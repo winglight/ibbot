@@ -10,7 +10,7 @@ from src.db.async_support import run_in_thread
 from src.db.mariadb import MariaDBConfigurationError
 from src.ibbot.logging import get_logger
 
-from .base import RepositoryError, is_sqlite, use_connection
+from .base import RepositoryError, format_datetime_for_db, is_sqlite, use_connection
 
 __all__ = [
     "ConfigRepository",
@@ -33,7 +33,9 @@ class ModuleConfigSnapshot:
 
 
 def _utc_now_text() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    """Return the current UTC timestamp formatted for DATETIME columns."""
+
+    return format_datetime_for_db(datetime.now(timezone.utc))
 
 
 class ConfigRepository:
