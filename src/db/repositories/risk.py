@@ -14,6 +14,7 @@ from .base import (
     RepositoryError,
     RepositoryValidationError,
     executemany_write,
+    format_datetime_for_db,
     is_sqlite,
     json_dumps,
     use_connection,
@@ -334,7 +335,7 @@ def _coerce_timestamp(value: Any) -> str:
     parsed = _parse_datetime(value)
     if parsed is None:
         parsed = _utc_now()
-    return parsed.isoformat()
+    return format_datetime_for_db(parsed)
 
 
 def _coerce_atr_params(value: Any) -> str | None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from typing import Any, Iterable
 
 from src.db.mariadb import connect
@@ -16,6 +17,7 @@ __all__ = [
     "is_sqlite",
     "execute_write",
     "executemany_write",
+    "format_datetime_for_db",
 ]
 
 
@@ -31,6 +33,25 @@ def json_dumps(value: Any) -> str:
     """Serialize *value* to JSON preserving non-ASCII characters."""
 
     return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
+
+
+def format_datetime_for_db(value: datetime) -> str:
+    """Return a ``DATETIME``-friendly representation of *value*.
+
+    MariaDB's ``DATETIME`` columns do not accept timezone information. When
+    provided with an aware :class:`~datetime.datetime` the database rejects the
+    write with ``Incorrect datetime value``. This helper normalises any
+    timezone-aware value to UTC, removes the timezone information and formats
+    the timestamp using the standard ``YYYY-MM-DD HH:MM:SS[.ffffff]`` pattern
+    understood by both MariaDB and sqlite.
+    """
+
+    if value.tzinfo is not None:
+        value = value.astimezone(timezone.utc)
+    naive = value.replace(tzinfo=None)
+    if naive.microsecond:
+        return naive.strftime("%Y-%m-%d %H:%M:%S.%f")
+    return naive.strftime("%Y-%m-%d %H:%M:%S")
 
 
 @contextmanager
