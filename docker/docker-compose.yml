@@ -348,6 +348,7 @@ networks:
   stack:
     name: stack
     driver: bridge
+    external: true
     ipam:
       config:
         - subnet: 172.30.0.0/16
