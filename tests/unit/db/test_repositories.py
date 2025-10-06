@@ -6,9 +6,11 @@ from typing import Any
 
 import pytest
 
-from src.db.repositories.order import OrderRepository, _normalise_order_payload
-from src.db.repositories.risk import RiskRulesRepository, _coerce_timestamp
-from src.db.repositories.base import format_datetime_for_db
+from src.db.repositories.order import (
+    OrderNotFoundError,
+    OrderRepository,
+    _normalise_order_payload,
+)
 
 
 @pytest.mark.asyncio
@@ -26,7 +28,7 @@ async def test_order_repository_upserts_by_command_id(
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
-    inserted_id = await repo.upsert_order(payload)
+    inserted_id = await repo.insert_order(payload)
     assert isinstance(inserted_id, int)
 
     row = sqlite_db.execute(
@@ -83,6 +85,58 @@ async def test_order_repository_respects_allow_insert_flag(
         (inserted_id,),
     ).fetchone()
     assert row_after["ib_order_id"] == "IB-SKIP-1"
+
+
+@pytest.mark.asyncio
+async def test_order_repository_update_raises_when_missing(
+    sqlite_db, order_repository_factory
+) -> None:
+    repo = await order_repository_factory()
+
+    payload = {"ib_order_id": "IB-MISSING-1", "status": "Submitted"}
+
+    with pytest.raises(OrderNotFoundError):
+        await repo.update_order(payload)
+
+    row = sqlite_db.execute(
+        "SELECT id FROM orders WHERE ib_order_id = ?",
+        ("IB-MISSING-1",),
+    ).fetchone()
+    assert row is None
+
+
+@pytest.mark.asyncio
+async def test_order_repository_update_matches_client_and_order_identifiers(
+    sqlite_db, order_repository_factory
+) -> None:
+    repo = await order_repository_factory()
+
+    cursor = sqlite_db.execute(
+        "INSERT INTO orders (order_id, client_order_id, symbol, status) VALUES (?, ?, ?, ?)",
+        ("ORDER-1", "CLIENT-1", "BABA", "submitted"),
+    )
+    sqlite_db.commit()
+    existing_id = int(cursor.lastrowid)
+
+    await repo.update_order({"client_order_id": "CLIENT-1", "status": "filled"})
+
+    row = sqlite_db.execute(
+        "SELECT id, status FROM orders WHERE client_order_id = ?",
+        ("CLIENT-1",),
+    ).fetchone()
+
+    assert row["id"] == existing_id
+    assert row["status"].lower() == "filled"
+
+    await repo.update_order({"order_id": "ORDER-1", "status": "cancelled"})
+
+    updated_row = sqlite_db.execute(
+        "SELECT id, status FROM orders WHERE id = ?",
+        (existing_id,),
+    ).fetchone()
+
+    assert updated_row["id"] == existing_id
+    assert updated_row["status"].lower() == "cancelled"
 
 
 @pytest.mark.asyncio
@@ -226,7 +280,7 @@ async def test_order_repository_uses_default_exchange_when_value_missing(
     normalised = _normalise_order_payload(payload)
     assert "exchange" not in normalised
 
-    inserted_id = await repo.upsert_order(payload)
+    inserted_id = await repo.insert_order(payload)
     assert isinstance(inserted_id, int)
 
     row = sqlite_db.execute(
@@ -294,21 +348,25 @@ def test_find_existing_helpers_match_swapped_identifiers() -> None:
     cursor = _LookupCursor(rows)
 
     column, value = repo._find_existing_sqlite(
-        cursor, None, None, "ORDER-456", "CLIENT-123"
+        cursor, None, None, "CLIENT-123", "ORDER-456"
     )
 
     assert column == "client_order_id"
     assert value == "CLIENT-123"
     assert ("client_order_id", "CLIENT-123") in cursor.queries
+    assert ("client_order_id", "ORDER-456") in cursor.queries
+    assert ("order_id", "CLIENT-123") in cursor.queries
 
     cursor_mysql = _LookupCursor(rows)
     column_mysql, value_mysql = repo._find_existing_mariadb(
-        cursor_mysql, None, None, "ORDER-456", "CLIENT-123"
+        cursor_mysql, None, None, "CLIENT-123", "ORDER-456"
     )
 
     assert column_mysql == "client_order_id"
     assert value_mysql == "CLIENT-123"
     assert ("client_order_id", "CLIENT-123") in cursor_mysql.queries
+    assert ("client_order_id", "ORDER-456") in cursor_mysql.queries
+    assert ("order_id", "CLIENT-123") in cursor_mysql.queries
 
 
 def test_coerce_timestamp_normalises_timezone() -> None:
