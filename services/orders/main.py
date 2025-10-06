@@ -1576,15 +1576,13 @@ class OrdersRuntime:
                 )
             return False
         if record_snapshot is not None:
-            persist_mode = "update" if matched_existing else "insert"
             persist_result = await self._persist_order_snapshot(
                 record_snapshot,
                 timestamp=event_time,
-                mode=persist_mode,
+                mode="update",
             )
             if (
-                persist_mode == "insert"
-                and persist_result.inserted_id is not None
+                persist_result.inserted_id is not None
                 and record_identifier_for_repo is not None
             ):
                 await self._register_persisted_order_id(
@@ -1592,7 +1590,7 @@ class OrdersRuntime:
                     record_snapshot,
                     persist_result,
                 )
-            elif persist_mode == "update" and persist_result.not_found:
+            elif persist_result.not_found:
                 identifier_for_log = (
                     record_identifier_for_repo
                     or _coerce_str(record_snapshot.get("order_id"))
@@ -1601,24 +1599,10 @@ class OrdersRuntime:
                     or "unknown"
                 )
                 self.logger.warning(
-                    "Repository missing persisted order %s for update; retrying insert",
+                    "Repository missing persisted order %s for update; skipping insert",
                     identifier_for_log,
                 )
-                retry_result = await self._persist_order_snapshot(
-                    record_snapshot,
-                    timestamp=event_time,
-                    mode="insert",
-                )
-                if (
-                    retry_result.inserted_id is not None
-                    and record_identifier_for_repo is not None
-                ):
-                    await self._register_persisted_order_id(
-                        record_identifier_for_repo,
-                        record_snapshot,
-                        retry_result,
-                    )
-        return updated
+            return updated
 
     def _extract_order_id(
         self,
