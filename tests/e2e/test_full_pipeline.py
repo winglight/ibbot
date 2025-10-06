@@ -562,7 +562,7 @@ async def _run_market_strategy_risk_flow(monkeypatch: pytest.MonkeyPatch) -> Non
 
     strategies = {
         "threshold": {
-            "factory": lambda config: ThresholdStrategy(config),
+            "strategy_type": lambda config: ThresholdStrategy(config),
             "params": {
                 "threshold": 95.0,
                 "size": 1,

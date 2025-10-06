@@ -3,7 +3,7 @@
 Existing deployments that already created the ``strategies`` table will not
 be altered automatically. Refer to the migration comment in
 ``scripts/sql/db.sql`` for the manual ``ALTER TABLE`` statements required to
-introduce factory/params/metadata columns when upgrading."""
+introduce strategy_type/params/metadata columns when upgrading."""
 
 from __future__ import annotations
 

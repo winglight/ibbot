@@ -31,7 +31,7 @@ class StrategyRecord:
     """Representation of a strategy row stored in the database."""
 
     name: str
-    factory: str | None
+    strategy_type: str | None
     params: dict[str, Any]
     metadata: dict[str, Any]
     description: str | None
@@ -46,7 +46,7 @@ class StrategyRecord:
 
         return {
             "name": self.name,
-            "factory": self.factory,
+            "strategy_type": self.strategy_type,
             "params": dict(self.params),
             "metadata": dict(self.metadata),
             "description": self.description,
@@ -95,7 +95,7 @@ class StrategyRepository:
 
     _COLUMNS = (
         "name",
-        "factory",
+        "strategy_type",
         "params",
         "metadata",
         "description",
@@ -395,12 +395,14 @@ class StrategyRepository:
         enabled_at = _serialise_datetime(accessor("enabled_at"))
         disabled_at = _serialise_datetime(accessor("disabled_at"))
 
-        factory = accessor("factory")
+        strategy_type_raw = accessor("strategy_type")
         description = accessor("description")
 
         return StrategyRecord(
             name=str(accessor("name")),
-            factory=str(factory) if factory not in {None, ""} else None,
+            strategy_type=(
+                str(strategy_type_raw) if strategy_type_raw not in {None, ""} else None
+            ),
             params=params,
             metadata=metadata,
             description=str(description) if description not in {None, ""} else None,
@@ -420,10 +422,12 @@ class StrategyRepository:
         if not name:
             raise StrategyRepositoryError("strategy name is required")
 
-        factory_value = payload.get("factory")
-        factory = str(factory_value).strip() if factory_value is not None else None
-        if factory == "":
-            factory = None
+        strategy_type_value = payload.get("strategy_type")
+        strategy_type = (
+            str(strategy_type_value).strip() if strategy_type_value is not None else None
+        )
+        if strategy_type == "":
+            strategy_type = None
 
         description_value = payload.get("description")
         description = (
@@ -472,7 +476,7 @@ class StrategyRepository:
 
         return {
             "name": name,
-            "factory": factory,
+            "strategy_type": strategy_type,
             "params": json_dumps(params),
             "metadata": json_dumps(metadata),
             "description": description,
@@ -486,7 +490,7 @@ class StrategyRepository:
     def _insert_row(self, connection: Any, payload: Mapping[str, Any]) -> None:
         params = (
             payload["name"],
-            payload["factory"],
+            payload["strategy_type"],
             payload["params"],
             payload["metadata"],
             payload["description"],
@@ -498,12 +502,12 @@ class StrategyRepository:
         )
         if is_sqlite(connection):
             sql = (
-                "INSERT INTO strategies (name, factory, params, metadata, description, enabled, "
+                "INSERT INTO strategies (name, strategy_type, params, metadata, description, enabled, "
                 "enabled_at, disabled_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
             )
         else:
             sql = (
-                "INSERT INTO strategies (name, factory, params, metadata, description, enabled, "
+                "INSERT INTO strategies (name, strategy_type, params, metadata, description, enabled, "
                 "enabled_at, disabled_at, created_at, updated_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
             )
         execute_write(connection, sql, params)
@@ -511,12 +515,12 @@ class StrategyRepository:
     def _update_row(self, connection: Any, name: str, payload: Mapping[str, Any]) -> None:
         placeholder = "?" if is_sqlite(connection) else "%s"
         assignments = (
-            "factory = {0}, params = {0}, metadata = {0}, description = {0}, "
+            "strategy_type = {0}, params = {0}, metadata = {0}, description = {0}, "
             "enabled = {0}, enabled_at = {0}, disabled_at = {0}, updated_at = {0}"
         ).format(placeholder)
         sql = f"UPDATE strategies SET {assignments} WHERE name = {placeholder}"
         params = (
-            payload["factory"],
+            payload["strategy_type"],
             payload["params"],
             payload["metadata"],
             payload["description"],
@@ -528,7 +532,7 @@ class StrategyRepository:
         )
         if is_sqlite(connection):
             sql = (
-                "UPDATE strategies SET factory = ?, params = ?, metadata = ?, description = ?, "
+                "UPDATE strategies SET strategy_type = ?, params = ?, metadata = ?, description = ?, "
                 "enabled = ?, enabled_at = ?, disabled_at = ?, updated_at = ? WHERE name = ?"
             )
         execute_write(connection, sql, params)
