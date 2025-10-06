@@ -37,7 +37,6 @@ class StrategyRiskManager:
         redis_client: Any | None = None,
         settings_prefix: str = "json:strategy",
         rules_hash_key: str = "hash:risk:rules",
-        *,
         settings_ttl_seconds: int | None = None,
     ) -> None:
         self._client = client or RiskServiceClient()
