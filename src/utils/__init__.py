@@ -57,6 +57,8 @@ def parse_local_datetime(value: Optional[str]) -> Optional[datetime]:
     Strings with a trailing ``Z`` are treated as UTC and converted to the
     local timezone.  Naive strings (without timezone information) are assumed
     to already represent local time and thus receive the local timezone.
+    
+    Returns None if the input string is not a valid ISO format.
     """
     if not value:
         return None
@@ -68,8 +70,12 @@ def parse_local_datetime(value: Optional[str]) -> Optional[datetime]:
     if text.endswith("Z"):
         text = text[:-1] + "+00:00"
 
-    dt = datetime.fromisoformat(text)
-    return ensure_local_timezone(dt)
+    try:
+        dt = datetime.fromisoformat(text)
+        return ensure_local_timezone(dt)
+    except ValueError:
+        # Return None for invalid ISO format strings instead of raising an exception
+        return None
 
 
 def to_local_iso(dt: Optional[datetime]) -> Optional[str]:

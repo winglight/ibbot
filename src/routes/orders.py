@@ -336,7 +336,11 @@ async def list_orders(
             if parsed is not None:
                 start_date_iso = parsed.isoformat()
             else:
-                start_date_iso = trimmed_start
+                # Invalid date format provided
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"Invalid date format: '{trimmed_start}'. Expected ISO format (e.g., '2023-01-01T00:00:00' or '2023-01-01T00:00:00Z')"
+                )
 
     payload = await _call_orders_service(
         client.list_orders,
