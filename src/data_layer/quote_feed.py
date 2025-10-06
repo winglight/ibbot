@@ -119,7 +119,15 @@ class IBQuoteFeed(QuoteFeed):
 
                 return _cancel_existing
 
-        await asyncio.to_thread(self._ensure_connection_ready)
+        client = self._resolve_ibkr_client()
+        ensure_fn = getattr(client, "ensure_connection", None)
+        if callable(ensure_fn):
+            try:
+                await ensure_fn(reason="quote-feed")
+            except Exception as exc:
+                raise self._data_source_error_cls(str(exc)) from exc
+        else:
+            await asyncio.to_thread(self._ensure_connection_ready)
 
         try:
             subscription = await asyncio.to_thread(
@@ -292,6 +300,16 @@ class IBQuoteFeed(QuoteFeed):
         return client.get_stock_contract(symbol, exchange)
 
     def _resolve_ibkr_client(self):
+        try:
+            from src.ib_client_registry import get_client_sync  # type: ignore
+        except Exception:
+            get_client_sync = None  # type: ignore[assignment]
+        else:
+            try:
+                return get_client_sync("secondary")
+            except Exception as exc:
+                logger.error("Failed to resolve shared IBKR client: {}", exc)
+
         try:
             import core  # type: ignore
         except ImportError as exc:  # pragma: no cover - defensive guard

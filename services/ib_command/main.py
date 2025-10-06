@@ -34,11 +34,11 @@ async def _create_ib_client() -> Any:
     """Instantiate the IB client if available."""
 
     try:
-        from src.ibkr_client import IBKRClient  # type: ignore
+        from src.ib_client_registry import get_client  # type: ignore
     except Exception:  # pragma: no cover - optional dependency
         return object()
 
-    return IBKRClient()
+    return await get_client("primary")
 
 
 async def run_service() -> None:
