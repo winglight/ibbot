@@ -40,6 +40,7 @@ from .utils.account_pnl_cache import write_net_liquidation_snapshot
 
 SNAPSHOT_ACCOUNT_INFO_KEY = "account:info"
 SNAPSHOT_POSITIONS_KEY = "account:positions"
+SNAPSHOT_TTL_SECONDS = int(os.getenv("ACCOUNT_SNAPSHOT_TTL_SECONDS", "900"))
 
 _redis_client: Optional[Redis] = None
 _redis_lock = asyncio.Lock()
@@ -132,7 +133,11 @@ async def _write_snapshot(key: str, data: Any, source: str, *, stale: bool = Fal
         payload.pop("stale_at", None)
 
     try:
-        await client.set(key, json.dumps(payload, ensure_ascii=False))
+        await client.set(
+            key,
+            json.dumps(payload, ensure_ascii=False),
+            ex=SNAPSHOT_TTL_SECONDS,
+        )
         return True
     except Exception as exc:
         snapshot_logger.warning(f"Failed to write snapshot '{key}': {exc}")
@@ -185,7 +190,11 @@ async def _mark_snapshot_stale(key: str, reason: str) -> None:
         return
 
     try:
-        await client.set(key, json.dumps(existing, ensure_ascii=False))
+        await client.set(
+            key,
+            json.dumps(existing, ensure_ascii=False),
+            ex=SNAPSHOT_TTL_SECONDS,
+        )
     except Exception as exc:
         snapshot_logger.warning(f"Failed to flag snapshot '{key}' as stale: {exc}")
 

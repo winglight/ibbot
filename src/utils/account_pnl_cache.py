@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import date, datetime
 from typing import Any, Dict, Iterable, Mapping, Optional
 
@@ -15,6 +16,7 @@ DAILY_PNL_KEY = "account:daily_pnl"
 DAILY_ORDERS_KEY = "account:daily_orders"
 ORDER_CONTRIB_KEY = "account:order_contrib"
 NET_LIQ_KEY = "account:net_liquidation"
+NET_LIQUIDATION_TTL_SECONDS = int(os.getenv("NET_LIQUIDATION_CACHE_TTL_SECONDS", "3600"))
 
 _logger = logger.bind(module="account_pnl_cache", request_id="-")
 
@@ -287,7 +289,11 @@ async def write_net_liquidation_snapshot(
         "source": source,
     }
     try:
-        await client.set(NET_LIQ_KEY, json.dumps(payload, ensure_ascii=False))
+        await client.set(
+            NET_LIQ_KEY,
+            json.dumps(payload, ensure_ascii=False),
+            ex=NET_LIQUIDATION_TTL_SECONDS,
+        )
     except Exception as exc:
         _logger.warning("Failed to persist net liquidation snapshot", error=str(exc))
 
