@@ -372,7 +372,7 @@ def _resolve_redis_url(override_key: str) -> str:
 
 async def _create_ib_client() -> Any:
     try:
-        from src.ibkr_client import IBKRClient  # type: ignore
+        from src.ib_client_registry import get_client  # type: ignore
     except Exception:  # pragma: no cover - optional dependency
         class _PlaceholderClient:
             async def connect(self) -> None:
@@ -382,7 +382,7 @@ async def _create_ib_client() -> Any:
                 raise RuntimeError("IBKR client is not available")
 
         return _PlaceholderClient()
-    return IBKRClient()
+    return await get_client("secondary")
 
 
 async def run_service() -> None:

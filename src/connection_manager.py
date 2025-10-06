@@ -317,10 +317,17 @@ class ConnectionManager:
             return
 
         try:
-            client._handle_disconnect_detected(trigger, signal_monitor=True)  # type: ignore[attr-defined]
+            client.mark_connection_lost(trigger)  # type: ignore[attr-defined]
         except AttributeError:
-            # Backwards compatibility with clients that do not expose the hook.
-            return
+            try:
+                client._handle_disconnect_detected(trigger, signal_monitor=True)  # type: ignore[attr-defined]
+            except AttributeError:
+                return
+            except Exception as exc:  # pragma: no cover - defensive guard
+                connection_logger.debug(
+                    "IBKR client notification after disconnect failed",
+                    error=str(exc),
+                )
         except Exception as exc:  # pragma: no cover - defensive guard
             connection_logger.debug(
                 "IBKR client notification after disconnect failed",
