@@ -103,6 +103,55 @@ def test_positions_returns_cached_snapshot_when_service_unavailable(account_app:
     assert payload.get("warning") == "Account service unavailable"
 
 
+def test_daily_summary_returns_service_payload(account_app: FastAPI, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test that /api/account/daily-summary returns data from the account service."""
+    class StubClient:
+        def __init__(self) -> None:
+            self.daily_summary_calls: list[Any] = []
+
+        async def fetch_daily_summary(self) -> AccountServiceResult:
+            self.daily_summary_calls.append(True)
+            return AccountServiceResult(
+                success=True,
+                data={
+                    "date": "2024-01-15",
+                    "starting_balance": 100000.0,
+                    "ending_balance": 101500.0,
+                    "pnl": 1500.0,
+                    "trades_count": 5,
+                    "commissions": 25.0
+                }
+            )
+
+    stub_client = StubClient()
+    monkeypatch.setattr(account_module, "get_account_service_client", lambda: stub_client)
+
+    client = TestClient(account_app)
+    response = client.get("/api/account/daily-summary")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["success"] is True
+    assert "date" in data["data"]
+    assert "pnl" in data["data"]
+    assert stub_client.daily_summary_calls == [True]
+
+
+def test_daily_summary_returns_503_when_service_unavailable(account_app: FastAPI, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test that /api/account/daily-summary returns 503 when service is unavailable."""
+    class StubClient:
+        async def fetch_daily_summary(self) -> AccountServiceResult:
+            raise ServiceUnavailableError("Account service unavailable")
+
+    stub_client = StubClient()
+    monkeypatch.setattr(account_module, "get_account_service_client", lambda: stub_client)
+
+    client = TestClient(account_app)
+    response = client.get("/api/account/daily-summary")
+
+    assert response.status_code == 503
+
+
 def test_backfill_commissions_returns_503_when_queue_unavailable(account_app: FastAPI, monkeypatch: pytest.MonkeyPatch) -> None:
     async def fake_queue_key() -> str:
         return "queue:test"

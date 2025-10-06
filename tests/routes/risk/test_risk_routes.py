@@ -306,3 +306,123 @@ def test_position_sizing_returns_503_when_service_unavailable(risk_app) -> None:
 
     assert response.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
     assert response.json()["detail"] == "Risk service unavailable"
+
+
+def test_get_sizing_history_returns_data(risk_app) -> None:
+    app, stub_client, _ = risk_app
+    stub_client.responses["fetch_sizing_history"] = {
+        "success": True,
+        "data": [
+            {
+                "timestamp": "2024-01-15T10:00:00Z",
+                "symbol": "ES",
+                "contracts": 2,
+                "stop_distance": 3.5,
+                "rv_current": 1.2
+            }
+        ]
+    }
+
+    with TestClient(app) as client:
+        response = client.get("/api/sizing-history")
+
+    assert response.status_code == status.HTTP_200_OK
+    data = response.json()
+    assert "data" in data
+    assert len(data["data"]) == 1
+    assert stub_client.calls[-1][0] == "fetch_sizing_history"
+
+
+def test_get_sizing_history_with_parameters(risk_app) -> None:
+    app, stub_client, _ = risk_app
+    stub_client.responses["fetch_sizing_history"] = {
+        "success": True,
+        "data": []
+    }
+
+    with TestClient(app) as client:
+        response = client.get("/api/sizing-history?symbol=ES&since=2024-01-01&limit=10")
+
+    assert response.status_code == status.HTTP_200_OK
+    
+    # Check that parameters were passed to the service
+    assert len(stub_client.calls) > 0
+    call_name, call_params = stub_client.calls[-1]
+    assert call_name == "fetch_sizing_history"
+    assert call_params["symbol"] == "ES"
+    assert call_params["since"] == "2024-01-01"
+    assert call_params["limit"] == 10
+
+
+def test_get_sizing_history_returns_503_when_service_unavailable(risk_app) -> None:
+    app, stub_client, _ = risk_app
+    stub_client.exceptions["fetch_sizing_history"] = ServiceUnavailableError("risk", "offline")
+
+    with TestClient(app) as client:
+        response = client.get("/api/sizing-history")
+
+    assert response.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
+    assert response.json()["detail"] == "Risk service unavailable"
+
+
+def test_get_order_queue_status_returns_status(risk_app) -> None:
+    app, stub_client, _ = risk_app
+    stub_client.responses["fetch_order_queue_status"] = {
+        "success": True,
+        "pending": 5,
+        "processing": 2,
+        "completed": 100
+    }
+
+    with TestClient(app) as client:
+        response = client.get("/api/order-queue-status")
+
+    assert response.status_code == status.HTTP_200_OK
+    data = response.json()
+    assert data["pending"] == 5
+    assert data["processing"] == 2
+    assert data["completed"] == 100
+    assert stub_client.calls[-1][0] == "fetch_order_queue_status"
+
+
+def test_get_order_queue_status_returns_503_when_service_unavailable(risk_app) -> None:
+    app, stub_client, _ = risk_app
+    stub_client.exceptions["fetch_order_queue_status"] = ServiceUnavailableError("risk", "offline")
+
+    with TestClient(app) as client:
+        response = client.get("/api/order-queue-status")
+
+    assert response.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
+    assert response.json()["detail"] == "Risk service unavailable"
+
+
+def test_get_config_rules_returns_rules(risk_app) -> None:
+    app, stub_client, _ = risk_app
+    stub_client.responses["fetch_config_rules"] = {
+        "success": True,
+        "rules": {
+            "ES": {"rule_type": "fixed", "stop_loss_price": 4200.0},
+            "NQ": {"rule_type": "trailing", "trail_ticks": 20}
+        }
+    }
+
+    with TestClient(app) as client:
+        response = client.get("/api/config/rules")
+
+    assert response.status_code == status.HTTP_200_OK
+    data = response.json()
+    assert "rules" in data
+    assert "ES" in data["rules"]
+    assert "NQ" in data["rules"]
+    assert stub_client.calls[-1][0] == "fetch_config_rules"
+
+
+def test_get_config_rules_returns_503_when_service_unavailable(risk_app) -> None:
+    app, stub_client, _ = risk_app
+    stub_client.exceptions["fetch_config_rules"] = ServiceUnavailableError("risk", "offline")
+
+    with TestClient(app) as client:
+        response = client.get("/api/config/rules")
+
+    assert response.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
+    assert response.json()["detail"] == "Risk service unavailable"
