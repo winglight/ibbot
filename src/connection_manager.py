@@ -170,6 +170,10 @@ class ConnectionManager:
         )
         self._last_loop_timeout_warning = 0.0
         self._loop_timeout_warning_suppressed = 0
+        self._post_connect_health_interval = max(
+            15.0, _get_env_float("IBKR_CONNECTED_HEALTH_CHECK_INTERVAL_SEC", 30.0)
+        )
+        self._disconnect_wait_event: Optional[asyncio.Event] = None
         # Weak reference back to IBKRClient (assigned during IBKRClient initialisation)
         self._ibkr_client_ref = None  # type: ignore[attr-defined]
         self._ibkr_connect_in_progress = False
@@ -294,6 +298,32 @@ class ConnectionManager:
         except Exception as exc:  # pragma: no cover - defensive guard
             connection_logger.debug(
                 "IBKR client notification after connect failed",
+                error=str(exc),
+            )
+
+    def _notify_ibkr_client_disconnected(self, *, trigger: str) -> None:
+        """Notify ``IBKRClient`` that the managed session terminated."""
+
+        ref = getattr(self, "_ibkr_client_ref", None)
+        if ref is None:
+            return
+
+        try:
+            client = ref()  # type: ignore[operator]
+        except Exception:
+            client = None
+
+        if not client:
+            return
+
+        try:
+            client._handle_disconnect_detected(trigger, signal_monitor=True)  # type: ignore[attr-defined]
+        except AttributeError:
+            # Backwards compatibility with clients that do not expose the hook.
+            return
+        except Exception as exc:  # pragma: no cover - defensive guard
+            connection_logger.debug(
+                "IBKR client notification after disconnect failed",
                 error=str(exc),
             )
 
@@ -893,7 +923,7 @@ class ConnectionManager:
                 self._notify_connect_waiters()
 
                 self._request_account_refresh("connection_established")
-                
+
                 # 保存事件循环引用
                 self._loop = loop
                 self._connection_thread_alive = True
@@ -906,46 +936,75 @@ class ConnectionManager:
                     external = True
                 self._notify_ibkr_client_connected(external=external)
 
+                disconnect_reason = "stop-request"
+                disconnect_event = asyncio.Event()
+                self._disconnect_wait_event = disconnect_event
+
+                def _signal_disconnect(*_args: Any, **_kwargs: Any) -> None:
+                    try:
+                        disconnect_event.set()
+                    except Exception:
+                        pass
+
+                registered_handlers: list[tuple[str, Any]] = []
+                for attr in ("disconnectedEvent", "connectionClosed"):
+                    event = getattr(self.ib, attr, None)
+                    if event is None:
+                        continue
+                    try:
+                        event += _signal_disconnect
+                    except Exception as exc:
+                        connection_logger.debug(
+                            "Failed to register %s handler on IB client", attr=attr, error=str(exc)
+                        )
+                        continue
+                    registered_handlers.append((attr, _signal_disconnect))
+
                 # 保持事件循环运行，直到明确要求断开连接
                 try:
-                    while self._connection_thread_alive and self.ib.isConnected():
+                    while self._connection_thread_alive:
+                        current_ib = self.ib
+                        if not current_ib or not current_ib.isConnected():
+                            disconnect_reason = "connection-health-check"
+                            break
+
                         try:
-                            # 使用异步 sleep 避免阻塞事件循环，添加超时保护
-                            await asyncio.wait_for(asyncio.sleep(0.1), timeout=1.0)
+                            await asyncio.wait_for(
+                                disconnect_event.wait(),
+                                timeout=self._post_connect_health_interval,
+                            )
+                            disconnect_reason = "ib-event"
+                            break
                         except asyncio.TimeoutError:
-                            # 如果连sleep都超时，说明事件循环可能有问题
-                            now = time.monotonic()
-                            if now - self._last_loop_timeout_warning >= self._loop_timeout_warning_interval:
-                                if self._loop_timeout_warning_suppressed:
-                                    connection_logger.warning(
-                                        "Event loop sleep timeout, checking connection health "
-                                        f"(suppressed {self._loop_timeout_warning_suppressed} duplicates)"
-                                    )
-                                    self._loop_timeout_warning_suppressed = 0
-                                else:
-                                    connection_logger.warning(
-                                        "Event loop sleep timeout, checking connection health"
-                                    )
-                                self._last_loop_timeout_warning = now
-                            else:
-                                self._loop_timeout_warning_suppressed += 1
-                                connection_logger.debug(
-                                    "Event loop sleep timeout detected but warning suppressed",
-                                    suppressed=self._loop_timeout_warning_suppressed,
+                            if not current_ib.isConnected():
+                                connection_logger.warning(
+                                    "IBKR connection lost during health check window"
                                 )
-                            if not self.ib.isConnected():
+                                disconnect_reason = "connection-health-check"
                                 break
+                            continue
                         except RuntimeError as e:
                             if "Event loop stopped before Future completed" in str(e):
                                 connection_logger.debug("Event loop stopped signal received")
+                                disconnect_reason = "loop-stopped"
                                 break
                             raise
                         except Exception as e:
                             connection_logger.warning(f"Unexpected error in connection loop: {e}")
-                            # 继续循环，除非是严重错误
                             if "cannot be called from a running event loop" in str(e):
+                                disconnect_reason = "loop-error"
                                 break
                 finally:
+                    for attr, handler in registered_handlers:
+                        event = getattr(self.ib, attr, None)
+                        if event is None:
+                            continue
+                        try:
+                            event -= handler
+                        except Exception:
+                            pass
+                    self._disconnect_wait_event = None
+
                     # 确保连接状态正确设置
                     if self.ib and self.ib.isConnected():
                         try:
@@ -954,7 +1013,11 @@ class ConnectionManager:
                             connection_logger.debug(f"Error during cleanup disconnect: {e}")
                     self.connected = False
                     self._connection_thread_alive = False
-                    connection_logger.info("IBKR connection loop ended")
+                    connection_logger.info("IBKR connection loop ended", reason=disconnect_reason)
+                    try:
+                        self._notify_ibkr_client_disconnected(trigger=disconnect_reason)
+                    except Exception:
+                        pass
             
             except Exception as e:
                 connection_logger.error(f"Failed to connect to IBKR: {e}")
@@ -1314,6 +1377,14 @@ class ConnectionManager:
 
         self._connection_thread_alive = False
 
+        event = self._disconnect_wait_event
+        if event is not None and loop and not loop.is_closed():
+            try:
+                loop.call_soon_threadsafe(event.set)
+            except RuntimeError:
+                if loop.is_running():
+                    event.set()
+
         if loop:
             try:
                 loop.call_soon_threadsafe(loop.stop)
@@ -1346,7 +1417,16 @@ class ConnectionManager:
         try:
             # 标记线程应当停止
             self._connection_thread_alive = False
-            
+
+            event = self._disconnect_wait_event
+            loop = self._loop
+            if event is not None and loop and not loop.is_closed():
+                try:
+                    loop.call_soon_threadsafe(event.set)
+                except RuntimeError:
+                    if loop.is_running():
+                        event.set()
+
             # 安全断开 IB
             if self.ib and self.ib.isConnected():
                 try:

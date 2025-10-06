@@ -255,6 +255,15 @@ class IBKRClient:
         self._needs_cleanup: bool = False
 
         self._monitor_interval_seconds = max(1.0, self._parse_env_float('IBKR_CONNECTION_MONITOR_INTERVAL', 5.0))
+        connected_interval_default = max(15.0, self._monitor_interval_seconds)
+        self._connected_monitor_interval = max(
+            15.0,
+            self._parse_env_float(
+                'IBKR_CONNECTION_MONITOR_CONNECTED_INTERVAL',
+                connected_interval_default,
+            ),
+        )
+        self._monitor_wakeup_event: Optional[asyncio.Event] = None
         base_delay = self._parse_env_float('IBKR_RECONNECT_BASE_DELAY', 5.0) or 5.0
         self._reconnect_base_delay = max(0.5, base_delay)
         self._reconnect_max_delay = max(self._reconnect_base_delay, self._parse_env_float('IBKR_RECONNECT_MAX_DELAY', 60.0))
@@ -368,6 +377,28 @@ class IBKRClient:
         except RuntimeError:
             if loop.is_running():
                 self._start_connection_monitor_task()
+
+    def _signal_monitor_wakeup(self) -> None:
+        """Wake the connection monitor loop if it is waiting."""
+
+        event = self._monitor_wakeup_event
+        if event is None:
+            return
+
+        loop = self._async_loop
+        if loop and not loop.is_closed():
+            try:
+                loop.call_soon_threadsafe(event.set)
+                return
+            except RuntimeError:
+                if loop.is_running():
+                    event.set()
+                    return
+
+        try:
+            event.set()
+        except Exception:
+            pass
 
     def _on_connection_manager_connected(self, *, external: bool) -> None:
         """ConnectionManager callback when a connection succeeds."""
@@ -560,20 +591,30 @@ class IBKRClient:
             ibkr_logger.debug(f"Initial connection check failed: {exc}")
             previous_state = False
 
+        wake_event = asyncio.Event()
+        self._monitor_wakeup_event = wake_event
+
         if previous_state:
-            self._handle_connection_restored(initial=True)
+            self._handle_connection_restored(initial=True, signal_monitor=False)
         else:
-            self._handle_disconnect_detected("monitor-start")
+            self._handle_disconnect_detected("monitor-start", signal_monitor=False)
             await self._ensure_reconnect_task()
+
+        connected_interval = self._connected_monitor_interval
+        disconnected_interval = self._monitor_interval_seconds
 
         try:
             while True:
+                timeout = connected_interval if previous_state else disconnected_interval
                 try:
-                    await asyncio.sleep(self._monitor_interval_seconds)
+                    await asyncio.wait_for(wake_event.wait(), timeout=timeout)
+                    wake_event.clear()
+                except asyncio.TimeoutError:
+                    pass
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
-                    ibkr_logger.debug(f"Monitor sleep interrupted: {exc}")
+                    ibkr_logger.debug(f"Monitor wait interrupted: {exc}")
                     continue
 
                 try:
@@ -584,20 +625,22 @@ class IBKRClient:
 
                 if connected:
                     if not previous_state:
-                        self._handle_connection_restored()
+                        self._handle_connection_restored(signal_monitor=False)
                     previous_state = True
                     continue
 
                 # Connection is down
                 if previous_state:
-                    self._handle_disconnect_detected("connection-lost")
+                    self._handle_disconnect_detected("connection-lost", signal_monitor=False)
                 await self._ensure_reconnect_task()
                 previous_state = False
         except asyncio.CancelledError:
             ibkr_logger.debug("IBKR connection monitor cancelled")
             raise
+        finally:
+            self._monitor_wakeup_event = None
 
-    def _handle_disconnect_detected(self, trigger: str) -> None:
+    def _handle_disconnect_detected(self, trigger: str, *, signal_monitor: bool = True) -> None:
         now = now_local()
         if self._disconnect_time is None:
             self._disconnect_time = now
@@ -616,7 +659,10 @@ class IBKRClient:
                 attempts=self._reconnect_attempt,
             )
 
-    def _handle_connection_restored(self, *, initial: bool = False) -> None:
+        if signal_monitor:
+            self._signal_monitor_wakeup()
+
+    def _handle_connection_restored(self, *, initial: bool = False, signal_monitor: bool = True) -> None:
         if self._disconnect_time is not None and not initial:
             elapsed = (now_local() - self._disconnect_time).total_seconds()
             ibkr_logger.info(
@@ -645,6 +691,9 @@ class IBKRClient:
             except RuntimeError:
                 task.cancel()
         self._reconnect_task = None
+
+        if signal_monitor:
+            self._signal_monitor_wakeup()
 
     async def _ensure_reconnect_task(self) -> None:
         task = self._reconnect_task
