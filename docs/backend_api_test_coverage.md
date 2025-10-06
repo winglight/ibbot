@@ -1,6 +1,6 @@
 # Backend API Test Coverage
 
-This report compares FastAPI routes under `src/routes/` with exercised endpoints in the `tests/` directory.
+This report compares FastAPI routes under `src/routes/` with exercised endpoints in the `tests/` directory.  Actionable tasks that can be triggered from the Codex UI are defined in `.codex/tasks/backend_api_tests.json`.
 
 ## src/routes/account.py
 
