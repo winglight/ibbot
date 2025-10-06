@@ -1,47 +1,135 @@
 const globalScope = typeof window !== 'undefined' ? window : globalThis;
-const appModules = globalScope.appModules = globalScope.appModules || {};
-const monitoringModules = appModules.monitoring || {};
-const MonitoringConstants = monitoringModules.constants || {};
-const MonitoringUtils = monitoringModules.utils || {};
-const MonitoringManagerModule = monitoringModules.manager || {};
-const MonitoringManagerClass = MonitoringManagerModule.MonitoringManager || globalScope.MonitoringManager;
-const MonitoringDashboardModule = monitoringModules.dashboard || {};
-const MonitoringDashboardClass = MonitoringDashboardModule.MonitoringDashboard || globalScope.MonitoringDashboard;
-const SharedUtils = appModules.utils || {};
-const strategiesModules = appModules.strategies || {};
-const StrategiesManagerModule = strategiesModules.manager || {};
-const StrategiesManagerClass = StrategiesManagerModule.StrategiesManager || globalScope.StrategiesManager;
-const StrategiesDetailsModule = strategiesModules.details || {};
-const StrategyDetailsControllerClass = StrategiesDetailsModule.StrategyDetailsController || globalScope.StrategyDetailsController;
-const uiModules = appModules.ui || {};
-const UIControllerModule = uiModules.controller || {};
-const UIControllerClass = UIControllerModule.UIController || globalScope.UIController;
-const ordersModules = appModules.orders || {};
-const OrdersManagerModule = ordersModules.manager || {};
-const OrdersManagerClass = OrdersManagerModule.OrderManager || globalScope.OrderManager;
-const notificationsModules = appModules.notifications || {};
-const NotificationsManagerModule = notificationsModules.manager || {};
-const NotificationsManagerClass = NotificationsManagerModule.NotificationsManager || globalScope.NotificationsManager;
-const riskModules = appModules.risk || {};
-const RiskRulesManagerModule = riskModules.manager || {};
-const RiskRulesManagerClass = RiskRulesManagerModule.RiskRulesManager || globalScope.RiskRulesManager;
-const serviceRestartModules = appModules.serviceRestart || {};
+globalScope.appModules = globalScope.appModules || {};
 
-const getConfigCenterModules = () => {
-    const modules = globalScope.appModules?.configCenter;
-    return modules && typeof modules === 'object' ? modules : null;
+function resolveModule(path, exportName, globalFallback) {
+    const segments = Array.isArray(path)
+        ? path
+        : String(path || '')
+            .split('.')
+            .map((segment) => segment.trim())
+            .filter(Boolean);
+
+    let current = globalScope?.appModules;
+    for (const segment of segments) {
+        if (!current || typeof current !== 'object') {
+            current = null;
+            break;
+        }
+        current = current[segment];
+    }
+
+    let resolved = current;
+    if (resolved && exportName) {
+        resolved = resolved[exportName];
+    }
+
+    if (resolved === undefined || resolved === null) {
+        return globalFallback ?? null;
+    }
+
+    return resolved;
+}
+
+const requireMonitoringUtil = (fn, name) => {
+    if (typeof fn !== 'function') {
+        throw new Error(`monitoring.utils.${name} is required`);
+    }
+    return fn;
 };
 
-const {
-    INTERVAL_MINUTES_MAP = {},
-    MONITOR_SOURCE_TZ = 'America/New_York',
-    MONITOR_FALLBACK_TZ = 'Asia/Shanghai',
-    MONITOR_CHART_MAX_MINUTES = 30,
-    MONITOR_CHART_MAX_POINTS = 3000,
-    MONITOR_DURATION_MINUTES_MAP = {},
-    MONITOR_DURATION_OPTIONS = {},
-    TREND_LEVEL_STYLES = {}
-} = MonitoringConstants;
+let normalizeIntervalKey;
+let normalizeDurationKey;
+let getMonitorDurationMinutes;
+let getMonitorDurationOptions;
+let refreshMonitorDurationSelect;
+let getTrendLevelStyle;
+let getTrendSuggestionLabel;
+
+let TrendSignalLabelPlugin;
+let slugifyStrategyName;
+let strategyFilenameToDisplayName;
+let strategyDisplayNameToFilename;
+let sharedFormatNumber;
+let sharedEscapeHtml;
+let sharedFormatDuration;
+let sharedIsSameDay;
+let sharedFormatOrderIdDisplay;
+
+function ensureCoreDependencies() {
+    const monitoringUtilsModule = resolveModule(['monitoring', 'utils']) || {};
+    normalizeIntervalKey = requireMonitoringUtil(monitoringUtilsModule.normalizeIntervalKey, 'normalizeIntervalKey');
+    normalizeDurationKey = requireMonitoringUtil(monitoringUtilsModule.normalizeDurationKey, 'normalizeDurationKey');
+    getMonitorDurationMinutes = requireMonitoringUtil(monitoringUtilsModule.getMonitorDurationMinutes, 'getMonitorDurationMinutes');
+    getMonitorDurationOptions = requireMonitoringUtil(monitoringUtilsModule.getMonitorDurationOptions, 'getMonitorDurationOptions');
+    refreshMonitorDurationSelect = requireMonitoringUtil(monitoringUtilsModule.refreshMonitorDurationSelect, 'refreshMonitorDurationSelect');
+    getTrendLevelStyle = requireMonitoringUtil(monitoringUtilsModule.getTrendLevelStyle, 'getTrendLevelStyle');
+    getTrendSuggestionLabel = requireMonitoringUtil(monitoringUtilsModule.getTrendSuggestionLabel, 'getTrendSuggestionLabel');
+
+    const sharedUtilsModule = resolveModule(['utils']) || {};
+    TrendSignalLabelPlugin = sharedUtilsModule.TrendSignalLabelPlugin;
+    slugifyStrategyName = sharedUtilsModule.slugifyStrategyName;
+    strategyFilenameToDisplayName = sharedUtilsModule.strategyFilenameToDisplayName;
+    strategyDisplayNameToFilename = sharedUtilsModule.strategyDisplayNameToFilename;
+    sharedFormatNumber = sharedUtilsModule.formatNumber;
+    sharedEscapeHtml = sharedUtilsModule.escapeHtml;
+    sharedFormatDuration = sharedUtilsModule.formatDuration;
+    sharedIsSameDay = sharedUtilsModule.isSameDay;
+    sharedFormatOrderIdDisplay = sharedUtilsModule.formatOrderIdDisplay;
+
+    if (!TrendSignalLabelPlugin || typeof TrendSignalLabelPlugin.afterDatasetsDraw !== 'function') {
+        throw new Error('utils.TrendSignalLabelPlugin is required');
+    }
+    if (typeof slugifyStrategyName !== 'function') {
+        throw new Error('utils.slugifyStrategyName is required');
+    }
+    if (typeof strategyFilenameToDisplayName !== 'function') {
+        throw new Error('utils.strategyFilenameToDisplayName is required');
+    }
+    if (typeof strategyDisplayNameToFilename !== 'function') {
+        throw new Error('utils.strategyDisplayNameToFilename is required');
+    }
+    if (typeof sharedFormatNumber !== 'function') {
+        throw new Error('utils.formatNumber is required');
+    }
+    if (typeof sharedEscapeHtml !== 'function') {
+        throw new Error('utils.escapeHtml is required');
+    }
+    if (typeof sharedFormatDuration !== 'function') {
+        throw new Error('utils.formatDuration is required');
+    }
+    if (typeof sharedIsSameDay !== 'function') {
+        throw new Error('utils.isSameDay is required');
+    }
+    if (typeof sharedFormatOrderIdDisplay !== 'function') {
+        throw new Error('utils.formatOrderIdDisplay is required');
+    }
+
+    const MonitoringManagerClass = resolveModule(['monitoring', 'manager'], 'MonitoringManager', globalScope.MonitoringManager);
+    if (typeof MonitoringManagerClass !== 'function') {
+        throw new Error('MonitoringManager module is required');
+    }
+
+    const RiskRulesManagerClass = resolveModule(['risk', 'manager'], 'RiskRulesManager', globalScope.RiskRulesManager);
+    if (typeof RiskRulesManagerClass !== 'function') {
+        throw new Error('RiskRulesManager module is required');
+    }
+
+    return {
+        MonitoringManagerClass,
+        MonitoringDashboardClass: resolveModule(['monitoring', 'dashboard'], 'MonitoringDashboard', globalScope.MonitoringDashboard),
+        RiskRulesManagerClass,
+        StrategiesManagerClass: resolveModule(['strategies', 'manager'], 'StrategiesManager', globalScope.StrategiesManager),
+        StrategyDetailsControllerClass: resolveModule(['strategies', 'details'], 'StrategyDetailsController', globalScope.StrategyDetailsController),
+        OrdersManagerClass: resolveModule(['orders', 'manager'], 'OrderManager', globalScope.OrderManager),
+        NotificationsManagerClass: resolveModule(['notifications', 'manager'], 'NotificationsManager', globalScope.NotificationsManager),
+        UIControllerClass: resolveModule(['ui', 'controller'], 'UIController', globalScope.UIController),
+    };
+}
+
+const getConfigCenterModules = () => {
+    const modules = resolveModule(['configCenter']);
+    return modules && typeof modules === 'object' ? modules : null;
+};
 
 const fallbackNormalizeRuleStatus = (status) => {
     if (!status || typeof status !== 'object') {
@@ -68,73 +156,19 @@ const fallbackNormalizeRuleStatus = (status) => {
     return { passed, message };
 };
 
-const requireMonitoringUtil = (fn, name) => {
-    if (typeof fn !== 'function') {
-        throw new Error(`monitoring.utils.${name} is required`);
-    }
-    return fn;
-};
-
-const {
-    normalizeIntervalKey,
-    normalizeDurationKey,
-    getMonitorDurationMinutes,
-    getMonitorDurationOptions,
-    refreshMonitorDurationSelect,
-    getTrendLevelStyle,
-    getTrendSuggestionLabel
-} = MonitoringUtils;
-
-requireMonitoringUtil(normalizeIntervalKey, 'normalizeIntervalKey');
-requireMonitoringUtil(normalizeDurationKey, 'normalizeDurationKey');
-requireMonitoringUtil(getMonitorDurationMinutes, 'getMonitorDurationMinutes');
-requireMonitoringUtil(getMonitorDurationOptions, 'getMonitorDurationOptions');
-requireMonitoringUtil(refreshMonitorDurationSelect, 'refreshMonitorDurationSelect');
-requireMonitoringUtil(getTrendLevelStyle, 'getTrendLevelStyle');
-requireMonitoringUtil(getTrendSuggestionLabel, 'getTrendSuggestionLabel');
-
-const {
-    TrendSignalLabelPlugin,
-    slugifyStrategyName,
-    strategyFilenameToDisplayName,
-    strategyDisplayNameToFilename,
-    formatNumber: sharedFormatNumber,
-    escapeHtml: sharedEscapeHtml,
-    formatDuration: sharedFormatDuration,
-    isSameDay: sharedIsSameDay,
-    formatOrderIdDisplay: sharedFormatOrderIdDisplay,
-} = SharedUtils;
-
-if (!TrendSignalLabelPlugin || typeof TrendSignalLabelPlugin.afterDatasetsDraw !== 'function') {
-    throw new Error('utils.TrendSignalLabelPlugin is required');
-}
-if (typeof slugifyStrategyName !== 'function') {
-    throw new Error('utils.slugifyStrategyName is required');
-}
-if (typeof strategyFilenameToDisplayName !== 'function') {
-    throw new Error('utils.strategyFilenameToDisplayName is required');
-}
-if (typeof strategyDisplayNameToFilename !== 'function') {
-    throw new Error('utils.strategyDisplayNameToFilename is required');
-}
-if (typeof sharedFormatNumber !== 'function') {
-    throw new Error('utils.formatNumber is required');
-}
-if (typeof sharedEscapeHtml !== 'function') {
-    throw new Error('utils.escapeHtml is required');
-}
-if (typeof sharedFormatDuration !== 'function') {
-    throw new Error('utils.formatDuration is required');
-}
-if (typeof sharedIsSameDay !== 'function') {
-    throw new Error('utils.isSameDay is required');
-}
-if (typeof sharedFormatOrderIdDisplay !== 'function') {
-    throw new Error('utils.formatOrderIdDisplay is required');
-}
-
 class TradingApp {
     constructor() {
+        const {
+            MonitoringManagerClass,
+            MonitoringDashboardClass,
+            RiskRulesManagerClass,
+            StrategiesManagerClass,
+            StrategyDetailsControllerClass,
+            OrdersManagerClass,
+            NotificationsManagerClass,
+            UIControllerClass,
+        } = ensureCoreDependencies();
+
         this.ws = null;
         this.connected = false;
         this.charts = {}; // Store chart instances
@@ -935,10 +969,11 @@ class TradingApp {
         // DOM 已就绪时同步访客模式下的界面元素状态，避免初始渲染遗漏
         this.updateReadOnlyMode(this.isReadOnly, this.authRole, { persist: false });
 
+        const serviceRestartModules = resolveModule(['serviceRestart']);
         if (!this.serviceRestartController && serviceRestartModules?.createListController) {
             const listContainer = document.getElementById('serviceStatusList');
             if (listContainer) {
-                const statusModule = window.appModules?.serviceStatus;
+                const statusModule = resolveModule(['serviceStatus']);
                 const prepareList = statusModule?.ensureList
                     ? statusModule.ensureList({
                         document,
@@ -5318,11 +5353,21 @@ class TradingApp {
     }
 }
 
-// Initialize the app
-const app = new TradingApp();
-// expose for inline onclick handlers
-window.app = app;
-// Attach NotificationsManager shim if available
-if (window.__attachNotifications) {
-    window.__attachNotifications(app);
+// Initialize the app after all modules are available
+const bootstrapTradingApp = () => {
+    const app = new TradingApp();
+    globalScope.app = app;
+    if (typeof globalScope.__attachNotifications === 'function') {
+        try {
+            globalScope.__attachNotifications(app);
+        } catch (error) {
+            console.warn('Failed to attach notifications manager shim:', error);
+        }
+    }
+};
+
+if (typeof document !== 'undefined' && document.readyState === 'loading') {
+    globalScope.addEventListener?.('DOMContentLoaded', bootstrapTradingApp, { once: true });
+} else {
+    bootstrapTradingApp();
 }
