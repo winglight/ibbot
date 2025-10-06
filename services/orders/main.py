@@ -526,6 +526,19 @@ class FillMetricsUpdate(BaseModel):
         return self
 
 
+# -- data classes -----------------------------------------------------------------
+
+
+@dataclass
+class OrderPersistenceResult:
+    inserted_id: int | None = None
+    not_found: bool = False
+
+
+def _is_order_not_found_error(exc: BaseException) -> bool:
+    return isinstance(exc, OrderNotFoundError) or exc.__class__.__name__ == "OrderNotFoundError"
+
+
 @dataclass
 class OrdersRuntime:
     redis_factory: Callable[[], Awaitable[Any]] = get_redis_client
@@ -1163,17 +1176,6 @@ class OrdersRuntime:
     def _record_repository_failure(self, message: str) -> None:
         self._repository_failure_count += 1
         self._repository_last_error = message
-
-
-@dataclass
-class OrderPersistenceResult:
-    inserted_id: int | None = None
-    not_found: bool = False
-
-
-def _is_order_not_found_error(exc: BaseException) -> bool:
-    return isinstance(exc, OrderNotFoundError) or exc.__class__.__name__ == "OrderNotFoundError"
-
 
     async def _persist_order_snapshot(
         self,
