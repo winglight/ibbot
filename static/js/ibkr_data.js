@@ -1,17 +1,23 @@
-/**
- * IBKR Data Manager
- * 负责处理IBKR相关的数据获取和UI更新
- */
-class IBKRDataManager {
-    constructor(app) {
-        this.app = app;
-        this.positions = [];
-        this.priceCache = new Map();
-        this.priceRequestPromises = new Map();
-        this.priceCacheTimeout = 30000; // 30秒缓存
-        this.dailySummaryLoading = false;
-        this.dailySummaryChart = null;
-        this.lastAccountInfo = null;
+(function(global) {
+    const root = global || {};
+    const appModules = root.appModules = root.appModules || {};
+    const ibkrNamespace = appModules.ibkr = appModules.ibkr || {};
+    const dataNamespace = ibkrNamespace.data = ibkrNamespace.data || {};
+
+    /**
+     * IBKR Data Manager
+     * 负责处理IBKR相关的数据获取和UI更新
+     */
+    class IBKRDataManager {
+        constructor(app) {
+            this.app = app;
+            this.positions = [];
+            this.priceCache = new Map();
+            this.priceRequestPromises = new Map();
+            this.priceCacheTimeout = 30000; // 30秒缓存
+            this.dailySummaryLoading = false;
+            this.dailySummaryChart = null;
+            this.lastAccountInfo = null;
     }
 
     /**
@@ -588,7 +594,9 @@ class IBKRDataManager {
     getAllPositions() {
         return this.positions || [];
     }
-}
+    }
 
-// 导出到全局
-window.IBKRDataManager = IBKRDataManager;
+    // 导出到全局
+    dataNamespace.IBKRDataManager = IBKRDataManager;
+    root.IBKRDataManager = IBKRDataManager;
+})(typeof window !== 'undefined' ? window : globalThis);
