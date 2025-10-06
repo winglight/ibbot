@@ -173,7 +173,7 @@ def test_seeded_strategy_available_on_start(
     assert any(entry.get("name") == "BuyTheDipStrategy" for entry in payload)
 
 
-def test_strategy_files_listing_requires_metadata(
+def test_strategy_files_listing_includes_filesystem_entries(
     redis_client: InMemoryRedis, strategy_repository: StrategyRepository, tmp_path: Path
 ) -> None:
     strategy_dir = tmp_path / "strategies"
@@ -191,7 +191,7 @@ def test_strategy_files_listing_requires_metadata(
         assert files_response.status_code == 200
         files_payload = files_response.json()
         assert files_payload["success"] is True
-        assert files_payload["files"] == []
+        assert files_payload["files"] == ["filesystem_alpha.py"]
 
         asyncio.run(
             strategy_repository.upsert_strategy(
@@ -815,10 +815,10 @@ def test_strategy_files_endpoint_returns_metadata_files(
         (strategy_root / "gamma.py").write_text("# gamma\n")
         response = client.get("/strategy/files")
         files = response.json()["files"]
-        assert "gamma.py" not in files
+        assert sorted(files) == sorted(["alpha.py", "gamma.py", "legacy.py", "nested/beta.py"])
 
 
-def test_strategy_filesystem_changes_do_not_autoregister(
+def test_strategy_filesystem_changes_are_reflected(
     redis_client: InMemoryRedis, tmp_path: Path
 ) -> None:
     strategy_dir = tmp_path / "strategies"
@@ -841,7 +841,7 @@ def test_strategy_filesystem_changes_do_not_autoregister(
         files_response = client.get("/strategy/files")
         assert files_response.status_code == 200
         files_payload = files_response.json()
-        assert files_payload["files"] == []
+        assert files_payload["files"] == ["omega.py"]
 
         strategies_response = client.get("/strategy")
         assert strategies_response.status_code == 200

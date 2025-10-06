@@ -1397,7 +1397,7 @@ class TradingApp {
         const strategySettingsBtn = document.getElementById('strategySettingsBtn');
         if (strategySettingsBtn) {
             strategySettingsBtn.addEventListener('click', async () => {
-                await this.strategiesManager.loadStrategySettings();
+                await this.loadStrategySettings();
                 const modal = new bootstrap.Modal(document.getElementById('strategySettingsModal'));
                 modal.show();
             });
@@ -1405,7 +1405,7 @@ class TradingApp {
         const saveStrategySettingsBtn = document.getElementById('saveStrategySettingsBtn');
         if (saveStrategySettingsBtn) {
             saveStrategySettingsBtn.addEventListener('click', async () => {
-                await this.strategiesManager.saveStrategySettings();
+                await this.saveStrategySettings();
             });
         }
         const generateStrategyTokenBtn = document.getElementById('generateStrategyTokenBtn');
