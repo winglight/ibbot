@@ -52,7 +52,7 @@ def strategy_repository(monkeypatch: pytest.MonkeyPatch) -> StrategyRepository:
         CREATE TABLE strategies (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL UNIQUE,
-            factory TEXT NULL,
+            strategy_type TEXT NULL,
             params TEXT NULL,
             metadata TEXT NULL,
             description TEXT NULL,
@@ -156,7 +156,7 @@ def test_seeded_strategy_available_on_start(
         strategy_repository.upsert_strategy(
             {
                 "name": "BuyTheDipStrategy",
-                "factory": "tests.services.strategy.sample:factory",
+                "strategy_type": "tests.services.strategy.sample:factory",
                 "metadata": {"file": "src/strategies/buy_the_dip_strategy.py"},
                 "description": "Sample",
             }
@@ -197,7 +197,7 @@ def test_strategy_files_listing_includes_filesystem_entries(
             strategy_repository.upsert_strategy(
                 {
                     "name": "FilesystemAlpha",
-                    "factory": "tests.services.strategy.sample:factory",
+                    "strategy_type": "tests.services.strategy.sample:factory",
                     "metadata": {"file": "filesystem_alpha.py"},
                 }
             )
@@ -222,7 +222,7 @@ def test_strategy_crud_lifecycle(
 
     payload = {
         "name": "demo",
-        "factory": "tests.services.strategy.sample:factory",
+        "strategy_type": "tests.services.strategy.sample:factory",
         "params": {"symbol": "ES"},
         "description": "Demo strategy",
         "metadata": {"owner": "qa"},
@@ -250,11 +250,11 @@ def test_strategy_crud_lifecycle(
         list_response = client.get("/strategy")
         assert list_response.status_code == 200
         listing = {entry["name"]: entry for entry in list_response.json()}
-        assert listing["demo"]["factory"] == stored["factory"]
+        assert listing["demo"]["strategy_type"] == stored["strategy_type"]
 
         response = client.get("/strategy/demo")
         assert response.status_code == 200
-        assert response.json()["factory"] == payload["factory"]
+        assert response.json()["strategy_type"] == payload["strategy_type"]
 
         updated_payload = {**payload, "params": {"symbol": "NQ", "size": 2}}
         response = client.put("/strategy", json=updated_payload)
@@ -281,7 +281,7 @@ def test_internal_info_endpoint_refreshes(redis_client: InMemoryRedis) -> None:
     client = _build_client(redis_client)
     payload = {
         "name": "inspector",
-        "factory": "tests.services.strategy.sample:factory",
+        "strategy_type": "tests.services.strategy.sample:factory",
         "params": {"symbol": "ES", "size": 2},
         "description": "Inspector",
     }
@@ -321,7 +321,7 @@ def test_internal_parameter_update_persists_value(redis_client: InMemoryRedis) -
     client = _build_client(redis_client)
     payload = {
         "name": "configurable",
-        "factory": "tests.services.strategy.sample:factory",
+        "strategy_type": "tests.services.strategy.sample:factory",
         "params": {"symbol": "CL", "size": 1},
     }
 
@@ -355,7 +355,7 @@ def test_rest_style_strategy_routes(redis_client: InMemoryRedis) -> None:
 
     payload = {
         "name": "rest",
-        "factory": "tests.services.strategy.sample:factory",
+        "strategy_type": "tests.services.strategy.sample:factory",
         "params": {"symbol": "YM"},
         "description": "REST alias",
     }
@@ -391,7 +391,7 @@ def test_strategy_run_enqueues_tasks(redis_client: InMemoryRedis) -> None:
 
     payload = {
         "name": "momentum",
-        "factory": "tests.services.strategy.sample:factory",
+        "strategy_type": "tests.services.strategy.sample:factory",
         "params": {"window": 5},
     }
 
@@ -431,7 +431,7 @@ def test_get_strategy_performance_success(
 
     payload = {
         "name": "alpha",
-        "factory": "tests.services.strategy.sample:factory",
+        "strategy_type": "tests.services.strategy.sample:factory",
         "params": {"symbol": "ES"},
     }
 
@@ -504,7 +504,7 @@ def test_get_strategy_performance_invalid_range(
 
     payload = {
         "name": "beta",
-        "factory": "tests.services.strategy.sample:factory",
+        "strategy_type": "tests.services.strategy.sample:factory",
         "params": {"symbol": "NQ"},
     }
 
@@ -520,7 +520,7 @@ def test_strategy_daily_pnl_endpoint(redis_client: InMemoryRedis, monkeypatch: p
     client = _build_client(redis_client)
     payload = {
         "name": "pnl-demo",
-        "factory": "tests.services.strategy.sample:factory",
+        "strategy_type": "tests.services.strategy.sample:factory",
         "params": {"symbol": "GC"},
     }
 
@@ -600,7 +600,7 @@ def test_strategy_toggle_aliases(
 
     payload = {
         "name": "switch",
-        "factory": "tests.services.strategy.sample:factory",
+        "strategy_type": "tests.services.strategy.sample:factory",
         "params": {"window": 5},
         "metadata": {"file": "switch.py"},
         "enabled": True,
@@ -636,7 +636,7 @@ def test_strategy_risk_settings_round_trip(redis_client: InMemoryRedis) -> None:
     client = _build_client(redis_client)
     payload = {
         "name": "risk-demo",
-        "factory": "tests.services.strategy.sample:factory",
+        "strategy_type": "tests.services.strategy.sample:factory",
         "params": {"symbol": "ES"},
     }
 
@@ -673,7 +673,7 @@ def test_strategy_status_and_data_push_updates_state(redis_client: InMemoryRedis
     client = _build_client(redis_client)
     payload = {
         "name": "status-demo",
-        "factory": "tests.services.strategy.sample:factory",
+        "strategy_type": "tests.services.strategy.sample:factory",
         "params": {"symbol": "NQ"},
     }
 
@@ -713,7 +713,7 @@ def test_strategy_reset_aliases(
 
     payload = {
         "name": "resetme",
-        "factory": "tests.services.strategy.sample:factory",
+        "strategy_type": "tests.services.strategy.sample:factory",
         "params": {"symbol": "ES", "size": 3},
         "metadata": {"file": "resetme.py", "owner": "qa"},
         "enabled": False,
@@ -749,7 +749,7 @@ def test_strategy_rename_endpoint_rewrites_metadata(
     client = _build_client(redis_client, strategy_repository)
     payload = {
         "name": "rename-me",
-        "factory": "tests.services.strategy.sample:factory",
+        "strategy_type": "tests.services.strategy.sample:factory",
         "params": {"symbol": "YM"},
     }
 
@@ -795,7 +795,7 @@ def test_strategy_files_endpoint_returns_metadata_files(
 
     payload = {
         "name": "manual",
-        "factory": "tests.services.strategy.sample:factory",
+        "strategy_type": "tests.services.strategy.sample:factory",
         "metadata": {
             "files": ["legacy.py", "nested/beta.py", "legacy.py"],
             "scripts": {"primary": "alpha.py"},
@@ -908,7 +908,7 @@ def test_strategy_executions_endpoint_returns_recent_fills(
 
     payload = {
         "name": strategy_name,
-        "factory": "tests.services.strategy.sample:factory",
+        "strategy_type": "tests.services.strategy.sample:factory",
         "params": {"symbol": "ES"},
     }
 
@@ -1013,7 +1013,7 @@ def test_clear_strategy_executions_endpoint_purges_cache(
 
     payload = {
         "name": strategy_name,
-        "factory": "tests.services.strategy.sample:factory",
+        "strategy_type": "tests.services.strategy.sample:factory",
         "params": {"symbol": "CL"},
     }
 

@@ -86,7 +86,7 @@ async def _run_adapter_test(redis_client: InMemoryRedis) -> None:
         redis_client,
         strategies={
             "demo": {
-                "factory": demo_strategy_factory,
+                "strategy_type": demo_strategy_factory,
                 "params": {"quantity": 2},
             }
         },

@@ -122,7 +122,7 @@ def _normalise_strategies(definitions: Mapping[str, Any]) -> dict[str, StrategyD
         params: Mapping[str, Any] = {}
         factory_spec: Any = spec
         if isinstance(spec, Mapping):
-            factory_spec = spec.get("factory") or spec.get("callable")
+            factory_spec = spec.get("strategy_type") or spec.get("callable")
             params = spec.get("params") or spec.get("config") or {}
         factory = _resolve_factory(factory_spec)
         resolved[name] = StrategyDefinition(name=name, factory=factory, config=dict(params))

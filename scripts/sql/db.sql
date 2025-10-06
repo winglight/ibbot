@@ -77,8 +77,8 @@ CREATE TABLE IF NOT EXISTS `risk_rules` (
 
 -- Migration path for deployments upgrading from Redis-backed strategies:
 --   ALTER TABLE `strategies`
---       ADD COLUMN `factory` VARCHAR(255) NULL AFTER `name`,
---       ADD COLUMN `params` JSON NULL AFTER `factory`,
+--       ADD COLUMN `strategy_type` VARCHAR(255) NULL AFTER `name`,
+--       ADD COLUMN `params` JSON NULL AFTER `strategy_type`,
 --       ADD COLUMN `metadata` JSON NULL AFTER `params`,
 --       ADD COLUMN `enabled` TINYINT(1) NOT NULL DEFAULT 1 AFTER `metadata`,
 --       ADD COLUMN `enabled_at` DATETIME NULL AFTER `enabled`,
@@ -91,7 +91,7 @@ CREATE TABLE IF NOT EXISTS `risk_rules` (
 CREATE TABLE IF NOT EXISTS `strategies` (
     `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
     `name` VARCHAR(191) NOT NULL,
-    `factory` VARCHAR(255) NULL,
+    `strategy_type` VARCHAR(255) NULL,
     `params` JSON NULL,
     `metadata` JSON NULL,
     `description` TEXT NULL,

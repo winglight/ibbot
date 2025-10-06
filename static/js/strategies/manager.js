@@ -114,10 +114,10 @@
             if (hasFileReference) {
                 return 'internal';
             }
-            if (typeof strategy.factory === 'string' && strategy.factory.trim()) {
+            if (typeof strategy.strategy_type === 'string' && strategy.strategy_type.trim()) {
                 return 'internal';
             }
-            if (typeof metadata.factory === 'string' && metadata.factory.trim()) {
+            if (typeof metadata.strategy_type === 'string' && metadata.strategy_type.trim()) {
                 return 'internal';
             }
             if (strategy.api_endpoint || metadata.api_endpoint) {

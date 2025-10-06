@@ -50,14 +50,14 @@ async def _load_repository_strategies(
     for record in records:
         if not record.enabled:
             continue
-        factory = record.factory
-        if not factory:
+        strategy_type = record.strategy_type
+        if not strategy_type:
             logger.warning(
-                "Strategy %s skipped: repository entry missing factory", record.name
+                "Strategy %s skipped: repository entry missing strategy_type", record.name
             )
             continue
         strategies[record.name] = {
-            "factory": factory,
+            "strategy_type": strategy_type,
             "params": dict(record.params),
         }
     return strategies

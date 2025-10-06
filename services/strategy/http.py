@@ -73,7 +73,7 @@ class StrategyDocument(BaseModel):
     """Representation of a stored strategy definition."""
 
     name: str
-    factory: str | None = None
+    strategy_type: str | None = None
     params: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
     description: str | None = None
@@ -88,12 +88,11 @@ class StrategyUpsertRequest(BaseModel):
     """Request payload for creating or updating a strategy."""
 
     name: str
-    factory: str | None = None
+    strategy_type: str | None = None
     params: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
     description: str | None = None
     enabled: bool = True
-    strategy_type: str | None = None  # For backward compatibility with frontend
     
     # Additional fields from frontend
     use_template: bool | None = None
@@ -340,7 +339,7 @@ class StrategyRuntime:
                 "params": dict(document.params),
                 "metadata": dict(document.metadata),
                 "description": document.description,
-                "factory": document.factory,
+                "strategy_type": document.strategy_type,
                 "enabled": document.enabled,
             }
             stale = True
@@ -502,18 +501,7 @@ class StrategyRuntime:
         self._health_signal.set()
         return command
     async def upsert_strategy(self, payload: StrategyUpsertRequest) -> tuple[StrategyDocument, bool]:
-        # Convert payload to dict and handle strategy_type field
         payload_dict = payload.model_dump()
-        
-        # Handle backward compatibility: convert strategy_type to factory if needed
-        strategy_type = payload_dict.pop("strategy_type", None)
-        if strategy_type and not payload_dict.get("factory"):
-            # Set factory based on strategy_type for backward compatibility
-            if strategy_type == "internal":
-                payload_dict["factory"] = "internal"
-            elif strategy_type == "external":
-                payload_dict["factory"] = "external"
-            # For other strategy_type values, leave factory as None
         
         # Extract frontend-specific fields and move them to params/metadata
         frontend_fields = [
@@ -523,10 +511,8 @@ class StrategyRuntime:
         ]
         
         # Initialize params and metadata if not present
-        if "params" not in payload_dict:
-            payload_dict["params"] = {}
-        if "metadata" not in payload_dict:
-            payload_dict["metadata"] = {}
+        payload_dict.setdefault("params", {})
+        payload_dict.setdefault("metadata", {})
         
         # Move frontend fields to params (for strategy configuration)
         for field in frontend_fields:
@@ -956,9 +942,9 @@ class StrategyRuntime:
         *,
         overrides: Mapping[str, Any] | None = None,
     ) -> Any:
-        if not document.factory:
-            raise ValueError("strategy factory is not defined")
-        factory = self._resolve_factory(document.factory)
+        if not document.strategy_type:
+            raise ValueError("strategy type is not defined")
+        factory = self._resolve_factory(document.strategy_type)
         config = dict(document.params)
         if overrides:
             for key, value in overrides.items():
@@ -1006,7 +992,7 @@ class StrategyRuntime:
         if overrides:
             info.setdefault("runtime_parameters", {str(k): v for k, v in overrides.items()})
         info.setdefault("name", document.name)
-        info.setdefault("factory", document.factory)
+        info.setdefault("strategy_type", document.strategy_type)
         metadata = dict(document.metadata)
         existing_metadata = info.get("metadata") if isinstance(info.get("metadata"), Mapping) else None
         if existing_metadata:

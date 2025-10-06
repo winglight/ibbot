@@ -78,7 +78,7 @@ async def _run_flow_test(redis_client: InMemoryRedis) -> None:
         redis_client,
         strategies={
             "flow": {
-                "factory": flow_strategy_factory,
+                "strategy_type": flow_strategy_factory,
                 "params": {"size": 2},
             }
         },
