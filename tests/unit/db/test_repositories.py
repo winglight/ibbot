@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from contextlib import contextmanager
+from datetime import datetime, timezone, timedelta
 from typing import Any
 
 import pytest
@@ -366,4 +367,97 @@ def test_find_existing_helpers_match_swapped_identifiers() -> None:
     assert ("client_order_id", "CLIENT-123") in cursor_mysql.queries
     assert ("client_order_id", "ORDER-456") in cursor_mysql.queries
     assert ("order_id", "CLIENT-123") in cursor_mysql.queries
+
+
+def test_coerce_timestamp_normalises_timezone() -> None:
+    aware = datetime(2024, 1, 15, 12, 30, 45, tzinfo=timezone(timedelta(hours=2)))
+    result = _coerce_timestamp(aware)
+
+    assert isinstance(result, datetime)
+    assert result.tzinfo is None
+    assert result == aware.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def test_coerce_timestamp_accepts_iso_string() -> None:
+    result = _coerce_timestamp("2024-02-01T08:15:30+05:30")
+
+    assert isinstance(result, datetime)
+    assert result.tzinfo is None
+    expected = datetime(2024, 2, 1, 2, 45, 30)
+    assert result == expected
+
+
+@pytest.mark.asyncio
+async def test_risk_rules_repository_uses_naive_timestamp_for_mariadb(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = RiskRulesRepository()
+
+    async def immediate(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr("src.db.repositories.risk.run_in_thread", immediate)
+
+    class FakeCursor:
+        def execute(self, _sql, _params=None) -> None:
+            return None
+
+        def fetchall(self) -> list[tuple[str, ...]]:
+            return []
+
+        def close(self) -> None:
+            return None
+
+    class FakeConnection:
+        def cursor(self) -> FakeCursor:
+            return FakeCursor()
+
+        def commit(self) -> None:
+            return None
+
+        def rollback(self) -> None:
+            return None
+
+    fake_connection = FakeConnection()
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def fake_use_connection():
+        yield fake_connection
+
+    monkeypatch.setattr("src.db.repositories.risk.use_connection", fake_use_connection)
+    monkeypatch.setattr("src.db.repositories.risk.is_sqlite", lambda _conn: False)
+
+    captured_rows: list[dict[str, Any]] = []
+
+    def fake_executemany(_connection, _sql, params_seq):
+        captured_rows.extend(params_seq)
+
+    monkeypatch.setattr("src.db.repositories.risk.executemany_write", fake_executemany)
+
+    timestamp = datetime(2024, 3, 20, 14, 0, tzinfo=timezone(timedelta(hours=-4)))
+
+    await repo.replace_rules(
+        {
+            "AAPL": {
+                "symbol": "AAPL",
+                "stop_loss_price": 100.0,
+                "take_profit_price": 150.0,
+                "updated_at": timestamp,
+            }
+        }
+    )
+
+    assert captured_rows, "executemany_write should be called with prepared rows"
+    stored_timestamp = captured_rows[0]["timestamp"]
+
+    assert isinstance(stored_timestamp, datetime)
+    assert stored_timestamp.tzinfo is None
+
+    expected_timestamp = timestamp.astimezone(timezone.utc).replace(tzinfo=None)
+    assert stored_timestamp == expected_timestamp
+
+    formatted = format_datetime_for_db(stored_timestamp)
+    assert formatted == expected_timestamp.strftime("%Y-%m-%d %H:%M:%S")
 
