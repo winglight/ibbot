@@ -2489,7 +2489,7 @@ class IBKRClient:
             # snapshot created by an earlier version of the code.
             info.setdefault('account_id', None)
             info['account_type'] = (
-                'Paper' if connection_manager.config.paper_trading else 'Live'
+                'Paper' if self.connection_manager.config.paper_trading else 'Live'
             )
             info.setdefault('total_cash', 0.0)
             info.setdefault('available_funds', 0.0)

@@ -17,9 +17,7 @@ SSH_OPTS=(-o BatchMode=yes \
           -o PreferredAuthentications=publickey \
           -o PasswordAuthentication=no \
           -o KbdInteractiveAuthentication=no)
-COMPOSE_FILE="docker/local.compose.yml"
-COMPOSE_PROFILES="ib-services,market,risk,notifications,strategy,monitoring"
-REMOTE_COMPOSE_BASE="cd ~/ibbot && COMPOSE_PROFILES=\"$COMPOSE_PROFILES\" docker compose -f $COMPOSE_FILE"
+
 
 if ssh "${SSH_OPTS[@]}" "$SSH_TARGET" 'echo "VPS连接正常"'; then
     echo "✅ VPS连接正常"
@@ -32,44 +30,7 @@ else
     exit 1
 fi
 
-# 检查VPS上的服务状态
-echo "🔍 检查VPS服务状态..."
-VPS_STATUS=""
-STATUS_EXIT=0
-if VPS_STATUS=$(ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "$REMOTE_COMPOSE_BASE ps --format 'table {{.Name}}\t{{.Status}}'" 2>&1); then
-    if echo "$VPS_STATUS" | grep -q "Up"; then
-        echo "✅ VPS服务正在运行"
-        echo "$VPS_STATUS"
-    else
-        echo "⚠️  未检测到正在运行的服务"
-        SHOULD_START=1
-    fi
-else
-    STATUS_EXIT=$?
-    echo "⚠️  获取服务状态失败 (exit $STATUS_EXIT)"
-    echo "$VPS_STATUS"
-    SHOULD_START=1
-fi
 
-if [ "${SHOULD_START:-0}" -eq 1 ]; then
-    echo "⚠️  VPS服务未运行，尝试启动..."
-    if ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "$REMOTE_COMPOSE_BASE up -d"; then
-        sleep 5
-        if VPS_STATUS=$(ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "$REMOTE_COMPOSE_BASE ps --format 'table {{.Name}}\t{{.Status}}'" 2>&1); then
-            echo "✅ 服务启动完成"
-            echo "$VPS_STATUS"
-        else
-            STATUS_EXIT=$?
-            echo "❌ 服务已尝试启动，但获取状态失败 (exit $STATUS_EXIT)"
-            echo "$VPS_STATUS"
-            exit 1
-        fi
-    else
-        STATUS_EXIT=$?
-        echo "❌ 服务启动失败 (exit $STATUS_EXIT)"
-        exit 1
-    fi
-fi
 
 # 设置Docker远程上下文
 echo "🐳 配置Docker远程上下文..."
