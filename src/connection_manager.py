@@ -1207,17 +1207,42 @@ class ConnectionManager:
         """连接到IBKR服务器"""
         # 检查当前连接是否使用相同配置
         if self.connected and self.ib and self.ib.isConnected():
-            # 如果配置发生变化，需要重新连接
-            current_host = getattr(self.ib, 'host', None)
-            current_port = getattr(self.ib, 'port', None)
-            if (current_host == self.config.host and
-                current_port == self.config.port):
+            # ``ib_insync.IB`` 在不同版本中对主机/端口信息的暴露方式并不一致。
+            # 某些版本只在 ``IB.client`` 上保存这些字段，直接访问 ``IB.host``
+            # 会得到 ``None``，从而被误判为配置已经变更并触发重复的重连流程。
+            current_host = getattr(self.ib, "host", None)
+            current_port = getattr(self.ib, "port", None)
+
+            client = getattr(self.ib, "client", None)
+            if client is not None:
+                if not current_host:
+                    current_host = getattr(client, "host", current_host)
+                if current_port in (None, 0):
+                    current_port = getattr(client, "port", current_port)
+
+            # 兜底使用当前配置，确保缺失字段不会导致误判
+            if current_host is None:
+                current_host = self.config.host
+
+            try:
+                current_port_int = int(current_port)
+            except (TypeError, ValueError):
+                current_port_int = self.config.port
+
+            if (
+                str(current_host).strip() == str(self.config.host).strip()
+                and current_port_int == int(self.config.port)
+            ):
                 connection_logger.info("Already connected to IBKR with same configuration")
                 self._record_connect_result(True)
                 return True
-            else:
-                connection_logger.info("Configuration changed, reconnecting...")
-                self.disconnect()
+
+            connection_logger.info(
+                "Configuration changed, reconnecting...",
+                current_host=current_host,
+                current_port=current_port_int,
+            )
+            self.disconnect()
 
         wait_logged = False
         limit_warning_logged = False
