@@ -91,6 +91,18 @@
   MariaDB `risk_rules` 表仅作备份，直接读取可能因延迟或缓存失效
   返回空值，导致止损/止盈误判。
 
+### 2.3 风险 trailing 规则缓存与广播
+
+- **Redis 缓存键**：
+  - `hash:risk:rules`：存放每个标的的实时风控规则，Trailing 更新会直接覆盖 `stop_loss`、`take_profit`、`atr_params` 等字段。
+  - `json:risk:rules`：Risk Runtime 写入的规则快照 JSON，字段包含 `rules`、`updated_at`、`count` 与 `source`，排查前端展示问题时可 `redis-cli GET json:risk:rules` 对照。
+  - `json:risk:config`：与上方规则快照同批写入，携带 `rules_count`、`updated_at`，用于确认配置是否和规则同步刷新。
+- **广播频道**：`pubsub:risk:rules:update`。Trailing 引擎每次写入缓存后会通过该频道推送 `{type:'risk_rules', rules:{...}}` 消息，前端订阅者据此刷新界面。若页面不更新，优先确认此频道是否持续产生消息。
+- **行情订阅来源**：`pubsub:ib:price:{symbol}`。Trailing 引擎为每个跟踪中的标的维护独立订阅，可通过 `redis-cli PUBSUB NUMSUB pubsub:ib:price:ES` 验证是否仍在监听。持仓快照取自 `account:positions`，若方向识别异常需同步检查该键的 JSON。
+- **节流逻辑**：价格移动必须超过止损/止盈偏移量的 20%（不足时使用最小跳动单位）且距离上次推送至少 `trail_min_interval` 秒；若规则未显式配置则回退到 ATR 参数里的 `update_throttle` 或默认 2 秒。排查“更新过于频繁/迟迟不动”时，请同时核对这两个阈值。
+
+运营人员在排查 trailing 规则时，可按照上述顺序（缓存 → 广播 → 行情订阅 → 节流阈值）逐项定位问题来源。
+
 ## 3. 常见故障排查
 
 ### 3.1 基础依赖不可用
