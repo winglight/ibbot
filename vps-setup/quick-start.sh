@@ -11,26 +11,34 @@ echo "======================================"
 
 # 检查SSH连接
 echo "📡 检查VPS连接..."
-if ssh -o BatchMode=yes -o ConnectTimeout=5 vps-ibbot 'echo "VPS连接正常"'; then
+SSH_TARGET="vps-ibbot"
+SSH_OPTS=(-o BatchMode=yes \
+          -o ConnectTimeout=5 \
+          -o PreferredAuthentications=publickey \
+          -o PasswordAuthentication=no \
+          -o KbdInteractiveAuthentication=no)
+
+if ssh "${SSH_OPTS[@]}" "$SSH_TARGET" 'echo "VPS连接正常"'; then
     echo "✅ VPS连接正常"
 else
     echo "❌ VPS连接失败，请检查:"
     echo "   1. SSH配置是否正确"
     echo "   2. VPS是否在线"
     echo "   3. 网络连接是否正常"
+    echo "   4. 是否已配置免密登陆 (如需密码/二次认证请先手动执行: ssh $SSH_TARGET)"
     exit 1
 fi
 
 # 检查VPS上的服务状态
 echo "🔍 检查VPS服务状态..."
-VPS_STATUS=$(ssh vps-ibbot 'cd ~/ibbot && docker compose -f docker/local.compose.yml ps --format "table {{.Name}}\t{{.Status}}"' 2>/dev/null || echo "服务未启动")
+VPS_STATUS=$(ssh "${SSH_OPTS[@]}" "$SSH_TARGET" 'cd ~/ibbot && docker compose -f docker/local.compose.yml ps --format "table {{.Name}}\t{{.Status}}"' 2>/dev/null || echo "服务未启动")
 
 if echo "$VPS_STATUS" | grep -q "Up"; then
     echo "✅ VPS服务正在运行"
     echo "$VPS_STATUS"
 else
     echo "⚠️  VPS服务未运行，尝试启动..."
-    ssh vps-ibbot 'cd ~/ibbot && docker compose -f docker/local.compose.yml up -d'
+    ssh "${SSH_OPTS[@]}" "$SSH_TARGET" 'cd ~/ibbot && docker compose -f docker/local.compose.yml up -d'
     sleep 5
     echo "✅ 服务启动完成"
 fi
