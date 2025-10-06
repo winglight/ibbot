@@ -4,7 +4,8 @@ from typing import Any
 
 import httpx
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, status
+from fastapi.testclient import TestClient
 from starlette.requests import Request
 
 from src.routes import api_docs
@@ -198,3 +199,70 @@ def test_cached_spec_updates_when_service_recovers(monkeypatch):
         assert "/beta/info" in cached_doc.get("paths", {})
 
     asyncio.run(_run())
+
+
+def test_list_documentation_services_returns_service_list():
+    """Test that /api/docs/services returns a list of available services."""
+    app = FastAPI()
+    app.include_router(api_docs.router)
+    client = TestClient(app)
+    
+    response = client.get("/api/docs/services")
+    
+    assert response.status_code == status.HTTP_200_OK
+    data = response.json()
+    
+    # Should return a list of service documentation entries
+    assert isinstance(data, list)
+    assert len(data) > 0
+    
+    # Each entry should have required fields
+    for service in data:
+        assert "name" in service
+        assert "title" in service
+        assert "spec_url" in service
+        assert isinstance(service["name"], str)
+        assert isinstance(service["title"], str)
+        assert isinstance(service["spec_url"], str)
+
+
+def test_list_documentation_services_includes_expected_services():
+    """Test that the service list includes expected service names."""
+    app = FastAPI()
+    app.include_router(api_docs.router)
+    client = TestClient(app)
+    
+    response = client.get("/api/docs/services")
+    
+    assert response.status_code == status.HTTP_200_OK
+    data = response.json()
+    
+    service_names = {service["name"] for service in data}
+    
+    # Check for expected services based on SERVICE_SPEC_TARGETS
+    expected_services = {
+        "account", "orders", "risk", "strategy", 
+        "market_data", "notification", "connection_control"
+    }
+    
+    assert expected_services.issubset(service_names)
+
+
+def test_list_documentation_services_response_format():
+    """Test the exact format of the documentation services response."""
+    app = FastAPI()
+    app.include_router(api_docs.router)
+    client = TestClient(app)
+    
+    response = client.get("/api/docs/services")
+    
+    assert response.status_code == status.HTTP_200_OK
+    assert response.headers["content-type"] == "application/json"
+    
+    data = response.json()
+    
+    # Verify structure of first service entry
+    if data:
+        first_service = data[0]
+        assert set(first_service.keys()) == {"name", "title", "spec_url"}
+        assert first_service["spec_url"].startswith("/")
