@@ -13,6 +13,7 @@ from src.ibbot.redis import get_redis_client
 
 _DOM_CONFIG_KEY_ENV = "DOM_CONFIG_REDIS_KEY"
 _DEFAULT_DOM_CONFIG_KEY = "json:dom:config"
+_DOM_CONFIG_TTL_SECONDS = int(os.getenv("DOM_CONFIG_TTL_SECONDS", "86400"))
 
 
 async def _read_json_async(key: str) -> Optional[Dict[str, Any]]:
@@ -49,7 +50,11 @@ async def _write_json_async(key: str, payload: Mapping[str, Any]) -> None:
 
     try:
         client = await get_redis_client()
-        await client.set(key, json.dumps(serialisable))
+        await client.set(
+            key,
+            json.dumps(serialisable),
+            ex=_DOM_CONFIG_TTL_SECONDS,
+        )
     except Exception as exc:  # pragma: no cover - defensive logging
         logger.warning("Failed to persist DOM payload to Redis", key=key, error=str(exc))
 

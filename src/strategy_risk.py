@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import Any, Mapping
 
 from loguru import logger
@@ -36,11 +37,15 @@ class StrategyRiskManager:
         redis_client: Any | None = None,
         settings_prefix: str = "json:strategy",
         rules_hash_key: str = "hash:risk:rules",
+        *,
+        settings_ttl_seconds: int | None = None,
     ) -> None:
         self._client = client or RiskServiceClient()
         self._redis = redis_client
         self._settings_prefix = settings_prefix.rstrip(":")
         self._rules_hash_key = rules_hash_key
+        default_ttl = int(os.getenv("STRATEGY_RISK_SETTINGS_TTL_SECONDS", "3600"))
+        self._settings_ttl_seconds = settings_ttl_seconds or default_ttl
 
     async def _call(self, action: str, **kwargs: Any) -> Any:
         try:
@@ -205,7 +210,11 @@ class StrategyRiskManager:
             return
         key = self._settings_key(strategy)
         try:
-            await self._redis.set(key, json.dumps(dict(payload), ensure_ascii=False))
+            await self._redis.set(
+                key,
+                json.dumps(dict(payload), ensure_ascii=False),
+                ex=self._settings_ttl_seconds,
+            )
         except Exception:  # pragma: no cover - defensive network guard
             logger.warning("Failed to persist strategy risk settings", strategy=strategy)
 
@@ -234,7 +243,7 @@ class StrategyRiskManager:
         if payload is None:
             return
         try:
-            await self._redis.set(target_key, payload)
+            await self._redis.set(target_key, payload, ex=self._settings_ttl_seconds)
             await self._redis.delete(source_key)
         except Exception:  # pragma: no cover - defensive guard
             logger.debug(

@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import json
 import importlib
+import os
 from collections.abc import AsyncIterator, Awaitable, Mapping
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -48,6 +49,7 @@ DEFAULT_HEALTH_INTERVAL = 15.0
 DEFAULT_EVENT_POLL_INTERVAL = 1.0
 DEFAULT_METADATA_PREFIX = "json:strategy"
 DEFAULT_SETTINGS_KEY = f"{DEFAULT_METADATA_PREFIX}:settings"
+STRATEGY_REDIS_TTL_SECONDS = int(os.getenv("STRATEGY_REDIS_TTL_SECONDS", "3600"))
 
 DEFAULT_SETTINGS: dict[str, Any] = {
     "api_endpoint": "/api/strategy",
@@ -185,7 +187,7 @@ async def persist_strategy_settings(redis_client: Any, settings: dict[str, Any])
     payload = json.dumps(settings, ensure_ascii=False)
     updated_at = _utc_now().isoformat()
     try:
-        await redis_client.set(DEFAULT_SETTINGS_KEY, payload)
+        await redis_client.set(DEFAULT_SETTINGS_KEY, payload, ex=STRATEGY_REDIS_TTL_SECONDS)
     except Exception:  # pragma: no cover - defensive guard
         logger = get_logger("ibbot.services.strategy.http")
         logger.warning("Failed to persist strategy settings", exc_info=True)
@@ -262,6 +264,7 @@ class StrategyRuntime:
         self.pending_tasks: int = 0
         self.last_event_at: str | None = None
         self._metadata_sync_lock = asyncio.Lock()
+        self._redis_ttl_seconds = STRATEGY_REDIS_TTL_SECONDS
 
     def _record_to_document(self, record: StrategyRecord) -> StrategyDocument:
         try:
@@ -840,7 +843,11 @@ class StrategyRuntime:
             "cached_at": _utc_now().isoformat(),
         }
         try:
-            await self._redis.set(key, json.dumps(payload, ensure_ascii=False))
+            await self._redis.set(
+                key,
+                json.dumps(payload, ensure_ascii=False),
+                ex=self._redis_ttl_seconds,
+            )
         except Exception:
             self._logger.debug("Failed to persist internal info for %s", name, exc_info=True)
 
@@ -858,7 +865,11 @@ class StrategyRuntime:
     async def _persist_parameters(self, name: str, parameters: Mapping[str, Any]) -> None:
         key = self._parameters_key(name)
         try:
-            await self._redis.set(key, json.dumps(dict(parameters), ensure_ascii=False))
+            await self._redis.set(
+                key,
+                json.dumps(dict(parameters), ensure_ascii=False),
+                ex=self._redis_ttl_seconds,
+            )
         except Exception:
             self._logger.debug("Failed to persist parameter overrides for %s", name, exc_info=True)
 
@@ -878,7 +889,11 @@ class StrategyRuntime:
         payload = dict(status)
         payload["updated_at"] = payload.get("updated_at") or _utc_now().isoformat()
         try:
-            await self._redis.set(key, json.dumps(payload, ensure_ascii=False))
+            await self._redis.set(
+                key,
+                json.dumps(payload, ensure_ascii=False),
+                ex=self._redis_ttl_seconds,
+            )
         except Exception:
             self._logger.debug("Failed to persist status for %s", name, exc_info=True)
 
@@ -915,7 +930,11 @@ class StrategyRuntime:
                 self._logger.debug("Failed to persist risk settings via manager for %s", name, exc_info=True)
         key = self._risk_settings_key(name)
         try:
-            await self._redis.set(key, json.dumps(payload, ensure_ascii=False))
+            await self._redis.set(
+                key,
+                json.dumps(payload, ensure_ascii=False),
+                ex=self._redis_ttl_seconds,
+            )
         except Exception:
             self._logger.debug("Failed to persist risk settings for %s", name, exc_info=True)
 
@@ -1083,7 +1102,7 @@ class StrategyRuntime:
             if payload is None:
                 continue
             try:
-                await self._redis.set(new_key, payload)
+                await self._redis.set(new_key, payload, ex=self._redis_ttl_seconds)
                 await self._redis.delete(old_key)
             except Exception:
                 self._logger.debug("Failed to rename key %s to %s", old_key, new_key, exc_info=True)
