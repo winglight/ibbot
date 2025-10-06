@@ -148,6 +148,14 @@ class IBCommandExecutor:
             raise IBCommandExecutionError(f"IB client has no method '{method_name}'")
 
         method = getattr(self._ib_client, method_name)
+
+        ensure_fn = getattr(self._ib_client, "ensure_connection", None)
+        if callable(ensure_fn):
+            try:
+                await ensure_fn(reason=f"ib-command:{method_name}")
+            except Exception as exc:
+                raise RetryableIBCommandError(str(exc)) from exc
+
         self._logger.info(
             "Executing IB command",
             extra={

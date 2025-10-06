@@ -306,6 +306,16 @@ class DepthSubscriber:
         """Return an IBKR client instance, creating it lazily when required."""
 
         try:
+            from src.ib_client_registry import get_client_sync  # type: ignore
+        except Exception:
+            get_client_sync = None  # type: ignore[assignment]
+        else:
+            try:
+                return get_client_sync("secondary")
+            except Exception as exc:
+                _depth_logger.error(f"Failed to resolve IBKR client from registry: {exc}")
+
+        try:
             from importlib import import_module
 
             core = import_module("core")

@@ -40,7 +40,7 @@ from src.routes.service_clients import (
     ServiceResponseError,
     ServiceUnavailableError,
 )
-from src.connection_manager import connection_manager
+from src.connection_manager import ConnectionManager, connection_manager as _GLOBAL_CONNECTION_MANAGER
 from src.utils import is_trading_disabled, now_local, to_local_time
 from src.utils.ibkr_serialization import trade_to_dict
 
@@ -98,6 +98,10 @@ else:
 _MARKET_DATA_SERVICE_CLIENT: Optional[MarketDataServiceClient] = None
 _ORDERS_SERVICE_CLIENT: Optional[OrdersServiceClient] = None
 _MARKET_DATA_INGEST_PATH = "/market/historical/ingest"
+
+
+class IBKRConnectionError(RuntimeError):
+    """Raised when the IBKR client cannot establish a connection on demand."""
 
 
 def _get_market_data_service_client() -> MarketDataServiceClient:
@@ -202,8 +206,16 @@ class IBKRClient:
 
         return cleaned in {"1", "true", "yes", "y", "on"}
 
-    def __init__(self):
-        self.connection_manager = connection_manager
+    def __init__(
+        self,
+        *,
+        connection_manager: Optional[ConnectionManager] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ):
+        self.connection_manager = connection_manager or _GLOBAL_CONNECTION_MANAGER
+
+        # Optional metadata describing the client purpose (e.g., primary/secondary)
+        self.metadata: Dict[str, Any] = dict(metadata or {})
 
         # 设置ConnectionManager对IBKRClient的弱引用，用于错误处理
         import weakref
@@ -247,12 +259,12 @@ class IBKRClient:
         # --- Connection monitoring & resilience state ---
         self._async_loop: Optional[asyncio.AbstractEventLoop] = None
         self._connection_monitor_task: Optional[asyncio.Task] = None
-        self._reconnect_task: Optional[asyncio.Task] = None
         self._disconnect_time: Optional[datetime] = None
         self._reconnect_attempt: int = 0
         self._gateway_restart_triggered: bool = False
         self._self_restart_triggered: bool = False
         self._needs_cleanup: bool = False
+        self._ensure_connection_lock = asyncio.Lock()
 
         self._monitor_interval_seconds = max(1.0, self._parse_env_float('IBKR_CONNECTION_MONITOR_INTERVAL', 5.0))
         connected_interval_default = max(15.0, self._monitor_interval_seconds)
@@ -316,7 +328,7 @@ class IBKRClient:
         if result:
             self._handle_connection_restored()
         else:
-            self._schedule_reconnect_task()
+            self._handle_disconnect_detected("connect-failed")
         return result
     
     def disconnect(self):
@@ -329,20 +341,46 @@ class IBKRClient:
         self._setup_async_components()
         return self.connection_manager.is_connected()
 
-    def _schedule_reconnect_task(self) -> None:
-        """Ensure the reconnect monitor restarts after manual connection attempts."""
+    def get_connection_manager(self) -> ConnectionManager:
+        """Return the underlying connection manager instance."""
 
-        loop = self._async_loop
-        if loop is None:
-            return
+        return self.connection_manager
 
-        if loop.is_running():
+    async def ensure_connection(self, *, reason: str = "ensure") -> None:
+        """Ensure the IB connection is active before performing IB calls."""
+
+        self._setup_async_components()
+
+        manager = self.connection_manager
+        try:
+            if manager.is_connected():
+                return
+        except Exception:
+            pass
+
+        async with self._ensure_connection_lock:
             try:
-                loop.call_soon_threadsafe(self._start_connection_monitor_task)
-            except RuntimeError:
-                self._start_connection_monitor_task()
-        else:
-            self._start_connection_monitor_task()
+                if manager.is_connected():
+                    return
+            except Exception:
+                pass
+
+            self._handle_disconnect_detected(reason)
+
+            attempt_number = self._reconnect_attempt + 1
+            success = await self._attempt_connection(attempt_number)
+            if success:
+                self._handle_connection_restored()
+                return
+
+            self._reconnect_attempt = attempt_number
+            await self._after_failed_attempt()
+            raise IBKRConnectionError("IBKR connection unavailable")
+
+    def mark_connection_lost(self, reason: str = "external") -> None:
+        """Manually mark the connection as lost without triggering reconnect."""
+
+        self._handle_disconnect_detected(reason)
 
     @property
     def ib(self) -> Optional[IB]:
@@ -443,7 +481,6 @@ class IBKRClient:
                 message=message,
             )
             self._handle_disconnect_detected(f"ib-error-{code}")
-            asyncio.create_task(self._ensure_reconnect_task())
 
         try:
             loop.call_soon_threadsafe(_dispatch)
@@ -598,7 +635,6 @@ class IBKRClient:
             self._handle_connection_restored(initial=True, signal_monitor=False)
         else:
             self._handle_disconnect_detected("monitor-start", signal_monitor=False)
-            await self._ensure_reconnect_task()
 
         connected_interval = self._connected_monitor_interval
         disconnected_interval = self._monitor_interval_seconds
@@ -632,7 +668,6 @@ class IBKRClient:
                 # Connection is down
                 if previous_state:
                     self._handle_disconnect_detected("connection-lost", signal_monitor=False)
-                await self._ensure_reconnect_task()
                 previous_state = False
         except asyncio.CancelledError:
             ibkr_logger.debug("IBKR connection monitor cancelled")
@@ -649,7 +684,7 @@ class IBKRClient:
             self._self_restart_triggered = False
             self._needs_cleanup = True
             ibkr_logger.warning(
-                "IBKR connection lost; starting auto-reconnect",
+                "IBKR connection lost",
                 trigger=trigger,
             )
         else:
@@ -680,74 +715,8 @@ class IBKRClient:
         self._needs_cleanup = False
         self._self_restart_suppressed_logged = False
 
-        task = self._reconnect_task
-        if task and not task.done():
-            loop = self._async_loop
-            try:
-                if loop and not loop.is_closed():
-                    loop.call_soon_threadsafe(task.cancel)
-                else:
-                    task.cancel()
-            except RuntimeError:
-                task.cancel()
-        self._reconnect_task = None
-
         if signal_monitor:
             self._signal_monitor_wakeup()
-
-    async def _ensure_reconnect_task(self) -> None:
-        task = self._reconnect_task
-        if task and not task.done():
-            return
-        self._reconnect_task = asyncio.create_task(
-            self._reconnect_loop(),
-            name="ibkr-reconnect-loop",
-        )
-
-    def _compute_backoff_delay(self, attempt_index: int) -> float:
-        if attempt_index <= 0:
-            return 0.0
-        delay = self._reconnect_base_delay * (2 ** max(0, attempt_index - 1))
-        return min(delay, self._reconnect_max_delay)
-
-    async def _reconnect_loop(self) -> None:
-        ibkr_logger.debug("IBKR reconnect loop started")
-        try:
-            while True:
-                if self.is_connected():
-                    return
-
-                delay = self._compute_backoff_delay(self._reconnect_attempt)
-                if delay > 0:
-                    ibkr_logger.debug(
-                        "Waiting before reconnect attempt",
-                        delay_seconds=round(delay, 1),
-                        attempt=self._reconnect_attempt + 1,
-                    )
-                    try:
-                        await asyncio.sleep(delay)
-                    except asyncio.CancelledError:
-                        raise
-
-                if self.is_connected():
-                    return
-
-                attempt_number = self._reconnect_attempt + 1
-                ibkr_logger.info(
-                    "Attempting IBKR reconnection",
-                    attempt=attempt_number,
-                )
-                success = await self._attempt_connection(attempt_number)
-                if success:
-                    self._reconnect_attempt = 0
-                    self._handle_connection_restored()
-                    return
-
-                self._reconnect_attempt = attempt_number
-                await self._after_failed_attempt()
-        except asyncio.CancelledError:
-            ibkr_logger.debug("IBKR reconnect loop cancelled")
-            raise
 
     async def _attempt_connection(self, attempt_number: int) -> bool:
         if self._needs_cleanup:

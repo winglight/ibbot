@@ -792,7 +792,7 @@ async def _ensure_ib_client(logger: Any) -> Any | None:
     async with _IB_CLIENT_LOCK:
         if _IB_CLIENT is None:
             try:
-                from src.ibkr_client import IBKRClient  # type: ignore
+                from src.ib_client_registry import get_client  # type: ignore
             except Exception:
                 if logger:
                     logger.warning(
@@ -801,11 +801,30 @@ async def _ensure_ib_client(logger: Any) -> Any | None:
                     )
                 _IB_CLIENT = _IB_CLIENT_UNAVAILABLE
                 return None
-            _IB_CLIENT = IBKRClient()
+            try:
+                _IB_CLIENT = await get_client("secondary")
+            except Exception:
+                if logger:
+                    logger.warning(
+                        "Failed to obtain shared IBKR client; disabling fallback",
+                        exc_info=True,
+                    )
+                _IB_CLIENT = _IB_CLIENT_UNAVAILABLE
+                return None
     return None if _IB_CLIENT is _IB_CLIENT_UNAVAILABLE else _IB_CLIENT
 
 
 async def _ensure_ib_connected(client: Any, logger: Any) -> bool:
+    ensure_fn = getattr(client, "ensure_connection", None)
+    if callable(ensure_fn):
+        try:
+            await ensure_fn(reason="market-data-fallback")
+            return True
+        except Exception:
+            if logger:
+                logger.warning("IBKR ensure_connection failed", exc_info=True)
+            return False
+
     try:
         if getattr(client, "connected", False):
             return True
