@@ -3,24 +3,6 @@ name: algo-trader
 x-app-env: &default-environment
   env_file:
     - ../.env
-  environment:
-    REDIS_HOST: redis
-    REDIS_PORT: 6379
-    REDIS_URL: redis://redis:6379/0
-    DATA_LAYER_REDIS_URL: redis://redis:6379/0
-    IBBOT_DB_URL: ${IBBOT_DB_URL:-mysql+asyncmy://${IBBOT_DB_USER:-ibbot}:${IBBOT_DB_PASSWORD:-ibbot-password}@mariadb:3306/${IBBOT_DB_NAME:-ibbot}?charset=utf8mb4}
-    DATA_LAYER_DB_URL: ${DATA_LAYER_DB_URL:-mysql+asyncmy://${IBBOT_DB_USER:-ibbot}:${IBBOT_DB_PASSWORD:-ibbot-password}@mariadb:3306/${IBBOT_DB_NAME:-ibbot}?charset=utf8mb4}
-    IBBOT_DB_USER: ${IBBOT_DB_USER:-ibbot}
-    IBBOT_DB_PASSWORD: ${IBBOT_DB_PASSWORD:-ibbot-password}
-    IBBOT_DB_NAME: ${IBBOT_DB_NAME:-ibbot}
-    MARKET_DATA_SERVICE_URL: http://market-data:8010
-    MARKET_DATA_SERVICE_WS_URL: ws://market-data:8010/ws/market
-    ACCOUNT_SERVICE_URL: http://account:8020
-    ORDERS_SERVICE_URL: http://orders:8050
-    RISK_SERVICE_URL: http://risk:8030
-    STRATEGY_SERVICE_URL: http://strategy:8045
-    NOTIFICATION_SERVICE_URL: http://notification:8055
-    NOTIFICATION_SERVICE_TIMEOUT: 10
 
 services:
   ibbot:
