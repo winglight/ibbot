@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import uuid
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, Awaitable, Callable, Mapping
@@ -657,6 +658,66 @@ def test_snapshot_reload_normalises_cached_records() -> None:
     asyncio.run(_scenario())
 
 
+def test_snapshot_load_drops_ib_only_orders() -> None:
+    async def _scenario() -> None:
+        runtime, redis, _ = await _create_runtime()
+        try:
+            valid_command = uuid.uuid4().hex
+            snapshot_payload = {
+                "active_orders": [
+                    {
+                        "id": "valid-active",
+                        "command_id": valid_command,
+                        "order_id": "IB-ACTIVE-1",
+                        "status": "Submitted",
+                    },
+                    {
+                        "id": "legacy-active",
+                        "command_id": "IB-LEGACY-1",
+                        "order_id": "IB-LEGACY-1",
+                        "status": "Submitted",
+                    },
+                ],
+                "history": [
+                    {
+                        "id": "valid-history",
+                        "command_id": uuid.uuid4().hex,
+                        "order_id": "IB-HIST-1",
+                        "status": "Filled",
+                    },
+                    {
+                        "id": "legacy-history",
+                        "command_id": "IB-LEGACY-2",
+                        "order_id": "IB-LEGACY-2",
+                        "status": "Cancelled",
+                    },
+                ],
+                "updated_at": "2024-06-01T00:00:00+00:00",
+                "last_event_id": "5-1",
+            }
+            await redis.set(runtime.snapshot_key, json.dumps(snapshot_payload))
+
+            await runtime._load_snapshot()
+
+            async with runtime._lock:
+                assert "legacy-active" not in runtime._active_orders
+                assert all(
+                    record.get("command_id") != "IB-LEGACY-1"
+                    for record in runtime._active_orders.values()
+                )
+                history_ids = {item.get("id") for item in runtime._history}
+                assert "legacy-history" not in history_ids
+                assert "valid-active" in runtime._active_orders
+                assert runtime._command_to_order.get("IB-LEGACY-1") is None
+                assert runtime._command_to_order.get("IB-LEGACY-2") is None
+                assert "IB-LEGACY-1" in runtime._ib_only_orders
+                assert "IB-LEGACY-2" in runtime._ib_only_orders
+        finally:
+            await runtime.stop()
+
+    asyncio.run(_scenario())
+
+
 def test_list_orders_defaults_to_configured_midnight(monkeypatch: pytest.MonkeyPatch) -> None:
     fixed_now = datetime(2024, 5, 10, 10, 15, tzinfo=timezone.utc)
     monkeypatch.setattr("services.orders.main._utc_now", lambda: fixed_now)
@@ -761,7 +822,7 @@ def test_order_update_persists_to_repository() -> None:
     asyncio.run(_scenario())
 
 
-def test_ib_only_event_logs_warning_when_repository_missing(
+def test_ib_only_event_ignored_and_logged(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level(logging.WARNING, logger="ibbot.services.orders")
@@ -786,12 +847,13 @@ def test_ib_only_event_logs_warning_when_repository_missing(
                 "result": json.dumps(trade_payload),
             }
             updated = await runtime._apply_order_event(payload)
-            assert updated is True
+            assert updated is False
             assert repo.insert_calls == 0
-            assert repo.update_calls == 1
+            assert repo.update_calls == 0
             assert not repo.created_ids
-            assert "IB-ONLY-1" in runtime._active_orders
+            assert "IB-ONLY-1" not in runtime._active_orders
             assert "IB-ONLY-1" in runtime._ib_only_orders
+            assert "IB-ONLY-1" not in runtime._command_to_order
 
             updated_payload = dict(trade_payload)
             updated_payload["status"] = "Filled"
@@ -802,9 +864,9 @@ def test_ib_only_event_logs_warning_when_repository_missing(
                 "result": json.dumps(updated_payload),
             }
             updated_again = await runtime._apply_order_event(follow_up)
-            assert updated_again is True
+            assert updated_again is False
             assert repo.insert_calls == 0
-            assert repo.update_calls == 2
+            assert repo.update_calls == 0
             assert not repo.created_ids
         finally:
             await runtime.stop()
@@ -816,7 +878,7 @@ def test_ib_only_event_logs_warning_when_repository_missing(
         for record in caplog.records
         if record.name == "ibbot.services.orders"
     ]
-    assert any("skipping insert" in message.lower() for message in messages)
+    assert any("ignoring ib-only order" in message.lower() for message in messages)
 
 
 def test_ib_callback_after_truncate_logs_warning_and_reinserts(
