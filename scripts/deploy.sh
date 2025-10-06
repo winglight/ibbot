@@ -18,7 +18,43 @@ COMPOSE_BIN=${COMPOSE_CMD:-"docker compose"}
 DEFAULT_ENVIRONMENT="local"
 COMPOSE_BASE_FILE="${ROOT_DIR}/docker/local.compose.yml"
 COMPOSE_PROD_FILE="${ROOT_DIR}/docker/prod.compose.yml"
-START_SEQUENCE=(redis mariadb ib-gateway account orders ibbot ib-command ib-feed market-data risk strategy notification queue-monitor optimizer optimizer-ui cloudflared)
+START_SEQUENCE=(
+    redis
+    mariadb
+    ib-gateway
+    account
+    orders
+    ibbot
+    ib-command
+    ib-feed
+    connection_control
+    market-data
+    risk
+    strategy
+    notification
+    queue-monitor
+    optimizer
+    optimizer-ui
+    cloudflared
+)
+REFRESH_SERVICES=(
+    redis
+    mariadb
+    account
+    orders
+    ibbot
+    ib-command
+    ib-feed
+    connection_control
+    market-data
+    risk
+    strategy
+    notification
+    queue-monitor
+    optimizer
+    optimizer-ui
+    cloudflared
+)
 STARTED_SERVICES=()
 
 usage() {
@@ -27,6 +63,7 @@ Usage: deploy.sh <command> [options]
 
 Commands:
   up               Build and start the stack in dependency order
+  refresh          Update code, rebuild and restart services (skip ib-gateway)
   down             Stop and remove the stack
   restart [svc]    Restart a specific service (defaults to full stack)
   status           Show service status via docker compose ps
@@ -58,7 +95,7 @@ parse_args() {
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            up|down|restart|status|diagnose)
+            up|refresh|down|restart|status|diagnose)
                 COMMAND="$1"
                 shift
                 ;;
@@ -146,14 +183,10 @@ start_sequence() {
 
     STARTED_SERVICES=()
 
-    for service in "${START_SEQUENCE[@]}"; do
-        if [[ "$service" == "cloudflared" ]]; then
-            local tunnel_token="${CF_TUNNEL_TOKEN:-}"
-            if [[ -z "$tunnel_token" ]]; then
-                # Skip cloudflared when token is not configured
-                continue
-            fi
-        fi
+    local -a sequence=()
+    mapfile -d '' -t sequence < <(filter_services "${START_SEQUENCE[@]}")
+
+    for service in "${sequence[@]}"; do
         log "Starting ${service}"
         run_compose "$env_name" up -d "${build_flag[@]}" "$service"
         STARTED_SERVICES+=("$service")
@@ -236,12 +269,81 @@ run_diagnostics() {
     (cd "$ROOT_DIR" && python scripts/diagnose_foundation.py)
 }
 
+filter_services() {
+    if [[ $# -eq 0 ]]; then
+        return
+    fi
+
+    local service
+    for service in "$@"; do
+        if [[ "$service" == "cloudflared" && -z "${CF_TUNNEL_TOKEN:-}" ]]; then
+            continue
+        fi
+        printf '%s\0' "$service"
+    done
+}
+
+update_repository() {
+    if [[ ! -d "${ROOT_DIR}/.git" ]]; then
+        log "Skipping git update (no .git directory detected)"
+        return
+    fi
+
+    if ! command -v git >/dev/null 2>&1; then
+        log "Skipping git update (git command not available)"
+        return
+    fi
+
+    if ! (
+        set +e
+        cd "$ROOT_DIR" || exit 1
+
+        if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+            exit 0
+        fi
+
+        if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
+            log "Working tree has local changes; skip git pull to avoid overwriting"
+            exit 0
+        fi
+
+        log "Pulling latest code (git pull --ff-only)"
+        git pull --ff-only
+    ); then
+        log "git pull failed; continuing without updating repository"
+    fi
+}
+
+refresh_stack() {
+    local env_name="$1"
+
+    update_repository
+
+    local -a services=()
+    mapfile -d '' -t services < <(filter_services "${REFRESH_SERVICES[@]}")
+
+    if [[ ${#services[@]} -eq 0 ]]; then
+        log "No services selected for refresh"
+        return
+    fi
+
+    STARTED_SERVICES=("${services[@]}")
+
+    log "Rebuilding and starting services (excluding ib-gateway): ${services[*]}"
+    run_compose "$env_name" up -d --build "${services[@]}"
+}
+
 main() {
     parse_args "$@"
 
     case "$COMMAND" in
         up)
             start_sequence "$ENVIRONMENT"
+            wait_for_health "$ENVIRONMENT"
+            run_diagnostics "$ENVIRONMENT"
+            ;;
+        refresh)
+            refresh_stack "$ENVIRONMENT"
             wait_for_health "$ENVIRONMENT"
             run_diagnostics "$ENVIRONMENT"
             ;;
