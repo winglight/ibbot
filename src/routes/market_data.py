@@ -295,11 +295,7 @@ async def get_chart_data_legacy(
     return await _fetch_chart_data_payload(request)
 
 
-@router.post("/market/backfill")
-async def run_market_backfill(
-    request: MarketBackfillRequest,
-    user: Optional[str] = Depends(get_current_user),
-) -> Dict[str, Any]:
+async def _execute_market_backfill(request: MarketBackfillRequest) -> Dict[str, Any]:
     client = _get_market_data_service_client()
     service_payload = request.model_dump(by_alias=True, exclude_none=True)
 
@@ -325,6 +321,30 @@ async def run_market_backfill(
     payload.setdefault("symbol", request.symbol)
     payload.setdefault("interval", payload.get("interval") or request.bar_size)
     return payload
+
+
+@router.post("/market/backfill")
+async def run_market_backfill(
+    request: MarketBackfillRequest,
+    user: Optional[str] = Depends(get_current_user),
+) -> Dict[str, Any]:
+    return await _execute_market_backfill(request)
+
+
+@router.post("/api/market/backfill")
+async def run_market_backfill_api(
+    request: MarketBackfillRequest,
+    user: Optional[str] = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """API-prefixed alias for :func:`run_market_backfill`.
+
+    The frontend consistently calls ``/api``-prefixed endpoints via
+    :meth:`static/js/app.js:IBApp.apiCall`, so exposing this alias
+    prevents 404 responses when the configuration sidebar triggers a
+    backfill.
+    """
+
+    return await _execute_market_backfill(request)
 
 
 @router.get("/market/storage")
