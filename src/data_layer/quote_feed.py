@@ -17,6 +17,17 @@ from loguru import logger
 
 Callback = Callable[[Dict[str, float]], None]
 
+
+def _is_lazy_proxy(value: Any) -> bool:
+    """Return ``True`` if *value* looks like a core.LazyProxy placeholder."""
+
+    cls = getattr(value, "__class__", None)
+    if cls is None:
+        return False
+    if cls.__name__ != "_LazyProxy":
+        return False
+    return bool(getattr(value, "_attr", None))
+
 __all__ = [
     "QuoteFeed",
     "InMemoryQuoteFeed",
@@ -333,12 +344,14 @@ class IBQuoteFeed(QuoteFeed):
             raise RuntimeError("IBKR core module unavailable") from exc
 
         client = getattr(core, "ibkr_client", None)
-        if client is not None:
+        if client is not None and not _is_lazy_proxy(client):
             return client
 
         factory = getattr(core, "IBKRClient", None)
-        if factory is None:
-            raise RuntimeError("IBKRClient factory not available on core module")
+        if factory is None or _is_lazy_proxy(factory) or not callable(factory):
+            from src.ibkr_client import IBKRClient as _IBKRClient  # local import to avoid cycles
+
+            factory = _IBKRClient
 
         client = factory()
         core.ibkr_client = client
