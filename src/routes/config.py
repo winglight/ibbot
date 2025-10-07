@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
@@ -203,6 +204,26 @@ async def _ensure_modules_entry(redis: Any, module: str) -> None:
         logger.warning("Failed to register config module", module=module, error=str(exc))
 
 
+@dataclass(slots=True)
+class _RedisCommandOutcome:
+    value: Any | None = None
+    failure: str | None = None
+    exception: Exception | None = None
+    timeout: float | None = None
+
+
+async def _execute_redis_command(awaitable: Any, timeout: float) -> _RedisCommandOutcome:
+    try:
+        result = await asyncio.wait_for(awaitable, timeout=timeout)
+    except asyncio.TimeoutError as exc:
+        return _RedisCommandOutcome(failure="timeout", exception=exc, timeout=timeout)
+    except TimeoutError as exc:  # pragma: no cover - defensive for other libraries
+        return _RedisCommandOutcome(failure="native_timeout", exception=exc, timeout=timeout)
+    except RedisError as exc:
+        return _RedisCommandOutcome(failure="redis_error", exception=exc)
+    return _RedisCommandOutcome(value=result)
+
+
 async def _await_redis(
     awaitable: Any,
     *,
@@ -210,70 +231,41 @@ async def _await_redis(
     module: str | None = None,
     suppress: bool = False,
     timeout: float | None = None,
+    capture_errors: bool = False,
 ) -> Any:
     effective_timeout = CONFIG_REDIS_COMMAND_TIMEOUT if timeout is None else float(timeout)
     detail_timeout = "Redis request timed out"
     detail_unavailable = "Redis is unavailable"
     log_module = module or "-"
-    try:
-        return await asyncio.wait_for(awaitable, timeout=effective_timeout)
-    except asyncio.TimeoutError as exc:
-        if suppress:
-            logger.warning(
-                "Redis command timed out",
-                action=action,
-                module=log_module,
-                timeout=effective_timeout,
-            )
-            return None
-        logger.error(
-            "Redis command timed out",
-            action=action,
-            module=log_module,
-            timeout=effective_timeout,
-        )
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=detail_timeout,
-        ) from exc
-    except TimeoutError as exc:  # pragma: no cover - defensive for other libraries
-        if suppress:
-            logger.warning(
-                "Redis command timed out (native)",
-                action=action,
-                module=log_module,
-                timeout=effective_timeout,
-            )
-            return None
-        logger.error(
-            "Redis command timed out (native)",
-            action=action,
-            module=log_module,
-            timeout=effective_timeout,
-        )
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=detail_timeout,
-        ) from exc
-    except RedisError as exc:
-        if suppress:
-            logger.warning(
-                "Redis command failed",
-                action=action,
-                module=log_module,
-                error=str(exc),
-            )
-            return None
-        logger.error(
-            "Redis command failed",
-            action=action,
-            module=log_module,
-            error=str(exc),
-        )
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=detail_unavailable,
-        ) from exc
+
+    outcome = await _execute_redis_command(awaitable, effective_timeout)
+
+    if outcome.failure is None:
+        return (outcome.value, None) if capture_errors else outcome.value
+
+    log_kwargs: dict[str, Any] = {"action": action, "module": log_module}
+    if outcome.failure == "redis_error" and outcome.exception is not None:
+        log_kwargs["error"] = str(outcome.exception)
+    else:
+        log_kwargs["timeout"] = effective_timeout
+
+    if outcome.failure == "native_timeout":
+        message = "Redis command timed out (native)"
+    elif outcome.failure == "timeout":
+        message = "Redis command timed out"
+    else:
+        message = "Redis command failed"
+
+    log_method = logger.warning if suppress else logger.error
+    log_method(message, **log_kwargs)
+
+    if suppress:
+        return (None, outcome) if capture_errors else None
+
+    detail = detail_timeout if outcome.failure in {"timeout", "native_timeout"} else detail_unavailable
+    raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=detail) from (
+        outcome.exception
+    )
 
 
 async def _restore_previous_state(redis: Any, key: str, before: Mapping[str, Any], module: str) -> None:
@@ -298,13 +290,22 @@ async def _scan_config_modules(redis: Any, pattern: str) -> list[str]:
     modules: list[str] = []
     while True:
         try:
-            key = await _await_redis(
+            key, outcome = await _await_redis(
                 iterator.__anext__(),
                 action="scan_iter",
                 timeout=CONFIG_REDIS_SCAN_TIMEOUT,
+                suppress=True,
+                capture_errors=True,
             )
         except StopAsyncIteration:
             break
+
+        if outcome is not None:
+            detail = "Redis request timed out"
+            if outcome.failure == "redis_error":
+                detail = "Redis is unavailable"
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=detail)
+
         if key is None:
             continue
         text = str(key)
@@ -328,16 +329,26 @@ async def list_modules(user: str | None = Depends(get_current_user)) -> dict[str
     errors: list[dict[str, Any]] = []
 
     try:
-        members = await _await_redis(redis.smembers(MODULE_SET_KEY), action="smembers")
-    except HTTPException as exc:
-        if exc.status_code != status.HTTP_503_SERVICE_UNAVAILABLE:
-            raise
-        logger.warning("Config module registry lookup timed out")
-        errors.append({"type": "redis_timeout", "context": "module_set", "message": "Redis 请求超时"})
-        members = None
+        members, outcome = await _await_redis(
+            redis.smembers(MODULE_SET_KEY),
+            action="smembers",
+            suppress=True,
+            capture_errors=True,
+        )
     except Exception as exc:  # pragma: no cover - defensive guard
         logger.warning("Failed to read config module registry", error=str(exc))
         errors.append({"type": "redis_error", "context": "module_set", "message": str(exc)})
+        members = None
+        outcome = None
+
+    if outcome is not None:
+        if outcome.failure == "redis_error":
+            message = str(outcome.exception) if outcome.exception else "Redis 请求失败"
+            logger.warning("Failed to read config module registry", error=message)
+            errors.append({"type": "redis_error", "context": "module_set", "message": message})
+        else:
+            logger.warning("Config module registry lookup timed out")
+            errors.append({"type": "redis_timeout", "context": "module_set", "message": "Redis 请求超时"})
         members = None
 
     if members:
