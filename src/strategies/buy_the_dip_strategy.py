@@ -181,7 +181,7 @@ class BuyTheDipStrategy(CandleSubscriptionStrategy):
                     try:
                         self._ensure_subscription()
                     except Exception as exc:
-                        self.logger.error("Failed to resubscribe after symbol change: {}", exc)
+                        self.logger.error("Failed to resubscribe after symbol change: %s", exc)
         return applied
 
     # ------------------------------------------------------------------
@@ -274,7 +274,7 @@ class BuyTheDipStrategy(CandleSubscriptionStrategy):
         try:
             task_id = self.queue_manager.add_task("strategy_order", payload)
         except Exception as exc:
-            self.logger.error("Failed to enqueue order: {}", exc)
+            self.logger.error("Failed to enqueue order: %s", exc)
             return
         self._last_signal_time = time.time()
         self._last_order_payload = payload

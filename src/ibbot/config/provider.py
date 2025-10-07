@@ -240,10 +240,10 @@ class ConfigProvider:
                 try:
                     versions = await repository.load_versions()
                 except ConfigRepositoryError as exc:
-                    logger.warning("Failed to load configuration versions: {}", str(exc))
+                    logger.warning("Failed to load configuration versions: %s", str(exc))
                     continue
                 except Exception as exc:  # pragma: no cover - defensive logging
-                    logger.warning("Unexpected error while loading config versions: {}", str(exc))
+                    logger.warning("Unexpected error while loading config versions: %s", str(exc))
                     continue
 
                 tracked = set(self._cache.keys()) | set(self._versions.keys())

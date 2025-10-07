@@ -666,7 +666,7 @@ class DOMService:
             try:
                 self._data_layer_manager = get_data_source_manager()
             except Exception as exc:  # pragma: no cover - defensive guard
-                logger.error("Failed to initialise data layer manager: {}", exc)
+                logger.error("Failed to initialise data layer manager: %s", exc)
                 self._last_start_error = str(exc) or "Failed to initialise data layer"
                 self._last_start_error_status = 500
                 return None

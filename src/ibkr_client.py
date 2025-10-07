@@ -1595,10 +1595,10 @@ class IBKRClient:
             )
         except DataSourceError as exc:
             ibkr_logger.warning(
-                "Unified real-time data unavailable: {}", exc, symbol=symbol
+                "Unified real-time data unavailable: %s", exc, symbol=symbol
             )
         except Exception as exc:
-            ibkr_logger.exception("Unified real-time data error: {}", exc)
+            ibkr_logger.exception("Unified real-time data error: %s", exc)
 
         return await self._get_real_time_data_legacy(symbol, exchange)
 
@@ -1866,7 +1866,7 @@ class IBKRClient:
             try:
                 self._data_layer_manager = get_data_source_manager()
             except Exception as exc:  # pragma: no cover - defensive guard
-                ibkr_logger.warning("Failed to initialise data source manager: {}", exc)
+                ibkr_logger.warning("Failed to initialise data source manager: %s", exc)
                 return None
         return self._data_layer_manager
 

@@ -56,7 +56,7 @@ class ParquetPersistenceBackend(PersistenceBackend):
         try:
             self._writer.append_candle(symbol, interval, payload, timestamp_ns=timestamp_ns)
         except Exception as exc:
-            logger.exception("Failed to append candle to Parquet store: {}", exc)
+            logger.exception("Failed to append candle to Parquet store: %s", exc)
 
     def load_candles(
         self,
