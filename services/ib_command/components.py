@@ -5,10 +5,11 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import math
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from typing import Any, Mapping, MutableMapping
+from typing import Any, Iterable, Mapping, MutableMapping, Sequence
 
 from src.ibbot.logging import get_logger
 from src.ibbot.redis import (
@@ -68,6 +69,10 @@ class IBCommandExecutor:
     def __init__(self, ib_client: Any, *, logger_name: str = "ibbot.services.ib_command.executor") -> None:
         self._ib_client = ib_client
         self._logger = get_logger(logger_name)
+        self._fallback_methods: dict[str, Any] = {
+            "get_account_info": self._fallback_get_account_info,
+            "get_positions": self._fallback_get_positions,
+        }
 
     def describe_connectivity(self) -> tuple[bool | None, str | None]:
         """Return the IB client's connectivity flag and last connection error."""
@@ -144,10 +149,12 @@ class IBCommandExecutor:
         if not method_name:
             raise IBCommandExecutionError("command missing 'method' field")
 
-        if not hasattr(self._ib_client, method_name):
-            raise IBCommandExecutionError(f"IB client has no method '{method_name}'")
-
-        method = getattr(self._ib_client, method_name)
+        method: Any | None = getattr(self._ib_client, method_name, None)
+        if method is None:
+            fallback = self._fallback_methods.get(str(method_name))
+            if fallback is None:
+                raise IBCommandExecutionError(f"IB client has no method '{method_name}'")
+            method = fallback
 
         ensure_fn = getattr(self._ib_client, "ensure_connection", None)
         if callable(ensure_fn):
@@ -186,6 +193,341 @@ class IBCommandExecutor:
         if inspect.isawaitable(value):
             return await value
         return value
+
+
+    async def _fallback_get_account_info(self, *args: Any, **kwargs: Any) -> Mapping[str, Any]:
+        """Retrieve account information using the underlying IB connection."""
+
+        connected, last_error = self.describe_connectivity()
+        ib_instance = await self._get_ib_instance()
+
+        summary: Any | None = None
+        if ib_instance is not None:
+            try:
+                summary = await self._fetch_account_summary(ib_instance)
+            except Exception as exc:  # pragma: no cover - defensive guard
+                self._logger.warning("Failed to fetch account summary", exc_info=exc)
+                if not last_error:
+                    last_error = str(exc)
+
+        info = self._format_account_info(summary)
+        if connected is not None:
+            info["connected"] = bool(connected)
+        else:
+            info.setdefault("connected", bool(summary))
+        if last_error:
+            info["last_error"] = last_error
+        else:
+            info.setdefault("last_error", None)
+        return info
+
+    async def _fallback_get_positions(self, *args: Any, **kwargs: Any) -> Sequence[Mapping[str, Any]]:
+        """Fetch open positions using the active IB connection."""
+
+        fast = bool(kwargs.get("fast", True))
+        ib_instance = await self._get_ib_instance()
+        if ib_instance is None:
+            raise IBCommandExecutionError("IB connection unavailable for positions query")
+
+        try:
+            raw_positions = await self._fetch_positions(ib_instance, fast=fast)
+        except Exception as exc:  # pragma: no cover - defensive guard
+            raise IBCommandExecutionError(f"Failed to fetch positions: {exc}") from exc
+
+        serialised: list[dict[str, Any]] = []
+        for entry in raw_positions:
+            data = self._serialise_position(entry)
+            if data:
+                serialised.append(data)
+        return serialised
+
+    async def _get_ib_instance(self) -> Any | None:
+        """Return the underlying ib_insync.IB instance when available."""
+
+        client = self._ib_client
+        manager = getattr(client, "connection_manager", None)
+        if manager is not None:
+            getter = getattr(manager, "get_ib_instance", None)
+            if callable(getter):
+                try:
+                    instance = getter()
+                    if inspect.isawaitable(instance):
+                        instance = await instance
+                except Exception:  # pragma: no cover - defensive guard
+                    instance = None
+                if instance is not None:
+                    return instance
+            for attr in ("ib", "_ib", "client", "_client"):
+                instance = getattr(manager, attr, None)
+                if instance is not None:
+                    return instance
+
+        for attr in ("ib", "_ib", "client", "_client"):
+            instance = getattr(client, attr, None)
+            if instance is not None:
+                return instance
+        return None
+
+    async def _fetch_account_summary(self, ib: Any) -> Any:
+        """Read the account summary data from the IB client."""
+
+        fetchers = (
+            ("accountSummaryAsync", False),
+            ("accountSummary", True),
+            ("reqAccountSummary", True),
+        )
+        for name, run_in_thread in fetchers:
+            method = getattr(ib, name, None)
+            if not callable(method):
+                continue
+            try:
+                if run_in_thread:
+                    result = method()
+                    if inspect.isawaitable(result):
+                        return await result
+                    if isinstance(result, Iterable):
+                        return result
+                    return await asyncio.to_thread(method)
+                return await method()  # type: ignore[misc]
+            except Exception:  # pragma: no cover - defensive guard
+                continue
+        return None
+
+    def _format_account_info(self, summary: Any) -> dict[str, Any]:
+        """Convert account summary payloads into a serialisable mapping."""
+
+        info: dict[str, Any] = {
+            "connected": False,
+            "last_error": None,
+            "account_id": None,
+            "account_type": None,
+            "currency": None,
+            "net_liquidation": None,
+            "available_funds": None,
+            "buying_power": None,
+            "unrealized_pnl": None,
+            "realized_pnl": None,
+        }
+
+        if not summary:
+            return info
+
+        entries: Iterable[Any]
+        if isinstance(summary, Mapping):
+            entries = summary.values()
+        elif isinstance(summary, (list, tuple, set)):
+            entries = summary
+        else:
+            entries = [summary]
+
+        for entry in entries:
+            tag = self._coerce_str(entry.get("tag")) if isinstance(entry, Mapping) else self._coerce_str(getattr(entry, "tag", None))
+            value = entry.get("value") if isinstance(entry, Mapping) else getattr(entry, "value", None)
+            currency = entry.get("currency") if isinstance(entry, Mapping) else getattr(entry, "currency", None)
+            account = entry.get("account") if isinstance(entry, Mapping) else getattr(entry, "account", None)
+            account_type = entry.get("accountType") if isinstance(entry, Mapping) else getattr(entry, "accountType", None)
+
+            if tag in {"AccountCode", "AccountId", "Account", "AccountNumber"}:
+                info["account_id"] = self._coerce_str(value) or info["account_id"]
+            elif tag == "AccountType" and value is not None:
+                info["account_type"] = self._coerce_str(value)
+            elif tag == "NetLiquidation":
+                info["net_liquidation"] = self._coerce_float(value)
+            elif tag in {"AvailableFunds", "AvailableFund"}:
+                info["available_funds"] = self._coerce_float(value)
+            elif tag in {"BuyingPower", "EquityWithLoanValue"}:
+                info["buying_power"] = self._coerce_float(value)
+            elif tag in {"UnrealizedPnL", "UnrealizedPnl"}:
+                info["unrealized_pnl"] = self._coerce_float(value)
+            elif tag in {"RealizedPnL", "RealizedPnl"}:
+                info["realized_pnl"] = self._coerce_float(value)
+            elif tag in {"TotalCashBalance", "CashBalance"} and info["available_funds"] is None:
+                info["available_funds"] = self._coerce_float(value)
+
+            if info["account_id"] is None and account is not None:
+                info["account_id"] = self._coerce_str(account)
+            if info["account_type"] is None and account_type is not None:
+                info["account_type"] = self._coerce_str(account_type)
+            if info["currency"] is None and currency is not None:
+                info["currency"] = self._coerce_str(currency)
+
+        if info["account_id"] is None and info["currency"] is not None:
+            info["account_id"] = info["currency"]
+
+        return info
+
+    async def _fetch_positions(self, ib: Any, *, fast: bool) -> Sequence[Any]:
+        """Return a list-like structure describing the current positions."""
+
+        if not fast:
+            refresher = getattr(ib, "reqPositionsAsync", None)
+            if callable(refresher):
+                try:
+                    await refresher()
+                except Exception:  # pragma: no cover - defensive guard
+                    pass
+            else:
+                refresher_sync = getattr(ib, "reqPositions", None)
+                if callable(refresher_sync):
+                    try:
+                        await asyncio.to_thread(refresher_sync)
+                    except Exception:  # pragma: no cover - defensive guard
+                        pass
+
+        getter = getattr(ib, "positions", None)
+        if not callable(getter):
+            getter = getattr(ib, "portfolio", None)
+        if not callable(getter):
+            return []
+
+        result = getter()
+        if inspect.isawaitable(result):
+            result = await result
+        if result is None:
+            return []
+        if isinstance(result, (list, tuple, set)):
+            return list(result)
+        return [result]
+
+    def _serialise_position(self, entry: Any) -> dict[str, Any]:
+        """Convert an IBKR position entry into a plain dictionary."""
+
+        if entry is None:
+            return {}
+
+        if isinstance(entry, Mapping):
+            account = entry.get("account")
+            contract = entry.get("contract")
+            position = entry.get("position")
+            avg_cost = entry.get("avgCost") or entry.get("avg_cost")
+            market_price = entry.get("marketPrice") or entry.get("market_price")
+            market_value = entry.get("marketValue") or entry.get("market_value")
+            unrealized = entry.get("unrealizedPNL") or entry.get("unrealizedPnl")
+            realized = entry.get("realizedPNL") or entry.get("realizedPnl")
+        elif isinstance(entry, (list, tuple)) and len(entry) >= 4:
+            account, contract, position, avg_cost = entry[:4]
+            market_price = market_value = unrealized = realized = None
+        else:
+            account = getattr(entry, "account", None)
+            contract = getattr(entry, "contract", None)
+            position = getattr(entry, "position", None)
+            avg_cost = getattr(entry, "avgCost", None)
+            market_price = getattr(entry, "marketPrice", None)
+            market_value = getattr(entry, "marketValue", None)
+            unrealized = getattr(entry, "unrealizedPNL", None) or getattr(entry, "unrealizedPnl", None)
+            realized = getattr(entry, "realizedPNL", None) or getattr(entry, "realizedPnl", None)
+
+        contract_payload = self._serialise_contract(contract)
+        symbol = contract_payload.get("local_symbol") or contract_payload.get("symbol")
+        exchange = contract_payload.get("exchange") or contract_payload.get("primary_exchange")
+        sec_type = contract_payload.get("sec_type")
+
+        payload: dict[str, Any] = {}
+        if account is not None:
+            payload["account"] = self._coerce_str(account)
+        if symbol is not None:
+            payload["symbol"] = symbol
+        if exchange is not None:
+            payload["exchange"] = exchange
+        if sec_type is not None:
+            payload["sec_type"] = sec_type
+
+        position_value = self._coerce_float(position)
+        if position_value is not None:
+            payload["position"] = position_value
+
+        avg_cost_value = self._coerce_float(avg_cost)
+        if avg_cost_value is not None:
+            payload["avg_cost"] = avg_cost_value
+
+        market_price_value = self._coerce_float(market_price)
+        if market_price_value is not None:
+            payload["market_price"] = market_price_value
+
+        market_value_value = self._coerce_float(market_value)
+        if market_value_value is not None:
+            payload["market_value"] = market_value_value
+
+        unrealized_value = self._coerce_float(unrealized)
+        if unrealized_value is not None:
+            payload["unrealized_pnl"] = unrealized_value
+
+        realized_value = self._coerce_float(realized)
+        if realized_value is not None:
+            payload["realized_pnl"] = realized_value
+
+        currency = contract_payload.get("currency")
+        if currency is not None:
+            payload["currency"] = currency
+
+        if contract_payload:
+            payload["contract"] = contract_payload
+
+        return payload
+
+    def _serialise_contract(self, contract: Any) -> dict[str, Any]:
+        if contract is None:
+            return {}
+
+        data: dict[str, Any] = {}
+        attribute_map = {
+            "symbol": "symbol",
+            "localSymbol": "local_symbol",
+            "secType": "sec_type",
+            "exchange": "exchange",
+            "primaryExchange": "primary_exchange",
+            "currency": "currency",
+            "conId": "con_id",
+            "lastTradeDateOrContractMonth": "expiry",
+            "tradingClass": "trading_class",
+            "multiplier": "multiplier",
+        }
+        for attr, key in attribute_map.items():
+            value = getattr(contract, attr, None)
+            if value is None:
+                continue
+            if isinstance(value, str):
+                cleaned = value.strip()
+                if not cleaned:
+                    continue
+                data[key] = cleaned
+                continue
+            data[key] = value
+        return data
+
+    def _coerce_float(self, value: Any) -> float | None:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return float(value)
+        if isinstance(value, (int, float)):
+            result = float(value)
+        else:
+            try:
+                text = str(value).replace(",", "").strip()
+            except Exception:
+                return None
+            if not text:
+                return None
+            try:
+                result = float(text)
+            except (TypeError, ValueError):
+                return None
+        if math.isnan(result) or math.isinf(result):
+            return None
+        return result
+
+    def _coerce_str(self, value: Any) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            text = value.strip()
+        else:
+            try:
+                text = str(value).strip()
+            except Exception:
+                return None
+        return text or None
 
 
 class ResultPublisher:

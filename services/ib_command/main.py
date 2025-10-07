@@ -36,7 +36,9 @@ async def _create_ib_client() -> Any:
     try:
         from src.ib_client_registry import get_client  # type: ignore
     except Exception:  # pragma: no cover - optional dependency
-        return object()
+        from services.ib_command.ib_client import LocalIBCommandClient
+
+        return LocalIBCommandClient()
 
     return await get_client("primary")
 
