@@ -42,6 +42,15 @@ class StubMarketDataServiceClient:
         self.symbols_response: Mapping[str, Any] = {
             "symbols": ["AAPL", "GOOGL", "MSFT", "TSLA"]
         }
+        self.backfill_response: Mapping[str, Any] = {
+            "rows": [
+                {
+                    "status": "queued",
+                    "symbol": "AAPL",
+                }
+            ],
+            "message": "Backfill queued",
+        }
         self.should_fail: bool = False
 
     async def get_quotes(self, symbols: list[str]) -> Mapping[str, Any]:
@@ -73,6 +82,12 @@ class StubMarketDataServiceClient:
         if self.should_fail:
             raise ServiceUnavailableError("Market data service unavailable")
         return {"status": "unsubscribed", "symbols": symbols}
+
+    async def request_backfill(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
+        self.calls.append(("request_backfill", dict(payload)))
+        if self.should_fail:
+            raise ServiceUnavailableError("Market data service unavailable")
+        return self.backfill_response
 
 
 @pytest.fixture()
@@ -204,6 +219,31 @@ def test_get_symbols_returns_503_when_service_unavailable(market_data_app: tuple
     response = client.get("/api/market-data/symbols")
 
     assert response.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
+
+
+def test_api_market_backfill_forwards_request(
+    market_data_app: tuple[FastAPI, StubMarketDataServiceClient]
+) -> None:
+    """The API alias should invoke the market data service backfill endpoint."""
+
+    app, stub_client = market_data_app
+    client = TestClient(app)
+
+    payload = {
+        "symbol": "AAPL",
+        "duration": "1 D",
+        "barSize": "1 min",
+        "exchange": "SMART",
+    }
+
+    response = client.post("/api/market/backfill", json=payload)
+
+    assert response.status_code == status.HTTP_200_OK
+    body = response.json()
+    assert body["success"] is True
+    assert body["symbol"] == "AAPL"
+    assert body["interval"] == "1 min"
+    assert stub_client.calls == [("request_backfill", payload)]
 
 
 def test_subscribe_to_quotes_creates_subscription(market_data_app: tuple[FastAPI, StubMarketDataServiceClient]) -> None:
