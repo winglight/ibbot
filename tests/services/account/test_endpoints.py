@@ -73,6 +73,7 @@ def reset_state() -> None:
     _state.orders_stale = None
     _state.orders_stale_reason = None
     _state.orders_last_error = None
+    _state.orders_response_time_ms = None
     _state.daily_summary_last_refreshed_at = None
     _state.daily_summary_source = None
     _state.daily_summary_from_cache = None
@@ -338,6 +339,9 @@ def test_account_orders_service_success_updates_metrics(
     assert payload["success"] is True
     assert len(payload["orders"]) == 3
     assert payload["orders"][0]["symbol"] == "AAPL"
+    assert "response_time_ms" in payload
+    assert isinstance(payload["response_time_ms"], (int, float))
+    assert payload["response_time_ms"] >= 0.0
     assert payload["meta"] == {
         "page": 1,
         "limit": DEFAULT_ORDER_LIMIT,
@@ -356,6 +360,9 @@ def test_account_orders_service_success_updates_metrics(
     assert metrics.get("orders_last_refreshed_at") == response_payload["updated_at"]
     assert metrics.get("orders_source") == "orders-service"
     assert metrics.get("orders_from_cache") is False
+    response_time_metric = metrics.get("orders_response_time_ms")
+    assert isinstance(response_time_metric, (int, float))
+    assert response_time_metric >= 0.0
 
 
 def test_account_orders_service_unavailable_returns_503(
@@ -379,6 +386,7 @@ def test_account_orders_service_unavailable_returns_503(
     assert metrics.get("orders_last_error")
     assert "orders failed" in str(metrics.get("orders_last_error", "")).lower()
     assert metrics.get("orders_stale") is True
+    assert metrics.get("orders_response_time_ms") == ""
 
 
 def test_account_daily_summary_cache_success_updates_metrics(
@@ -688,6 +696,8 @@ def test_account_orders_pagination(
     assert response.status_code == 200
     payload = response.json()
     assert payload["orders"] == [{"id": "2", "symbol": "MSFT"}]
+    assert "response_time_ms" in payload
+    assert isinstance(payload["response_time_ms"], (int, float))
     assert payload["meta"] == {
         "page": 2,
         "limit": 1,

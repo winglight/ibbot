@@ -55,7 +55,6 @@ router = APIRouter()
 
 RATE_LIMIT_SECONDS = 15.0
 SERVICE_UNAVAILABLE_MESSAGE = "服务不可用"
-RISK_RULES_CACHE_KEY = "json:risk:rules"
 RISK_RULES_UPDATE_CHANNEL = "pubsub:risk:rules:update"
 
 _ACCOUNT_CLIENT = AccountServiceClient()
@@ -395,35 +394,6 @@ def _decode_redis_mapping(raw: Dict[Any, Any]) -> Dict[str, str]:
     return result
 
 
-async def _read_json_from_redis(key: str) -> Optional[Dict[str, Any]]:
-    container = core.get_container()
-    redis_client = getattr(container, "redis_client", None) if container else None
-    if redis_client is None:
-        return None
-
-    try:
-        raw = await redis_client.get(key)
-    except Exception as exc:  # pragma: no cover - redis access errors
-        logger.debug("Failed to read Redis key %s: %s", key, exc)
-        return None
-
-    if not raw:
-        return None
-
-    if isinstance(raw, bytes):
-        raw = raw.decode("utf-8", errors="ignore")
-
-    try:
-        payload = json.loads(raw)
-    except Exception as exc:  # pragma: no cover - invalid json
-        logger.debug("Invalid JSON payload in Redis key %s: %s", key, exc)
-        return None
-
-    if isinstance(payload, Mapping):
-        return dict(payload)
-    return None
-
-
 def _normalise_rules_payload(rules: Any) -> Any:
     if isinstance(rules, Mapping):
         normalised: Dict[str, Dict[str, Any]] = {}
@@ -454,21 +424,6 @@ def _normalise_rules_payload(rules: Any) -> Any:
     return rules
 
 
-async def _load_cached_risk_rules() -> Optional[Dict[str, Any]]:
-    payload = await _read_json_from_redis(RISK_RULES_CACHE_KEY)
-    if payload is None:
-        return None
-    payload.setdefault("success", True)
-    payload.setdefault("source", payload.get("source", "redis"))
-    rules_payload = payload.get("rules")
-    if rules_payload is not None:
-        normalised_rules = _normalise_rules_payload(rules_payload)
-        payload["rules"] = normalised_rules
-        if isinstance(normalised_rules, Mapping):
-            payload["count"] = len(normalised_rules)
-    return payload
-
-
 _risk_rules_listener: PubSubListener | None = None
 _risk_rules_listener_started = False
 _risk_rules_listener_lock = asyncio.Lock()
@@ -488,15 +443,24 @@ async def _handle_risk_rules_pubsub(_: str, message: str) -> None:
         payload = {}
 
     if "rules" not in payload or not payload.get("rules"):
-        snapshot = await _load_cached_risk_rules()
-        if snapshot is not None:
-            payload.setdefault("rules", snapshot.get("rules"))
-            if snapshot.get("updated_at") is not None:
-                payload.setdefault("updated_at", snapshot.get("updated_at"))
-            if snapshot.get("source"):
-                payload.setdefault("source", snapshot.get("source"))
-            if snapshot.get("count") is not None:
-                payload.setdefault("count", snapshot.get("count"))
+        try:
+            service_snapshot = await _RISK_CLIENT.fetch_rules()
+        except ServiceUnavailableError:
+            service_snapshot = None
+        except ServiceClientError:
+            service_snapshot = None
+
+        if isinstance(service_snapshot, Mapping):
+            payload.setdefault(
+                "rules",
+                service_snapshot.get("rules") or service_snapshot.get("data"),
+            )
+            if service_snapshot.get("updated_at") is not None:
+                payload.setdefault("updated_at", service_snapshot.get("updated_at"))
+            payload.setdefault("source", "service")
+        elif isinstance(service_snapshot, list):
+            payload.setdefault("rules", service_snapshot)
+            payload.setdefault("source", "service")
 
     rules_payload = payload.get("rules")
     if rules_payload is not None:
@@ -2227,12 +2191,6 @@ async def websocket_endpoint(websocket: WebSocket):
                         rules_payload = service_response
                 elif isinstance(service_response, list):
                     rules_payload = service_response
-
-                if rules_payload is None:
-                    cached_snapshot = await _load_cached_risk_rules()
-                    if cached_snapshot is not None:
-                        rules_payload = cached_snapshot.get("rules") or cached_snapshot.get("data")
-                        source = cached_snapshot.get("source", "redis") or "redis"
 
                 if rules_payload is None:
                     payload = _service_unavailable_payload("risk_rules")

@@ -672,7 +672,7 @@ class OrdersRuntime:
             self._last_updated_at = _utc_now()
             entry_snapshot = _clone_order_record(entry)
         if entry_snapshot is not None:
-            persist_result = await self._persist_order_snapshot(
+            persist_result = await self._persist_order_record(
                 entry_snapshot,
                 timestamp=entry_snapshot.get("requested_at"),
                 mode="insert",
@@ -824,7 +824,7 @@ class OrdersRuntime:
             self._last_updated_at = timestamp_dt
 
         if record_snapshot is not None:
-            persist_result = await self._persist_order_snapshot(
+            persist_result = await self._persist_order_record(
                 record_snapshot,
                 timestamp=timestamp,
                 mode="update",
@@ -1301,7 +1301,7 @@ class OrdersRuntime:
         self._repository_failure_count += 1
         self._repository_last_error = message
 
-    async def _persist_order_snapshot(
+    async def _persist_order_record(
         self,
         record: Mapping[str, Any],
         *,
@@ -1335,7 +1335,7 @@ class OrdersRuntime:
                 return OrderPersistenceResult(not_found=True)
             self._record_repository_failure(str(exc))
             self.logger.warning(
-                "Failed to persist order snapshot to repository", exc_info=True
+                "Failed to persist order record to repository", exc_info=True
             )
             return OrderPersistenceResult()
         else:
@@ -1345,7 +1345,7 @@ class OrdersRuntime:
     async def _register_persisted_order_id(
         self,
         record_identifier: str,
-        snapshot: Mapping[str, Any],
+        payload: Mapping[str, Any],
         result: OrderPersistenceResult,
     ) -> None:
         inserted_id = result.inserted_id
@@ -1355,8 +1355,8 @@ class OrdersRuntime:
         if not identifier:
             return
         inserted_id_str = str(inserted_id)
-        command_id = _coerce_str(snapshot.get("command_id"))
-        order_id = _coerce_str(snapshot.get("order_id"))
+        command_id = _coerce_str(payload.get("command_id"))
+        order_id = _coerce_str(payload.get("order_id"))
 
         async with self._lock:
             record = self._active_orders.get(identifier)
@@ -1657,7 +1657,7 @@ class OrdersRuntime:
                 )
             return False
         if record_snapshot is not None:
-            persist_result = await self._persist_order_snapshot(
+            persist_result = await self._persist_order_record(
                 record_snapshot,
                 timestamp=event_time,
                 mode="update",
