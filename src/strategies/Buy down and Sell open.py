@@ -135,7 +135,7 @@ class BuyDownSellOpenStrategy(CandleSubscriptionStrategy):
                     try:
                         self._ensure_subscription()
                     except Exception as exc:
-                        self.logger.error("Failed to resubscribe after symbol change: {}", exc)
+                        self.logger.error("Failed to resubscribe after symbol change: %s", exc)
         for attr in ("default_quantity", "max_daily_buys", "buy_hour", "buy_minute", "sell_hour", "sell_minute"):
             if attr in applied:
                 setattr(self, attr, int(applied[attr]))
@@ -196,13 +196,13 @@ class BuyDownSellOpenStrategy(CandleSubscriptionStrategy):
         reason: str,
     ) -> bool:
         if not self.queue_manager:
-            self.logger.warning("Queue manager dependency missing; skip {} order", action)
+            self.logger.warning("Queue manager dependency missing; skip %s order", action)
             return False
         if self.risk_manager:
             ok, risk_reason = self.risk_manager.check_circuit_breaker_before_new_order()
             if not ok:
                 self.logger.warning(
-                    "Risk breaker blocked {} order", action.lower(), reason=risk_reason
+                    "Risk breaker blocked %s order", action.lower(), reason=risk_reason
                 )
                 return False
         quantity = max(1, int(self.default_quantity))
@@ -228,10 +228,10 @@ class BuyDownSellOpenStrategy(CandleSubscriptionStrategy):
         try:
             task_id = self.queue_manager.add_task("strategy_order", payload)
         except Exception as exc:
-            self.logger.error("Failed to enqueue {} order: {}", action, exc)
+            self.logger.error("Failed to enqueue %s order: %s", action, exc)
             return False
         self.logger.info(
-            "Queued {} order", action, task_id=task_id, price=price, quantity=quantity
+            "Queued %s order", action, task_id=task_id, price=price, quantity=quantity
         )
         return True
 

@@ -350,7 +350,7 @@ async def _load_settings(redis: Any) -> tuple[Dict[str, Any], Optional[str]]:
         try:
             data = await json_accessor().get(SETTINGS_STORE_KEY)
         except Exception as exc:  # pragma: no cover - redis module mismatch
-            logger.warning("Failed to load notification settings via RedisJSON: {}", exc)
+            logger.warning("Failed to load notification settings via RedisJSON: %s", exc)
 
     if data is None:
         try:
@@ -399,7 +399,7 @@ async def _persist_settings(redis: Any, settings: Mapping[str, Any]) -> Dict[str
             await json_accessor().set(SETTINGS_STORE_KEY, "$", record)
             stored = True
         except Exception as exc:  # pragma: no cover - redis module mismatch
-            logger.warning("Failed to persist notification settings via RedisJSON: {}", exc)
+            logger.warning("Failed to persist notification settings via RedisJSON: %s", exc)
 
     if not stored:
         try:

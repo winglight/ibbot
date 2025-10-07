@@ -94,7 +94,7 @@ class AccountSnapshotService:
             self._health_redis = await get_redis_client()
         except Exception as exc:
             snapshot_service_logger.warning(
-                "Failed to acquire Redis client for health updates: {}", exc
+                "Failed to acquire Redis client for health updates: %s", exc
             )
             self._health_redis = None
         return self._health_redis
@@ -168,7 +168,7 @@ class AccountSnapshotService:
             )
         except Exception as exc:
             snapshot_service_logger.warning(
-                "Startup account snapshot refresh failed: {}", exc
+                "Startup account snapshot refresh failed: %s", exc
             )
             await self._update_health(
                 healthy=False,
@@ -178,7 +178,7 @@ class AccountSnapshotService:
 
         self._task = loop.create_task(self._run_loop())
         snapshot_service_logger.info(
-            "Account snapshot service started (refresh_interval={}s, poll={}s, command_timeout={}s, refresh_timeout={}s)",
+            "Account snapshot service started (refresh_interval=%ss, poll=%ss, command_timeout=%ss, refresh_timeout=%ss)",
             self.refresh_interval_seconds,
             self._poll_interval_seconds,
             self._request_timeout_seconds,
@@ -596,7 +596,7 @@ class AccountSnapshotService:
         refreshed_text = to_local_iso(refreshed_at) if refreshed_at else "unknown"
         next_refresh = self._next_refresh_display(refreshed_at)
         snapshot_service_logger.info(
-            "{} snapshot updated (reason={}, source={}, refreshed_at={}, next_refresh={})",
+            "%s snapshot updated (reason=%s, source=%s, refreshed_at=%s, next_refresh=%s)",
             scope,
             reason,
             source,
@@ -628,7 +628,7 @@ class AccountSnapshotService:
         except IBCommandTimeout as exc:
             duration = time.perf_counter() - started
             snapshot_service_logger.warning(
-                "IB command {} timed out (command_id={}, duration={:.3f}s)",
+                "IB command %s timed out (command_id=%s, duration=%.3fs)",
                 method,
                 exc.command_id,
                 duration,
@@ -657,7 +657,7 @@ class AccountSnapshotService:
             duration = time.perf_counter() - started
             error_message = str(exc.payload.get("error") or str(exc))
             snapshot_service_logger.warning(
-                "IB command {} failed (command_id={}, duration={:.3f}s, error={})",
+                "IB command %s failed (command_id=%s, duration=%.3fs, error=%s)",
                 method,
                 exc.command_id,
                 duration,
@@ -685,7 +685,7 @@ class AccountSnapshotService:
         except Exception as exc:
             duration = time.perf_counter() - started
             snapshot_service_logger.warning(
-                "IB command {} raised unexpected error (duration={:.3f}s): {}",
+                "IB command %s raised unexpected error (duration=%.3fs): %s",
                 method,
                 duration,
                 exc,
@@ -707,7 +707,7 @@ class AccountSnapshotService:
         command_id = str(record.get("command_id") or "")
         result_payload = record.get("result")
         snapshot_service_logger.debug(
-            "IB command {} completed (command_id={}, duration={:.3f}s)",
+            "IB command %s completed (command_id=%s, duration=%.3fs)",
             method,
             command_id,
             duration,

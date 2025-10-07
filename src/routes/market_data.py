@@ -225,7 +225,7 @@ async def _fetch_chart_data_payload(request: ChartDataRequest) -> Dict[str, Any]
                 detail=exc.detail or "Market data service error",
             ) from exc
         except ServiceClientError as exc:
-            logger.error("Market data chart data request failed for {}: {}", request.symbol, exc)
+            logger.error("Market data chart data request failed for %s: %s", request.symbol, exc)
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     try:
@@ -302,7 +302,7 @@ async def run_market_backfill(
             raise HTTPException(status_code=502, detail="Market data service error") from exc
         raise HTTPException(status_code=exc.status_code, detail=exc.detail or "Market data service error") from exc
     except ServiceClientError as exc:
-        logger.error("Market data backfill request failed for {}: {}", request.symbol, exc)
+        logger.error("Market data backfill request failed for %s: %s", request.symbol, exc)
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     if not isinstance(result, Mapping):
@@ -340,7 +340,7 @@ async def proxy_market_storage(
             raise HTTPException(status_code=502, detail="Market data service error") from exc
         raise HTTPException(status_code=exc.status_code, detail=exc.detail or "Market data service error") from exc
     except ServiceClientError as exc:
-        logger.error("Market data storage request failed for {}: {}", symbol_clean, exc)
+        logger.error("Market data storage request failed for %s: %s", symbol_clean, exc)
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     if isinstance(result, Mapping):
@@ -378,7 +378,7 @@ async def get_realtime_data(
             detail=exc.detail or "Market data service error",
         )
     except ServiceClientError as exc:
-        logger.error("Market data realtime request failed for {}: {}", symbol, exc)
+        logger.error("Market data realtime request failed for %s: %s", symbol, exc)
         raise HTTPException(status_code=502, detail=str(exc))
 
     if isinstance(result, httpx.Response):
@@ -425,7 +425,7 @@ async def get_current_price(
             detail=exc.detail or "Market data service error",
         ) from exc
     except ServiceClientError as exc:
-        logger.error("Market data current price request failed for {}: {}", request.symbol, exc)
+        logger.error("Market data current price request failed for %s: %s", request.symbol, exc)
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     if isinstance(payload, Mapping):
@@ -489,7 +489,7 @@ async def proxy_market_data_stream(websocket: WebSocket) -> None:
     except WebSocketDisconnect:
         pass
     except Exception as exc:
-        logger.error("Market data websocket proxy error: {}", exc)
+        logger.error("Market data websocket proxy error: %s", exc)
         with contextlib.suppress(Exception):
             await websocket.send_json(
                 {"type": "error", "detail": "Market data service unavailable"}

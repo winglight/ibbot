@@ -78,11 +78,11 @@ class CandleSubscriptionStrategy(BaseStrategy):
                 )
                 self._start_retry_thread()
                 return True
-            self.logger.error("Failed to initialise candle subscription: {}", exc)
+            self.logger.error("Failed to initialise candle subscription: %s", exc)
             super().stop()
             return False
         except Exception as exc:
-            self.logger.error("Failed to initialise candle subscription: {}", exc)
+            self.logger.error("Failed to initialise candle subscription: %s", exc)
             super().stop()
             return False
         return True
@@ -149,12 +149,12 @@ class CandleSubscriptionStrategy(BaseStrategy):
             try:
                 manager.event_bus.unsubscribe(self._event_token)
             except Exception as exc:  # pragma: no cover - defensive guard
-                self.logger.debug("Failed to unsubscribe event bus: {}", exc)
+                self.logger.debug("Failed to unsubscribe event bus: %s", exc)
         if self._subscription_token is not None:
             try:
                 self._run_coro(manager.unsubscribe(self._subscription_token))
             except Exception as exc:  # pragma: no cover - defensive guard
-                self.logger.debug("Failed to cancel data subscription: {}", exc)
+                self.logger.debug("Failed to cancel data subscription: %s", exc)
         self._subscription_token = None
         self._event_token = None
 
@@ -261,7 +261,7 @@ class CandleSubscriptionStrategy(BaseStrategy):
         try:
             self.on_candle(candle)
         except Exception as exc:  # pragma: no cover - defensive guard
-            self.logger.exception("Candle handler failed: {}", exc)
+            self.logger.exception("Candle handler failed: %s", exc)
 
     # ------------------------------------------------------------------
     def on_candle(self, candle: Dict[str, float]) -> None:  # pragma: no cover - hook

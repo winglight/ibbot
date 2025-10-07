@@ -187,7 +187,7 @@ async def _connection_module_fallback(module: str) -> dict[str, Any] | None:
     try:
         config = await _load_ib_connection_config()
     except Exception as exc:  # pragma: no cover - defensive guard
-        logger.debug("Failed to load fallback connection config: {}", exc)
+        logger.debug("Failed to load fallback connection config: %s", exc)
         return None
 
     if not isinstance(config, Mapping):

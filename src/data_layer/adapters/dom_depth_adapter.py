@@ -92,7 +92,7 @@ class DomDepthAdapter(DataSourceAdapter):
                 try:
                     self._depth_subscriber.stop_depth_stream(symbol)
                 except Exception as exc:  # pragma: no cover - defensive guard
-                    logger.debug("Failed to stop depth stream during force_restart: {}", exc)
+                    logger.debug("Failed to stop depth stream during force_restart: %s", exc)
 
             start_fn = getattr(self._depth_subscriber, "start_depth_stream")
             kwargs = {"num_rows": num_rows}
@@ -209,7 +209,7 @@ class DomDepthAdapter(DataSourceAdapter):
                         self._loop = None
                         loop = None
                     else:  # pragma: no cover - defensive guard
-                        logger.exception("Failed to dispatch DOM depth publish: {}", exc)
+                        logger.exception("Failed to dispatch DOM depth publish: %s", exc)
                         return
 
             if running_loop and running_loop.is_running():
@@ -229,6 +229,6 @@ class DomDepthAdapter(DataSourceAdapter):
 
             asyncio.run(self.event_bus.publish(envelope))
         except RuntimeError as exc:
-            logger.debug("DOM depth publish fallback failed: {}", exc)
+            logger.debug("DOM depth publish fallback failed: %s", exc)
         except Exception as exc:  # pragma: no cover - defensive guard
-            logger.exception("Failed to publish DOM depth event: {}", exc)
+            logger.exception("Failed to publish DOM depth event: %s", exc)

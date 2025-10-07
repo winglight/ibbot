@@ -63,11 +63,11 @@ def _read_timeout_setting(env_name: str, *, multiplier: float = 1.0):
     try:
         value = float(raw)
     except ValueError:
-        logger.warning("Invalid {} value {!r}; ignoring", env_name, raw)
+        logger.warning("Invalid %s value %r; ignoring", env_name, raw)
         return _UNSET
     value *= multiplier
     if value <= 0:
-        logger.warning("{} must be positive; disabling timeout", env_name)
+        logger.warning("%s must be positive; disabling timeout", env_name)
         return None
     return value
 
