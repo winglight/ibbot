@@ -183,9 +183,20 @@ class OptimizerApp {
         this.refreshButton = document.getElementById('btn-refresh');
         this.refreshMetadataButton = document.getElementById('btn-refresh-metadata');
         this.newPlanButton = document.getElementById('btn-new-plan');
+        this.domCoverageForm = document.getElementById('dom-coverage-form');
+        this.domCoverageSymbolInput = document.getElementById('dom-coverage-symbol');
+        this.domCoverageLimitInput = document.getElementById('dom-coverage-limit');
+        this.domCoverageSubmitButton = document.getElementById('dom-coverage-submit');
+        this.domCoverageStatus = document.getElementById('dom-coverage-status');
+        this.domCoverageSummary = document.getElementById('dom-coverage-summary');
+        this.domCoverageTableWrapper = document.getElementById('dom-coverage-table-wrapper');
+        this.domCoverageTableBody = document.querySelector('#dom-coverage-table tbody');
         this.state = {
             metadata: { base_metrics: [], feature_metrics: [], algorithms: [] },
             plans: [],
+            domCoverage: null,
+            domCoverageLoading: false,
+            domCoverageError: null,
         };
     }
 
@@ -216,10 +227,56 @@ class OptimizerApp {
         return FormatUtils.drawdown(value, digits);
     }
 
+    formatInteger(value) {
+        if (value === null || value === undefined) {
+            return '-';
+        }
+        const num = Number(value);
+        if (!Number.isFinite(num)) {
+            return '-';
+        }
+        return Math.round(num).toLocaleString();
+    }
+
+    formatDateTime(isoString) {
+        if (!isoString) {
+            return '-';
+        }
+        const date = new Date(isoString);
+        if (!Number.isFinite(date.getTime())) {
+            return typeof isoString === 'string' ? isoString : '-';
+        }
+        return date.toLocaleString();
+    }
+
+    formatBytes(bytes) {
+        if (bytes === null || bytes === undefined) {
+            return '-';
+        }
+        const size = Number(bytes);
+        if (!Number.isFinite(size) || size < 0) {
+            return '-';
+        }
+        if (size < 1024) {
+            return `${Math.round(size)} B`;
+        }
+        const units = ['KB', 'MB', 'GB', 'TB'];
+        let value = size;
+        let unitIndex = -1;
+        while (value >= 1024 && unitIndex < units.length - 1) {
+            value /= 1024;
+            unitIndex += 1;
+        }
+        const unit = units[Math.max(unitIndex, 0)] || 'KB';
+        const formatted = value >= 100 ? Math.round(value) : value.toFixed(1);
+        return `${formatted} ${unit}`;
+    }
+
     async init() {
         await Promise.all([this.loadMetadata(), this.loadPlans()]);
         this.renderMetadataTags();
         this.renderPlanTable();
+        this.renderDomCoverage();
         this.attachEvents();
     }
 
@@ -235,6 +292,12 @@ class OptimizerApp {
         }
         if (this.newPlanButton) {
             this.newPlanButton.addEventListener('click', () => this.openPlanDialog());
+        }
+        if (this.domCoverageForm) {
+            this.domCoverageForm.addEventListener('submit', (event) => {
+                event.preventDefault();
+                this.handleDomCoverageSubmit();
+            });
         }
         const table = document.getElementById('plan-table');
         if (table) {
@@ -253,6 +316,221 @@ class OptimizerApp {
     async handleRefresh() {
         await this.loadPlans(true);
         this.renderPlanTable();
+    }
+
+    async handleDomCoverageSubmit() {
+        if (!this.domCoverageSymbolInput) {
+            return;
+        }
+        const symbol = this.domCoverageSymbolInput.value.trim();
+        let limit = 5;
+        if (this.domCoverageLimitInput) {
+            const parsed = Number.parseInt(this.domCoverageLimitInput.value, 10);
+            if (Number.isFinite(parsed)) {
+                limit = Math.trunc(parsed);
+            }
+        }
+        if (limit < 0) limit = 0;
+        if (limit > 100) limit = 100;
+        if (this.domCoverageLimitInput) {
+            this.domCoverageLimitInput.value = String(limit);
+        }
+        if (!symbol) {
+            this.state.domCoverage = null;
+            this.state.domCoverageError = '请输入需要检查的标的符号';
+            this.state.domCoverageLoading = false;
+            this.renderDomCoverage();
+            return;
+        }
+
+        this.state.domCoverageLoading = true;
+        this.state.domCoverageError = null;
+        this.renderDomCoverage();
+
+        try {
+            const params = new URLSearchParams({ symbol, limit: String(limit) });
+            const response = await fetch(`/api/optimize/dom/coverage?${params.toString()}`);
+            if (!response.ok) {
+                let message = `请求失败（${response.status}）`;
+                try {
+                    const text = (await response.text()).trim();
+                    if (text) {
+                        try {
+                            const parsed = JSON.parse(text);
+                            if (parsed && typeof parsed.detail === 'string' && parsed.detail.trim()) {
+                                message = parsed.detail.trim();
+                            } else {
+                                message = text;
+                            }
+                        } catch (err) {
+                            message = text;
+                        }
+                    }
+                } catch (readError) {
+                    console.warn('无法解析 DOM 覆盖错误响应', readError);
+                }
+                throw new Error(message);
+            }
+            const data = await response.json();
+            this.state.domCoverage = data;
+            this.state.domCoverageError = null;
+            if (this.domCoverageSymbolInput && data && data.symbol) {
+                this.domCoverageSymbolInput.value = data.symbol;
+            }
+        } catch (error) {
+            console.error(error);
+            let message = '查询失败，请稍后重试。';
+            if (error && typeof error === 'object' && 'message' in error && error.message) {
+                message = error.message;
+            } else if (typeof error === 'string' && error.trim()) {
+                message = error.trim();
+            }
+            this.state.domCoverage = null;
+            this.state.domCoverageError = message;
+        } finally {
+            this.state.domCoverageLoading = false;
+            this.renderDomCoverage();
+        }
+    }
+
+    renderDomCoverage() {
+        if (this.domCoverageSubmitButton) {
+            this.domCoverageSubmitButton.disabled = this.state.domCoverageLoading;
+            this.domCoverageSubmitButton.textContent = this.state.domCoverageLoading ? '检查中...' : '检查覆盖';
+        }
+
+        const coverage = this.state.domCoverage;
+        const error = this.state.domCoverageError;
+        const loading = this.state.domCoverageLoading;
+        const symbolInput = this.domCoverageSymbolInput ? this.domCoverageSymbolInput.value.trim() : '';
+
+        if (this.domCoverageStatus) {
+            let message;
+            let statusClass = '';
+            if (loading) {
+                const displaySymbol = (coverage && coverage.symbol) || symbolInput || 'DOM';
+                message = `正在检查 ${displaySymbol} 的 DOM 覆盖情况...`;
+                statusClass = 'dom-coverage-status--loading';
+            } else if (error) {
+                message = error;
+                statusClass = 'dom-coverage-status--error';
+            } else if (coverage) {
+                if (!coverage.file_count) {
+                    message = `${coverage.symbol} 没有检测到 DOM 文件，请确认订阅或执行回补。`;
+                    statusClass = 'dom-coverage-status--error';
+                } else {
+                    message = `已加载 ${coverage.symbol} 的 DOM 覆盖信息，显示 ${coverage.displayed_files}/${coverage.file_count} 个文件。`;
+                    statusClass = 'dom-coverage-status--success';
+                }
+            } else {
+                message = '请输入标的符号并点击“检查覆盖”查看 DOM 数据范围。';
+            }
+            const safeMessage = HtmlUtils.escape(message || '');
+            this.domCoverageStatus.innerHTML = statusClass
+                ? `<span class="${statusClass}">${safeMessage}</span>`
+                : safeMessage;
+        }
+
+        if (this.domCoverageSummary) {
+            if (coverage) {
+                const range = this.formatCoverageRange(coverage);
+                const summaryHtml = [
+                    this.renderDomCoverageSummaryItem('标的', coverage.symbol || '-'),
+                    this.renderDomCoverageSummaryItem('覆盖区间', range),
+                    this.renderDomCoverageSummaryItem(
+                        '文件（显示/总计）',
+                        `${coverage.displayed_files} / ${coverage.file_count}`
+                    ),
+                    this.renderDomCoverageSummaryItem('总行数', this.formatInteger(coverage.total_rows)),
+                    this.renderDomCoverageSummaryItem('存储目录', coverage.storage_root || '-', { monospace: true }),
+                ].join('');
+                this.domCoverageSummary.innerHTML = summaryHtml;
+                this.domCoverageSummary.hidden = false;
+            } else {
+                this.domCoverageSummary.hidden = true;
+                this.domCoverageSummary.innerHTML = '';
+            }
+        }
+
+        if (this.domCoverageTableWrapper && this.domCoverageTableBody) {
+            if (coverage && Array.isArray(coverage.files) && coverage.files.length) {
+                this.domCoverageTableBody.innerHTML = coverage.files
+                    .map((file) => this.renderDomCoverageRow(file))
+                    .join('');
+                this.domCoverageTableWrapper.hidden = false;
+            } else {
+                this.domCoverageTableBody.innerHTML = '';
+                this.domCoverageTableWrapper.hidden = true;
+            }
+        }
+    }
+
+    formatCoverageRange(coverage) {
+        if (!coverage) {
+            return '-';
+        }
+        const start = this.formatDateTime(coverage.earliest_iso);
+        const end = this.formatDateTime(coverage.latest_iso);
+        const hasStart = start && start !== '-';
+        const hasEnd = end && end !== '-';
+        if (!hasStart && !hasEnd) {
+            return '未知';
+        }
+        if (!hasStart) {
+            return `未知 → ${end}`;
+        }
+        if (!hasEnd) {
+            return `${start} → 未知`;
+        }
+        if (start === end) {
+            return start;
+        }
+        return `${start} → ${end}`;
+    }
+
+    renderDomCoverageSummaryItem(label, value, options = {}) {
+        const { monospace = false } = options;
+        const safeLabel = HtmlUtils.escape(label || '');
+        let display = value;
+        if (display === null || display === undefined || display === '') {
+            display = '-';
+        }
+        const safeValue = monospace
+            ? `<code>${HtmlUtils.escape(String(display))}</code>`
+            : HtmlUtils.escape(String(display));
+        return `
+            <div class="dom-coverage-summary-item">
+                <span class="dom-coverage-summary-label">${safeLabel}</span>
+                <span class="dom-coverage-summary-value">${safeValue}</span>
+            </div>
+        `;
+    }
+
+    renderDomCoverageRow(file) {
+        if (!file) {
+            return '';
+        }
+        const name = HtmlUtils.escape(file.file || file.path || '未知文件');
+        const path = file.path ? HtmlUtils.escape(file.path) : '';
+        const start = HtmlUtils.escape(this.formatDateTime(file.start_iso));
+        const end = HtmlUtils.escape(this.formatDateTime(file.end_iso));
+        const modified = HtmlUtils.escape(this.formatDateTime(file.modified_iso));
+        const rows = HtmlUtils.escape(this.formatInteger(file.rows));
+        const size = HtmlUtils.escape(this.formatBytes(file.size));
+        const pathBlock = path ? `<div class="dom-coverage-file-path">${path}</div>` : '';
+        return `
+            <tr>
+                <td>
+                    <div>${name}</div>
+                    ${pathBlock}
+                </td>
+                <td>${start}</td>
+                <td>${end}</td>
+                <td>${rows}</td>
+                <td>${modified}</td>
+                <td>${size}</td>
+            </tr>
+        `;
     }
 
     async loadMetadata(force = false) {

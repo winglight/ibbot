@@ -502,6 +502,32 @@ class OptimizerDataRangeResponse(BaseModel):
     records: Optional[int]
 
 
+class OptimizerDomFileSegment(BaseModel):
+    file: str
+    path: str
+    size: int
+    rows: Optional[int] = None
+    start_ns: Optional[int] = None
+    end_ns: Optional[int] = None
+    modified_ns: Optional[int] = None
+    start_iso: Optional[str] = None
+    end_iso: Optional[str] = None
+    modified_iso: Optional[str] = None
+
+
+class OptimizerDomCoverageResponse(BaseModel):
+    symbol: str
+    storage_root: str
+    file_count: int
+    displayed_files: int
+    total_rows: int
+    earliest_ns: Optional[int] = None
+    latest_ns: Optional[int] = None
+    earliest_iso: Optional[str] = None
+    latest_iso: Optional[str] = None
+    files: List[OptimizerDomFileSegment]
+
+
 def as_threshold_parameter_set(value: Any) -> ThresholdParameterSet:
     if isinstance(value, ThresholdParameterSet):
         return value

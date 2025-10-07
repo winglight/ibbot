@@ -58,6 +58,17 @@
         return String(value);
     }
 
+    function formatNumber(value) {
+        const num = Number(value);
+        if (Number.isFinite(num)) {
+            return num.toLocaleString();
+        }
+        if (value === null || value === undefined) {
+            return '';
+        }
+        return String(value);
+    }
+
     function createRunbookManager() {
         const card = document.getElementById('websocketRunbookCard');
         const statusBadge = document.getElementById('websocketRunbookStatusBadge');
@@ -242,16 +253,21 @@
 
                 const extra = { ...details };
                 delete extra.message;
-                const keys = Object.keys(extra);
-                if (keys.length) {
-                    const pre = document.createElement('pre');
-                    pre.className = 'small bg-light border rounded p-2 mb-0';
-                    try {
-                        pre.textContent = JSON.stringify(extra, null, 2);
-                    } catch (error) {
-                        pre.textContent = String(extra);
+                const detailFragment = this.renderTaskDetails(task, extra);
+                if (detailFragment) {
+                    li.appendChild(detailFragment);
+                } else {
+                    const keys = Object.keys(extra);
+                    if (keys.length) {
+                        const pre = document.createElement('pre');
+                        pre.className = 'small bg-light border rounded p-2 mb-0';
+                        try {
+                            pre.textContent = JSON.stringify(extra, null, 2);
+                        } catch (error) {
+                            pre.textContent = String(extra);
+                        }
+                        li.appendChild(pre);
                     }
-                    li.appendChild(pre);
                 }
 
                 const metaParts = [];
@@ -269,6 +285,184 @@
                 }
 
                 return li;
+            },
+
+            renderTaskDetails(task, details) {
+                if (!details || typeof details !== 'object') {
+                    return null;
+                }
+                const taskId = task?.id || '';
+                if (taskId === 'realtime-price') {
+                    return this.renderRealtimeDetails(details);
+                }
+                if (taskId === 'dom-depth') {
+                    return this.renderDomDetails(details);
+                }
+                return null;
+            },
+
+            renderRealtimeDetails(details) {
+                const container = document.createElement('div');
+                container.className = 'w-100';
+                const list = document.createElement('ul');
+                list.className = 'small mb-0 list-unstyled';
+                container.appendChild(list);
+
+                let appended = false;
+                const appendLine = (text) => {
+                    if (!text) return;
+                    const li = document.createElement('li');
+                    li.textContent = text;
+                    list.appendChild(li);
+                    appended = true;
+                };
+
+                if (details.symbol) {
+                    appendLine(`Symbol：${details.symbol}`);
+                }
+
+                if (details.wait_seconds !== undefined) {
+                    appendLine(`检测窗口：${formatNumber(details.wait_seconds)} 秒`);
+                }
+
+                if (details.snapshot) {
+                    const snapshot = details.snapshot || {};
+                    const parts = [];
+                    if (snapshot.timestamp) {
+                        parts.push(`时间 ${formatTimestamp(snapshot.timestamp)}`);
+                    }
+                    if (snapshot.last !== undefined) {
+                        parts.push(`Last ${formatNumber(snapshot.last)}`);
+                    }
+                    if (snapshot.bid !== undefined || snapshot.ask !== undefined) {
+                        const bidText = snapshot.bid !== undefined ? formatNumber(snapshot.bid) : '-';
+                        const askText = snapshot.ask !== undefined ? formatNumber(snapshot.ask) : '-';
+                        parts.push(`Bid ${bidText} / Ask ${askText}`);
+                    }
+                    appendLine(`快照：${parts.length ? parts.join(' · ') : '无'}`);
+                }
+
+                if (details.event) {
+                    const eventData = details.event || {};
+                    const eventParts = [];
+                    if (eventData.timestamp) {
+                        eventParts.push(`时间 ${formatTimestamp(eventData.timestamp)}`);
+                    }
+                    if (eventData.source) {
+                        eventParts.push(`来源 ${eventData.source}`);
+                    }
+                    appendLine(`推送：${eventParts.length ? eventParts.join(' · ') : '未收到'}`);
+                }
+
+                if (!appended) {
+                    return null;
+                }
+                return container;
+            },
+
+            renderDomDetails(details) {
+                const container = document.createElement('div');
+                container.className = 'w-100';
+                const list = document.createElement('ul');
+                list.className = 'small mb-0 list-unstyled';
+                container.appendChild(list);
+
+                let appended = false;
+                const appendLine = (text) => {
+                    if (!text) return;
+                    const li = document.createElement('li');
+                    li.textContent = text;
+                    list.appendChild(li);
+                    appended = true;
+                };
+
+                if (details.symbol) {
+                    appendLine(`Symbol：${details.symbol}`);
+                }
+
+                if (details.requested_rows !== undefined) {
+                    appendLine(`订阅深度：${formatNumber(details.requested_rows)} 行`);
+                }
+
+                if (details.wait_seconds !== undefined) {
+                    appendLine(`检测窗口：${formatNumber(details.wait_seconds)} 秒`);
+                }
+
+                if (details.snapshot) {
+                    const snapshot = details.snapshot || {};
+                    const parts = [];
+                    if (snapshot.timestamp) {
+                        parts.push(`时间 ${formatTimestamp(snapshot.timestamp)}`);
+                    }
+                    if (snapshot.bid_levels !== undefined || snapshot.ask_levels !== undefined) {
+                        const bid = snapshot.bid_levels ?? 0;
+                        const ask = snapshot.ask_levels ?? 0;
+                        parts.push(`层级 Bid ${formatNumber(bid)} / Ask ${formatNumber(ask)}`);
+                    }
+                    appendLine(`缓存快照：${parts.length ? parts.join(' · ') : '无'}`);
+                }
+
+                if (details.event) {
+                    const eventData = details.event || {};
+                    const eventParts = [];
+                    if (eventData.timestamp) {
+                        eventParts.push(`时间 ${formatTimestamp(eventData.timestamp)}`);
+                    }
+                    if (eventData.source) {
+                        eventParts.push(`来源 ${eventData.source}`);
+                    }
+                    appendLine(`实时推送：${eventParts.length ? eventParts.join(' · ') : '未收到'}`);
+                }
+
+                if (details.storage) {
+                    const storage = details.storage || {};
+                    const storageParts = [];
+                    if (storage.total_rows !== undefined) {
+                        storageParts.push(`快照 ${formatNumber(storage.total_rows)}`);
+                    }
+                    if (storage.total_files !== undefined) {
+                        storageParts.push(`文件 ${formatNumber(storage.total_files)}`);
+                    }
+                    if (storage.earliest || storage.latest) {
+                        storageParts.push(`覆盖 ${formatTimestamp(storage.earliest)} ~ ${formatTimestamp(storage.latest)}`);
+                    }
+                    if (storage.error) {
+                        storageParts.push(`错误 ${storage.error}`);
+                    }
+                    appendLine(`落盘：${storageParts.length ? storageParts.join(' · ') : '未发现文件'}`);
+                }
+
+                if (details.cache) {
+                    const cache = details.cache || {};
+                    const cacheParts = [];
+                    if (cache.total_snapshots !== undefined) {
+                        cacheParts.push(`快照 ${formatNumber(cache.total_snapshots)}`);
+                    }
+                    if (cache.total_metrics !== undefined) {
+                        cacheParts.push(`指标 ${formatNumber(cache.total_metrics)}`);
+                    }
+                    const metricTimestamp = cache.latest_metric?.timestamp_iso || cache.latest_metric?.timestamp;
+                    if (metricTimestamp) {
+                        cacheParts.push(`最新指标 ${formatTimestamp(metricTimestamp)}`);
+                    }
+                    if (cache.error) {
+                        cacheParts.push(`错误 ${cache.error}`);
+                    }
+                    appendLine(`缓存：${cacheParts.length ? cacheParts.join(' · ') : '暂无数据'}`);
+                }
+
+                if (details.note) {
+                    const note = document.createElement('div');
+                    note.className = 'text-info small';
+                    note.textContent = details.note;
+                    container.appendChild(note);
+                    appended = true;
+                }
+
+                if (!appended) {
+                    return null;
+                }
+                return container;
             },
         };
     }

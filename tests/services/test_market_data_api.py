@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import time
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-import inspect
+from pathlib import Path
 from typing import Any, Iterable, Mapping
 from zoneinfo import ZoneInfo
 
@@ -73,8 +75,23 @@ class FakeRedis:
             values[str(field)] = str(value)
         return len(mapping)
 
-    async def hgetall(self, key: str) -> dict[str, str]:
-        return dict(self.hashes.get(key, {}))
+    async def llen(self, key: str) -> int:
+        return len(self.series.get(key, []))
+
+    async def lindex(self, key: str, index: int) -> Any:
+        values = self.series.get(key, [])
+        length = len(values)
+        if length == 0:
+            return None
+        if index < 0:
+            index += length
+        if index < 0 or index >= length:
+            return None
+        return values[index]
+
+    async def hget(self, key: str, field: str) -> Any:
+        mapping = self.hashes.get(key, {})
+        return mapping.get(str(field))
 
     def set_series(self, key: str, values: Iterable[Mapping[str, Any]]) -> None:
         payloads: list[str] = []
@@ -699,6 +716,181 @@ def test_chart_data_returns_503_on_backend_error() -> None:
 
         assert response.status_code == 503
         assert response.json()["detail"] == "Market data cache unavailable"
+
+
+def test_dom_storage_endpoint_returns_summary(monkeypatch: pytest.MonkeyPatch) -> None:
+    redis = FakeRedis()
+    repository = RecordingRepository()
+    runtime = _build_runtime(redis, repository, symbols=["ES"])
+
+    import services.market_data.main as market_main
+
+    redis.hashes["hash:market:snapshot:ES"] = {
+        "dom": json.dumps({"timestamp": "2023-01-01T00:00:00+00:00", "bids": [], "asks": []}),
+        "dom_updated_at": "2023-01-01T00:00:01+00:00",
+    }
+
+    monkeypatch.setattr(
+        market_main,
+        "_summarise_dom_storage",
+        lambda writer, symbol: {
+            "total_rows": 42,
+            "files": [],
+            "earliest": "2023-01-01T00:00:00+00:00",
+            "latest": "2023-01-01T01:00:00+00:00",
+        },
+    )
+    monkeypatch.setattr(
+        market_main,
+        "_summarise_dom_cache",
+        lambda symbol: {
+            "total_snapshots": 5,
+            "total_metrics": 5,
+            "latest_metric": {"timestamp_iso": "2023-01-01T00:05:00+00:00"},
+        },
+    )
+
+    with _start_client(runtime) as client:
+        response = client.get("/dom/storage", params={"symbol": "ES"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["success"] is True
+    assert payload["symbol"] == "ES"
+    assert payload["cache"]["total_snapshots"] == 5
+    assert payload["parquet"]["total_rows"] == 42
+
+
+def test_dom_backfill_endpoint_persists_snapshots(monkeypatch: pytest.MonkeyPatch) -> None:
+    redis = FakeRedis()
+    repository = RecordingRepository()
+    runtime = _build_runtime(redis, repository, symbols=["ES"])
+
+    import services.market_data.main as market_main
+
+    class DummyWriter:
+        def __init__(self) -> None:
+            self.base_dir = Path("/tmp")
+            self.appended: list[tuple[str, Mapping[str, Any]]] = []
+
+        def append_dom(self, symbol: str, snapshot: Mapping[str, Any]) -> None:
+            self.appended.append((symbol, dict(snapshot)))
+
+    dummy_writer = DummyWriter()
+
+    async def fake_fetch(request, *, start_dt, end_dt, logger):  # type: ignore[override]
+        return {
+            "snapshots": [
+                {
+                    "symbol": request.symbol,
+                    "timestamp": "2023-01-01T00:00:00+00:00",
+                    "timestamp_ns": 1_000_000_000,
+                    "bids": [],
+                    "asks": [],
+                }
+            ],
+            "status": "ok",
+            "message": "ok",
+        }
+
+    monkeypatch.setattr(market_main, "_ensure_parquet_writer", lambda logger: dummy_writer)
+    monkeypatch.setattr(market_main, "_fetch_dom_history_from_ib", fake_fetch)
+    monkeypatch.setattr(
+        market_main,
+        "_summarise_dom_storage",
+        lambda writer, symbol: {
+            "total_rows": len(dummy_writer.appended),
+            "files": [],
+            "earliest": "2023-01-01T00:00:00+00:00",
+            "latest": "2023-01-01T00:00:00+00:00",
+        },
+    )
+    monkeypatch.setattr(
+        market_main,
+        "_summarise_dom_cache",
+        lambda symbol: {
+            "total_snapshots": 1,
+            "total_metrics": 1,
+            "latest_metric": {"timestamp_iso": "2023-01-01T00:00:00+00:00"},
+        },
+    )
+    monkeypatch.setattr(
+        market_main,
+        "_summarise_dom_snapshot",
+        lambda redis_client, symbol: {"has_snapshot": False},
+    )
+
+    with _start_client(runtime) as client:
+        response = client.post(
+            "/dom/backfill",
+            json={"symbol": "ES", "duration": "1 D"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["success"] is True
+    assert payload["count"] == 1
+    assert dummy_writer.appended and dummy_writer.appended[0][0] == "ES"
+
+
+def test_summarise_dom_cache_handles_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    import services.market_data.main as market_main
+
+    def _raise(*_: Any, **__: Any) -> None:
+        raise RuntimeError("cache boom")
+
+    monkeypatch.setattr(market_main.dom_service, "get_history", _raise)
+
+    summary = market_main._summarise_dom_cache("ES")
+    assert summary["total_snapshots"] == 0
+    assert summary["total_metrics"] == 0
+    assert summary["latest_metric"] is None
+    assert summary["error"] == "cache boom"
+
+
+@pytest.mark.asyncio
+async def test_fetch_dom_history_respects_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    import services.market_data.main as market_main
+
+    request = market_main.DomBackfillRequest(symbol="ES", duration="1 D", limit=2)
+    start_dt = datetime(2023, 1, 1, tzinfo=timezone.utc)
+    end_dt = start_dt + timedelta(minutes=5)
+
+    class DummyClient:
+        connected = True
+
+        def get_dom_history(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+            return [
+                {"timestamp_ns": 1_000_000_000, "bids": [], "asks": []},
+                {"timestamp_ns": 2_000_000_000, "bids": [], "asks": []},
+                {"timestamp_ns": 3_000_000_000, "bids": [], "asks": []},
+            ]
+
+    @asynccontextmanager
+    async def fake_lock(_: Any) -> Any:
+        yield
+
+    async def fake_client(_: Any) -> DummyClient:
+        return DummyClient()
+
+    async def fake_connected(_: Any, __: Any) -> bool:
+        return True
+
+    monkeypatch.setattr(market_main, "IB_FALLBACK_ENABLED", True)
+    monkeypatch.setattr(market_main, "_exclusive_ib_fetch", fake_lock)
+    monkeypatch.setattr(market_main, "_ensure_ib_client", fake_client)
+    monkeypatch.setattr(market_main, "_ensure_ib_connected", fake_connected)
+
+    result = await market_main._fetch_dom_history_from_ib(
+        request,
+        start_dt=start_dt,
+        end_dt=end_dt,
+        logger=None,
+    )
+
+    assert result["status"] == "ok"
+    timestamps = [item["timestamp_ns"] for item in result["snapshots"]]
+    assert timestamps == [2_000_000_000, 3_000_000_000]
 
 
 def test_market_historical_returns_series_payload() -> None:

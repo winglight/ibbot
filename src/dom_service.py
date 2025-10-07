@@ -9,7 +9,7 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from threading import Lock
-from typing import Any, Awaitable, Callable, DefaultDict, Dict, List, Optional
+from typing import Any, Awaitable, Callable, DefaultDict, Dict, List, Mapping, Optional
 from zoneinfo import ZoneInfo
 
 from loguru import logger
@@ -1137,6 +1137,66 @@ class DOMService:
             end_time=end_time,
             include_snapshots=include_snapshots,
         )
+
+    # --------------------------------------------------------------
+    def ingest_backfill_snapshot(
+        self,
+        symbol: str,
+        snapshot: Mapping[str, Any],
+        *,
+        source: str = "backfill",
+    ) -> None:
+        if not symbol or not snapshot:
+            return
+
+        symbol_key = symbol.strip().upper()
+        if not symbol_key:
+            return
+
+        bids = [dict(entry) for entry in snapshot.get("bids", []) or []]
+        asks = [dict(entry) for entry in snapshot.get("asks", []) or []]
+
+        ts_ns = snapshot.get("timestamp_ns") or snapshot.get("ts_ns")
+        if not isinstance(ts_ns, int):
+            timestamp_value = snapshot.get("timestamp")
+            parsed_ns: Optional[int] = None
+            if isinstance(timestamp_value, (int, float)):
+                parsed_ns = int(float(timestamp_value) * 1_000_000_000)
+            elif isinstance(timestamp_value, str):
+                text = timestamp_value.strip()
+                if text.endswith("Z"):
+                    text = text[:-1] + "+00:00"
+                try:
+                    dt_candidate = datetime.fromisoformat(text)
+                except Exception:  # pragma: no cover - defensive guard
+                    dt_candidate = None
+                if dt_candidate is not None:
+                    if dt_candidate.tzinfo is None:
+                        dt_candidate = dt_candidate.replace(tzinfo=UTC_TZ)
+                    parsed_ns = int(dt_candidate.timestamp() * 1_000_000_000)
+            ts_ns = parsed_ns if parsed_ns is not None else time.time_ns()
+
+        timestamp_iso = _to_local_iso(snapshot.get("timestamp") or (ts_ns / 1_000_000))
+        normalized_snapshot = {
+            "symbol": symbol_key,
+            "bids": bids,
+            "asks": asks,
+            "timestamp": timestamp_iso,
+            "timestamp_ns": ts_ns,
+            "ts_ns": ts_ns,
+        }
+
+        metrics_payload = {
+            "symbol": symbol_key,
+            "timestamp": ts_ns / 1_000_000.0,
+            "source": source,
+            "snapshot_type": "dom",
+            "bid_levels": len(bids),
+            "ask_levels": len(asks),
+        }
+
+        self._cache.append(symbol_key, normalized_snapshot, metrics_payload)
+        self._stats.mark_dirty(symbol_key)
 
     # --------------------------------------------------------------
     def get_config(self) -> Dict[str, Any]:

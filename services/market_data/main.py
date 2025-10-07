@@ -13,16 +13,16 @@ from collections import defaultdict
 from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Awaitable, Callable, Dict, Mapping, Sequence, Optional, List, Tuple
+from typing import Any, Awaitable, Callable, Dict, Mapping, Sequence, Optional, List, Set, Tuple
 
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from src.ibbot import update_service_health
-from src.ibbot.storage.parquet_writer import MarketDataParquetWriter
+from src.ibbot.storage import MarketDataParquetWriter, summarise_dom_directory
 from src.ibbot.logging import get_logger
 from src.ibbot.redis import (
     DEFAULT_COMMAND_QUEUE,
@@ -277,6 +277,59 @@ class BackfillRequest(ChartDataQuery):
         alias="extraIntervals",
         description="Explicit intervals to aggregate after fetching",
     )
+
+
+class DomBackfillRequest(BaseModel):
+    symbol: str
+    duration: str | None = Field(
+        default="1 D",
+        description="Duration window for the backfill request",
+    )
+    start: str | None = Field(
+        default=None,
+        description="Optional ISO8601 start time overriding duration",
+    )
+    end: str | None = Field(
+        default=None,
+        description="Optional ISO8601 end time (defaults to now)",
+    )
+    depth: int = Field(
+        default=10,
+        ge=1,
+        le=40,
+        description="DOM depth levels to request from IBKR",
+    )
+    exchange: str = Field(default="SMART", description="Exchange identifier")
+    limit: int | None = Field(
+        default=None,
+        ge=1,
+        le=50_000,
+        description="Optional maximum number of snapshots to request",
+    )
+
+    model_config = ConfigDict(extra="ignore")
+
+    @field_validator("symbol")
+    @classmethod
+    def _normalise_symbol(cls, value: str) -> str:
+        result = value.strip().upper()
+        if not result:
+            raise ValueError("symbol must not be empty")
+        return result
+
+    @field_validator("duration", "start", "end", "exchange")
+    @classmethod
+    def _strip_optional(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        result = value.strip()
+        return result or None
+
+    @model_validator(mode="after")
+    def _ensure_window(cls, data: "DomBackfillRequest") -> "DomBackfillRequest":
+        if not data.duration and not data.start:
+            raise ValueError("Either duration or start must be provided")
+        return data
 
 
 def _coerce_int(value: Any) -> int | None:
@@ -715,6 +768,16 @@ def _ns_to_iso(ns: int | None) -> str | None:
     return dt.isoformat()
 
 
+def _ms_to_iso(ms: int | float | None) -> str | None:
+    if ms is None:
+        return None
+    try:
+        dt = datetime.fromtimestamp(float(ms) / 1000.0, tz=NY_TZ)
+    except Exception:
+        return None
+    return dt.isoformat()
+
+
 def _candle_ns(
     candle: Mapping[str, Any] | None,
     *,
@@ -837,8 +900,330 @@ def _list_parquet_segments(
     return segments
 
 
-def _serialise_end_datetime(value: datetime | None) -> str | None:
-    if value is None:
+async def _summarise_dom_snapshot(redis_client: Any, symbol: str) -> dict[str, Any]:
+    key = SNAPSHOT_KEY_TEMPLATE.format(symbol=symbol)
+    summary: dict[str, Any] = {
+        "key": key,
+        "has_snapshot": False,
+        "timestamp": None,
+        "updated_at": None,
+        "levels": {"bid": 0, "ask": 0},
+    }
+
+    if redis_client is None:
+        return summary
+
+    try:
+        dom_payload, updated_at = await asyncio.gather(
+            redis_client.hget(key, "dom"),
+            redis_client.hget(key, "dom_updated_at"),
+        )
+    except Exception:
+        return summary
+
+    if updated_at:
+        if isinstance(updated_at, bytes):
+            updated_text = updated_at.decode("utf-8", "ignore")
+        else:
+            updated_text = str(updated_at)
+        summary["updated_at"] = updated_text or None
+
+    if not dom_payload:
+        return summary
+
+    if isinstance(dom_payload, bytes):
+        dom_payload = dom_payload.decode("utf-8", "ignore")
+
+    try:
+        data = json.loads(dom_payload)
+    except Exception:
+        data = {}
+
+    timestamp_value = data.get("timestamp")
+    ts_ns_value = _coerce_int(data.get("timestamp_ns") or data.get("ts_ns"))
+    resolved_timestamp = timestamp_value if isinstance(timestamp_value, str) else _ns_to_iso(ts_ns_value)
+
+    summary.update(
+        has_snapshot=True,
+        timestamp=resolved_timestamp,
+        levels={
+            "bid": len(data.get("bids", []) or []),
+            "ask": len(data.get("asks", []) or []),
+        },
+    )
+    return summary
+
+
+def _summarise_dom_storage(
+    writer: MarketDataParquetWriter | None,
+    symbol: str,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "files": [],
+        "total_rows": 0,
+        "earliest": None,
+        "latest": None,
+    }
+    if writer is None:
+        return payload
+
+    base_dir = getattr(writer, "base_dir", None)
+    if not base_dir:
+        return payload
+
+    try:
+        summary = summarise_dom_directory(base_dir, symbol)
+    except Exception:
+        return payload
+
+    payload["total_rows"] = summary.total_rows
+    payload["earliest"] = _ns_to_iso(summary.earliest_ns)
+    payload["latest"] = _ns_to_iso(summary.latest_ns)
+    payload["files"] = [
+        {
+            "file": segment.file,
+            "path": segment.path,
+            "size": segment.size,
+            "rows": segment.rows,
+            "start": _ns_to_iso(segment.start_ns),
+            "end": _ns_to_iso(segment.end_ns),
+            "modified": _ns_to_iso(segment.modified_ns),
+        }
+        for segment in summary.files
+    ]
+    return payload
+
+
+def _summarise_dom_cache(symbol: str) -> dict[str, Any]:
+    error_message: str | None = None
+    try:
+        history = dom_service.get_history(symbol, limit=1, include_snapshots=False)
+    except Exception as exc:  # pragma: no cover - defensive guard
+        history = {}
+        error_message = str(exc) or exc.__class__.__name__
+
+    metrics = history.get("metrics") or []
+    latest_metric: dict[str, Any] | None = None
+    if metrics:
+        candidate = metrics[-1]
+        if isinstance(candidate, Mapping):
+            latest_metric = dict(candidate)
+            latest_metric["timestamp_iso"] = _ms_to_iso(latest_metric.get("timestamp"))
+
+    payload = {
+        "total_snapshots": history.get("total_snapshots", 0),
+        "total_metrics": history.get("total_metrics", 0),
+        "latest_metric": latest_metric,
+    }
+    if error_message:
+        payload["error"] = error_message
+    return payload
+
+
+def _resolve_dom_time_window(request: DomBackfillRequest) -> tuple[datetime, datetime]:
+    end_dt = _parse_timestamp(request.end) or _now()
+    start_dt = _parse_timestamp(request.start)
+    duration_minutes = _parse_duration_to_minutes(request.duration or "")
+    if start_dt is None:
+        if duration_minutes <= 0:
+            duration_minutes = 60
+        start_dt = end_dt - timedelta(minutes=duration_minutes)
+    if start_dt >= end_dt:
+        delta_minutes = max(duration_minutes, 1)
+        start_dt = end_dt - timedelta(minutes=delta_minutes)
+    return start_dt, end_dt
+
+
+def _normalise_dom_snapshot(symbol: str, payload: Mapping[str, Any]) -> dict[str, Any] | None:
+    if not payload:
+        return None
+
+    symbol_key = symbol.strip().upper()
+    if not symbol_key:
+        return None
+
+    ts_ns = _coerce_int(payload.get("timestamp_ns") or payload.get("ts_ns"))
+    timestamp_value = payload.get("timestamp") or payload.get("time")
+    if ts_ns is None:
+        parsed_timestamp = _parse_timestamp(timestamp_value)
+        if parsed_timestamp is None:
+            parsed_timestamp = _parse_timestamp(payload.get("ts"))
+        if parsed_timestamp is None:
+            return None
+        ts_ns = int(parsed_timestamp.timestamp() * 1_000_000_000)
+
+    try:
+        timestamp_dt = datetime.fromtimestamp(ts_ns / 1_000_000_000, tz=NY_TZ)
+    except Exception:
+        return None
+
+    def _normalise_levels(levels: Iterable[Any]) -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = []
+        for idx, level in enumerate(levels):
+            if not isinstance(level, Mapping):
+                continue
+            try:
+                depth_level = int(level.get("level", idx))
+            except Exception:
+                depth_level = idx
+            result.append(
+                {
+                    "level": depth_level,
+                    "price": _safe_float(level.get("price")),
+                    "size": _safe_float(level.get("size")),
+                }
+            )
+        return result
+
+    bids = _normalise_levels(payload.get("bids", []) or [])
+    asks = _normalise_levels(payload.get("asks", []) or [])
+
+    return {
+        "symbol": symbol_key,
+        "timestamp": timestamp_dt.isoformat(),
+        "timestamp_ns": ts_ns,
+        "bids": bids,
+        "asks": asks,
+    }
+
+
+async def _persist_dom_snapshots(
+    symbol: str,
+    snapshots: Sequence[Mapping[str, Any]],
+    *,
+    writer: MarketDataParquetWriter | None,
+    logger: Any,
+) -> int:
+    persisted = 0
+    for snapshot in snapshots:
+        if writer is not None:
+            try:
+                writer.append_dom(symbol, snapshot)
+                persisted += 1
+            except Exception:
+                if logger:
+                    logger.warning(
+                        "Failed to append DOM snapshot to Parquet",
+                        symbol=symbol,
+                        exc_info=True,
+                    )
+        dom_service.ingest_backfill_snapshot(symbol, snapshot)
+    return persisted
+
+
+async def _fetch_dom_history_from_ib(
+    request: DomBackfillRequest,
+    *,
+    start_dt: datetime,
+    end_dt: datetime,
+    logger: Any,
+) -> dict[str, Any]:
+    if not IB_FALLBACK_ENABLED:
+        return {"snapshots": [], "status": "disabled", "message": "IB fallback disabled"}
+
+    client = await _ensure_ib_client(logger)
+    if client is None:
+        if logger:
+            logger.info("IBKR client unavailable for DOM backfill", symbol=request.symbol)
+        return {"snapshots": [], "status": "unavailable", "message": "IB client unavailable"}
+
+    lock_key = (
+        request.symbol,
+        "dom",
+        start_dt.isoformat(),
+        end_dt.isoformat(),
+    )
+
+    async with _exclusive_ib_fetch(lock_key):
+        try:
+            connected = getattr(client, "connected", False)
+        except Exception:
+            connected = False
+
+        if not connected:
+            connected = await _ensure_ib_connected(client, logger)
+
+        if not connected:
+            return {"snapshots": [], "status": "unavailable", "message": "IB client not connected"}
+
+        fetch_fn = getattr(client, "get_dom_history", None)
+        if not callable(fetch_fn):
+            return {
+                "snapshots": [],
+                "status": "unsupported",
+                "message": "IB client does not expose DOM history",
+            }
+
+        try:
+            raw_snapshots = await asyncio.to_thread(
+                fetch_fn,
+                request.symbol,
+                end_datetime=end_dt,
+                start_datetime=start_dt,
+                duration=request.duration,
+                depth=request.depth,
+                exchange=request.exchange,
+                limit=request.limit,
+            )
+        except NotImplementedError:
+            return {
+                "snapshots": [],
+                "status": "unsupported",
+                "message": "IBKR does not support DOM history",
+            }
+        except Exception as exc:
+            if logger:
+                logger.warning(
+                    "IB DOM history fetch failed",
+                    symbol=request.symbol,
+                    error=str(exc),
+                )
+            return {
+                "snapshots": [],
+                "status": "error",
+                "message": str(exc) or "DOM history fetch failed",
+            }
+
+    snapshots: list[dict[str, Any]] = []
+    seen: Set[int] = set()
+    for entry in raw_snapshots or []:
+        if isinstance(entry, Mapping):
+            payload = entry
+        else:
+            try:
+                payload = dict(entry)
+            except Exception:
+                continue
+        normalised = _normalise_dom_snapshot(request.symbol, payload)
+        if not normalised:
+            continue
+        ts_ns = _coerce_int(normalised.get("timestamp_ns"))
+        if ts_ns is not None:
+            if ts_ns in seen:
+                continue
+            seen.add(ts_ns)
+        snapshots.append(normalised)
+
+    snapshots.sort(key=lambda item: item.get("timestamp_ns", 0))
+    if request.limit is not None:
+        try:
+            limit = int(request.limit)
+        except (TypeError, ValueError):
+            limit = 0
+        if limit > 0 and len(snapshots) > limit:
+            snapshots = snapshots[-limit:]
+    status = "ok" if snapshots else "empty"
+    message = (
+        f"Fetched {len(snapshots)} DOM snapshots from IBKR"
+        if snapshots
+        else "No DOM snapshots returned by IBKR"
+    )
+    return {"snapshots": snapshots, "status": status, "message": message}
+
+
+async def _ensure_ib_client(logger: Any) -> Any | None:
+    global _IB_CLIENT
+    if _IB_CLIENT is _IB_CLIENT_UNAVAILABLE:
         return None
     if isinstance(value, datetime):
         try:
@@ -2510,6 +2895,82 @@ def create_app(*, runtime: MarketDataRuntime | None = None) -> FastAPI:
         if snapshot is None:
             raise HTTPException(status_code=404, detail="Symbol not found")
         return JSONResponse(snapshot)
+
+    @app.get("/dom/storage")
+    async def dom_storage(
+        symbol: str = Query(..., description="Ticker symbol"),
+        include_parquet: bool = Query(True, alias="includeParquet"),
+    ) -> JSONResponse:
+        resolved_symbol = (symbol or "").strip().upper()
+        if not resolved_symbol:
+            raise HTTPException(status_code=400, detail="symbol is required")
+
+        logger = _get_logger()
+        redis_client = await _ensure_redis(logger)
+        writer = _ensure_parquet_writer(logger) if include_parquet else None
+
+        parquet_summary = _summarise_dom_storage(writer, resolved_symbol) if include_parquet else {}
+        redis_summary = await _summarise_dom_snapshot(redis_client, resolved_symbol)
+        cache_summary = _summarise_dom_cache(resolved_symbol)
+
+        response_payload = {
+            "success": True,
+            "symbol": resolved_symbol,
+            "redis": redis_summary,
+            "cache": cache_summary,
+        }
+        if include_parquet:
+            response_payload["parquet"] = parquet_summary
+        return JSONResponse(response_payload)
+
+    @app.post("/dom/backfill")
+    async def dom_backfill(request: DomBackfillRequest) -> JSONResponse:
+        if not IB_FALLBACK_ENABLED:
+            raise HTTPException(status_code=503, detail="IB fallback disabled")
+
+        logger = _get_logger()
+        start_dt, end_dt = _resolve_dom_time_window(request)
+        fetch_result = await _fetch_dom_history_from_ib(
+            request,
+            start_dt=start_dt,
+            end_dt=end_dt,
+            logger=logger,
+        )
+
+        snapshots: list[Mapping[str, Any]] = list(fetch_result.get("snapshots") or [])
+        writer = _ensure_parquet_writer(logger)
+        persisted = 0
+        if snapshots:
+            persisted = await _persist_dom_snapshots(
+                request.symbol,
+                snapshots,
+                writer=writer,
+                logger=logger,
+            )
+
+        redis_client = await _ensure_redis(logger)
+        parquet_summary = _summarise_dom_storage(writer, request.symbol)
+        redis_summary = await _summarise_dom_snapshot(redis_client, request.symbol)
+        cache_summary = _summarise_dom_cache(request.symbol)
+
+        response_payload = {
+            "success": bool(snapshots),
+            "symbol": request.symbol,
+            "status": fetch_result.get("status"),
+            "message": fetch_result.get("message"),
+            "count": len(snapshots),
+            "persisted": persisted,
+            "window": {"start": start_dt.isoformat(), "end": end_dt.isoformat()},
+            "parquet": parquet_summary,
+            "redis": redis_summary,
+            "cache": cache_summary,
+        }
+
+        if snapshots:
+            latest_snapshot = snapshots[-1]
+            response_payload["latest_timestamp"] = latest_snapshot.get("timestamp")
+
+        return JSONResponse(response_payload)
 
     @app.post("/dom/start")
     async def dom_start(payload: DOMStartRequest) -> Dict[str, Any]:

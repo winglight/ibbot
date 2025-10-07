@@ -329,6 +329,7 @@ class TradingApp {
         this.authenticatedModulesInitialized = false;
         this.marketDataBackfillInitialized = false;
         this.marketDataBackfillLoading = false;
+        this.domBackfillLoading = false;
         this.marketDataBackfillElements = null;
         this.uiController = typeof UIControllerClass === 'function'
             ? new UIControllerClass(this)
@@ -5142,6 +5143,18 @@ class TradingApp {
             tableBody: document.getElementById('marketDataBackfillTableBody'),
             status: document.getElementById('marketDataBackfillStatus'),
             extraContainer: document.getElementById('marketDataBackfillExtraContainer'),
+            dom: {
+                refresh: document.getElementById('domBackfillRefreshBtn'),
+                run: document.getElementById('domBackfillRunBtn'),
+                spinner: document.getElementById('domBackfillSpinner'),
+                tableBody: document.getElementById('domBackfillTableBody'),
+                status: document.getElementById('domBackfillStatus'),
+                duration: document.getElementById('domBackfillDuration'),
+                start: document.getElementById('domBackfillStart'),
+                end: document.getElementById('domBackfillEnd'),
+                depth: document.getElementById('domBackfillDepth'),
+                limit: document.getElementById('domBackfillLimit'),
+            },
         };
 
         this.marketDataBackfillElements = elements;
@@ -5153,7 +5166,9 @@ class TradingApp {
             });
             elements.symbol.addEventListener('keyup', (event) => {
                 if (event.key === 'Enter') {
-                    this.loadMarketDataStorage({ showWarnings: true }).catch(() => {});
+                    const symbolOptions = { showWarnings: true };
+                    this.loadMarketDataStorage(symbolOptions).catch(() => {});
+                    this.loadDomStorage(symbolOptions).catch(() => {});
                 }
             });
         }
@@ -5170,6 +5185,16 @@ class TradingApp {
         if (elements.run) {
             elements.run.addEventListener('click', () => {
                 this.runMarketDataBackfill().catch(() => {});
+            });
+        }
+        if (elements.dom?.refresh) {
+            elements.dom.refresh.addEventListener('click', () => {
+                this.loadDomStorage({ showWarnings: true }).catch(() => {});
+            });
+        }
+        if (elements.dom?.run) {
+            elements.dom.run.addEventListener('click', () => {
+                this.runDomBackfill().catch(() => {});
             });
         }
 
@@ -5203,6 +5228,13 @@ class TradingApp {
         elements.run.classList.toggle('btn-outline-secondary', this.isReadOnly);
         elements.run.classList.toggle('btn-outline-light', !this.isReadOnly);
         elements.run.title = this.isReadOnly ? '访客模式无法回补数据' : '';
+        if (elements.dom?.run) {
+            const domDisabled = this.isReadOnly || this.domBackfillLoading;
+            elements.dom.run.disabled = domDisabled;
+            elements.dom.run.classList.toggle('btn-outline-secondary', this.isReadOnly);
+            elements.dom.run.classList.toggle('btn-outline-light', !this.isReadOnly);
+            elements.dom.run.title = this.isReadOnly ? '访客模式无法回补数据' : '';
+        }
     }
 
     getBackfillSymbol() {
@@ -5347,6 +5379,218 @@ class TradingApp {
         }
     }
 
+    setDomBackfillLoading(loading) {
+        this.domBackfillLoading = !!loading;
+        const domElements = this.marketDataBackfillElements?.dom;
+        if (!domElements) {
+            return;
+        }
+        if (domElements.spinner) {
+            domElements.spinner.classList.toggle('d-none', !loading);
+        }
+        if (domElements.refresh) {
+            domElements.refresh.disabled = !!loading;
+        }
+        if (domElements.run) {
+            domElements.run.disabled = !!loading || this.isReadOnly;
+        }
+        this.updateBackfillReadOnlyState();
+    }
+
+    buildDomStatusBadge(label, tone) {
+        const classes = ['badge'];
+        if (tone === 'success') {
+            classes.push('bg-success');
+        } else if (tone === 'warning') {
+            classes.push('bg-warning', 'text-dark');
+        } else if (tone === 'danger') {
+            classes.push('bg-danger');
+        } else {
+            classes.push('bg-secondary');
+        }
+        const className = classes.join(' ');
+        return `<span class="${className}">${this.escapeHtml(label)}</span>`;
+    }
+
+    renderDomStorageSummary(payload = {}) {
+        const domElements = this.marketDataBackfillElements?.dom;
+        if (!domElements?.tableBody) {
+            return;
+        }
+
+        const rows = [];
+        const redis = payload?.redis || {};
+        const cache = payload?.cache || {};
+        const parquet = payload?.parquet || {};
+
+        const toNumber = (value) => {
+            const num = Number(value);
+            return Number.isFinite(num) ? num : null;
+        };
+
+        const redisStatus = redis.has_snapshot ? '正常' : '缺失';
+        const redisTone = redis.has_snapshot ? 'success' : 'warning';
+        const redisDetails = [];
+        if (redis.timestamp) {
+            redisDetails.push(`快照 ${this.escapeHtml(this.formatIsoDatetime(redis.timestamp))}`);
+        }
+        if (redis.updated_at) {
+            redisDetails.push(`<span class="text-muted">刷新 ${this.escapeHtml(this.formatIsoDatetime(redis.updated_at))}</span>`);
+        }
+        const redisLevels = redis.levels || {};
+        const bidLevels = toNumber(redisLevels.bid);
+        const askLevels = toNumber(redisLevels.ask);
+        if (bidLevels !== null || askLevels !== null) {
+            redisDetails.push(`层级 Bid ${this.escapeHtml(String(bidLevels ?? 0))} / Ask ${this.escapeHtml(String(askLevels ?? 0))}`);
+        }
+        if (redis.key) {
+            redisDetails.push(`<span class="text-muted">${this.escapeHtml(redis.key)}</span>`);
+        }
+        rows.push(
+            `<tr>
+                <td>Redis 快照</td>
+                <td>${this.buildDomStatusBadge(redisStatus, redisTone)}</td>
+                <td class="small">${redisDetails.length ? redisDetails.join('<br>') : '<span class="text-muted">无快照</span>'}</td>
+            </tr>`
+        );
+
+        const cacheSnapshots = toNumber(cache.total_snapshots) ?? 0;
+        const cacheStatus = cacheSnapshots > 0 ? '正常' : '空';
+        const cacheTone = cacheSnapshots > 0 ? 'success' : 'warning';
+        const cacheDetails = [];
+        cacheDetails.push(`快照 ${this.escapeHtml(String(cacheSnapshots))}`);
+        const metricsCount = toNumber(cache.total_metrics) ?? 0;
+        cacheDetails.push(`<span class="text-muted">指标 ${this.escapeHtml(String(metricsCount))}</span>`);
+        if (cache.latest_metric?.timestamp_iso) {
+            cacheDetails.push(`最新指标 ${this.escapeHtml(this.formatIsoDatetime(cache.latest_metric.timestamp_iso))}`);
+        }
+        if (cache.error) {
+            cacheDetails.push(`<span class="text-danger">${this.escapeHtml(cache.error)}</span>`);
+        }
+        rows.push(
+            `<tr>
+                <td>服务缓存</td>
+                <td>${this.buildDomStatusBadge(cacheStatus, cacheTone)}</td>
+                <td class="small">${cacheDetails.join('<br>')}</td>
+            </tr>`
+        );
+
+        const files = Array.isArray(parquet.files) ? parquet.files : [];
+        const parquetRows = toNumber(parquet.total_rows) ?? 0;
+        const parquetStatus = parquetRows > 0 ? '已落盘' : (parquet.error ? '读取失败' : '未发现');
+        const parquetTone = parquet.error ? 'danger' : (parquetRows > 0 ? 'success' : 'warning');
+        const parquetDetails = [];
+        parquetDetails.push(`总快照 ${this.escapeHtml(this.formatNumber(parquetRows))}`);
+        if (parquet.earliest || parquet.latest) {
+            const startText = parquet.earliest ? this.escapeHtml(this.formatIsoDatetime(parquet.earliest)) : '-';
+            const endText = parquet.latest ? this.escapeHtml(this.formatIsoDatetime(parquet.latest)) : '-';
+            parquetDetails.push(`覆盖 ${startText} ~ ${endText}`);
+        }
+        if (files.length) {
+            const latestFile = files[files.length - 1] || {};
+            parquetDetails.push(`<span class="text-muted">文件 ${this.escapeHtml(String(files.length))} 个 (最近 ${this.escapeHtml(latestFile.file || '')})</span>`);
+        }
+        if (parquet.error) {
+            parquetDetails.push(`<span class="text-danger">${this.escapeHtml(parquet.error)}</span>`);
+        }
+        rows.push(
+            `<tr>
+                <td>本地 Parquet</td>
+                <td>${this.buildDomStatusBadge(parquetStatus, parquetTone)}</td>
+                <td class="small">${parquetDetails.join('<br>')}</td>
+            </tr>`
+        );
+
+        domElements.tableBody.innerHTML = rows.join('');
+
+        if (domElements.status) {
+            const symbol = payload?.symbol || this.getBackfillSymbol() || '';
+            const pieces = [];
+            if (symbol) {
+                pieces.push(`Symbol ${this.escapeHtml(symbol)}`);
+            }
+            pieces.push(`更新时间 ${this.escapeHtml(new Date().toLocaleString())}`);
+            if (payload?.message) {
+                pieces.push(this.escapeHtml(payload.message));
+            }
+            domElements.status.innerHTML = pieces.join(' · ');
+        }
+    }
+
+    resolveDomDatetimeInput(input) {
+        if (!input) {
+            return null;
+        }
+        const raw = (input.value || '').trim();
+        if (!raw) {
+            return null;
+        }
+        if (input.type === 'datetime-local') {
+            const date = new Date(raw);
+            if (!Number.isNaN(date.getTime())) {
+                return date.toISOString();
+            }
+        }
+        if (/^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}/.test(raw)) {
+            const replaced = raw.replace(' ', 'T');
+            const parsed = new Date(replaced);
+            if (!Number.isNaN(parsed.getTime())) {
+                return parsed.toISOString();
+            }
+        }
+        return raw;
+    }
+
+    async loadDomStorage(options = {}) {
+        const domElements = this.marketDataBackfillElements?.dom;
+        if (!domElements) {
+            return null;
+        }
+
+        const symbol = (options.symbol || this.getBackfillSymbol() || '').trim().toUpperCase();
+        if (!symbol) {
+            if (options.showWarnings) {
+                this.showAlert('warning', '请输入 Symbol');
+            }
+            return null;
+        }
+
+        if (this.marketDataBackfillElements?.symbol) {
+            this.marketDataBackfillElements.symbol.value = symbol;
+        }
+
+        const skipLoading = options.skipLoadingState === true;
+        if (!skipLoading) {
+            this.setDomBackfillLoading(true);
+        }
+
+        try {
+            const payload = await this.apiCall(`/dom/storage?symbol=${encodeURIComponent(symbol)}`, {
+                allowReadOnly: true,
+                cache: 'no-store',
+            });
+            this.renderDomStorageSummary(payload);
+            if (options.showSuccess) {
+                this.showAlert('success', 'DOM 概览已更新');
+            }
+            return payload;
+        } catch (error) {
+            console.error('Failed to load DOM storage summary:', error);
+            if (domElements.tableBody) {
+                const message = this.escapeHtml(error?.message || '加载 DOM 概览失败');
+                domElements.tableBody.innerHTML = `<tr><td colspan="3" class="text-danger small">${message}</td></tr>`;
+            }
+            if (!options.silent) {
+                this.showAlert('danger', error?.message || '加载 DOM 概览失败');
+            }
+            return null;
+        } finally {
+            if (!skipLoading) {
+                this.setDomBackfillLoading(false);
+            }
+        }
+    }
+
     async runMarketDataBackfill() {
         if (this.isReadOnly) {
             this.showAlert('warning', '访客模式无法回补数据');
@@ -5406,6 +5650,89 @@ class TradingApp {
             this.showAlert('danger', error?.message || '回补失败，请稍后再试');
         } finally {
             this.setBackfillLoading(false);
+        }
+    }
+
+    async runDomBackfill() {
+        if (this.isReadOnly) {
+            this.showAlert('warning', '访客模式无法回补数据');
+            return;
+        }
+
+        const elements = this.marketDataBackfillElements;
+        const domElements = elements?.dom;
+        if (!elements || !domElements) {
+            return;
+        }
+
+        const symbol = this.getBackfillSymbol();
+        if (!symbol) {
+            this.showAlert('warning', '请输入 Symbol');
+            return;
+        }
+
+        const exchangeInput = elements.exchange;
+        const exchange = (exchangeInput?.value || 'SMART').trim().toUpperCase() || 'SMART';
+        if (exchangeInput) {
+            exchangeInput.value = exchange;
+        }
+
+        const duration = (domElements.duration?.value || '1 D').trim() || '1 D';
+        let depth = parseInt(domElements.depth?.value, 10);
+        if (!Number.isFinite(depth) || depth <= 0) {
+            depth = 10;
+        }
+        depth = Math.min(Math.max(depth, 1), 40);
+        if (domElements.depth) {
+            domElements.depth.value = depth;
+        }
+
+        const limitValue = parseInt(domElements.limit?.value, 10);
+        const payload = {
+            symbol,
+            exchange,
+            duration,
+            depth,
+        };
+
+        const startValue = this.resolveDomDatetimeInput(domElements.start);
+        if (startValue) {
+            payload.start = startValue;
+        }
+        const endValue = this.resolveDomDatetimeInput(domElements.end);
+        if (endValue) {
+            payload.end = endValue;
+        }
+        if (Number.isFinite(limitValue) && limitValue > 0) {
+            payload.limit = limitValue;
+        }
+
+        this.setDomBackfillLoading(true);
+        try {
+            const result = await this.apiCall('/dom/backfill', {
+                method: 'POST',
+                body: JSON.stringify(payload),
+            });
+            const status = (result?.status || '').toLowerCase();
+            const countValue = Number(result?.count);
+            const count = Number.isFinite(countValue) ? countValue : 0;
+            let tone = 'success';
+            if (status === 'error') {
+                tone = 'danger';
+            } else if (status === 'unsupported' || status === 'empty' || !result?.success) {
+                tone = 'warning';
+            }
+            const message = result?.message || (count > 0
+                ? `已补拉 ${this.formatNumber(count)} 条 DOM 快照`
+                : '未返回任何 DOM 快照');
+            this.showAlert(tone, message);
+            await this.loadDomStorage({ symbol, silent: true, skipLoadingState: true });
+        } catch (error) {
+            console.error('Failed to run DOM backfill:', error);
+            this.showAlert('danger', error?.message || 'DOM 回补失败，请稍后再试');
+        } finally {
+            this.setDomBackfillLoading(false);
+            this.updateBackfillReadOnlyState();
         }
     }
 

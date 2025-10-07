@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -12,6 +15,8 @@ from fastapi.testclient import TestClient
 from services.optimizer.main import (
     EVENT_STREAM_KEY,
     RESULT_KEY_TEMPLATE,
+    collect_dom_coverage,
+    OptimizerDataError,
     OptimizerService,
     TaskSubmission,
     create_app,
@@ -106,6 +111,123 @@ def test_submit_task_records_progress_and_result() -> None:
     asyncio.run(scenario())
 
 
+def test_optimizer_dom_coverage_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    app = create_app()
+    client = TestClient(app)
+
+    captured: dict[str, Any] = {}
+
+    def fake_describe(symbol: str, *, limit: int | None = None) -> dict[str, Any]:
+        captured["symbol"] = symbol
+        captured["limit"] = limit
+        return {
+            "symbol": symbol.upper(),
+            "storage_root": f"/data/dom/{symbol.upper()}",
+            "file_count": 2,
+            "displayed_files": 1,
+            "total_rows": 42,
+            "earliest_ns": 1,
+            "latest_ns": 2,
+            "earliest_iso": "1970-01-01T00:00:00+00:00",
+            "latest_iso": "1970-01-01T00:00:00+00:00",
+            "files": [
+                {
+                    "file": "segment.parquet",
+                    "path": "/data/dom/segment.parquet",
+                    "size": 1024,
+                    "rows": 42,
+                    "start_ns": 1,
+                    "end_ns": 2,
+                    "modified_ns": 3,
+                    "start_iso": "1970-01-01T00:00:00+00:00",
+                    "end_iso": "1970-01-01T00:00:00+00:00",
+                    "modified_iso": "1970-01-01T00:00:03+00:00",
+                }
+            ],
+        }
+
+    monkeypatch.setattr(
+        "src.optimizer_service.routes.describe_dom_storage",
+        fake_describe,
+    )
+
+    response = client.get(
+        "/api/optimize/dom/coverage",
+        params={"symbol": "es", "limit": 3},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert captured["symbol"] == "es"
+    assert captured["limit"] == 3
+    assert payload["symbol"] == "ES"
+    assert payload["files"][0]["file"] == "segment.parquet"
+
+    response_all = client.get(
+        "/api/optimize/dom/coverage",
+        params={"symbol": "es", "limit": 0},
+    )
+    assert response_all.status_code == 200
+    assert captured["limit"] is None
+
+    def failing_describe(*_: Any, **__: Any) -> dict[str, Any]:
+        raise RuntimeError("offline")
+
+    monkeypatch.setattr(
+        "src.optimizer_service.routes.describe_dom_storage",
+        failing_describe,
+    )
+
+    error_response = client.get("/api/optimize/dom/coverage", params={"symbol": "es"})
+    assert error_response.status_code == 503
+    assert "offline" in error_response.json()["detail"]
+
+
+def test_collect_dom_coverage_resolves_symbols(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[tuple[str, int | None]] = []
+
+    monkeypatch.setattr(
+        "services.optimizer.main.list_dom_symbols",
+        lambda: ["ES", "NQ"],
+    )
+
+    def fake_describe(symbol: str, *, limit: int | None = None) -> dict[str, Any]:
+        seen.append((symbol, limit))
+        return {
+            "symbol": symbol,
+            "storage_root": f"/data/dom/{symbol}",
+            "file_count": 0,
+            "displayed_files": 0,
+            "total_rows": 0,
+            "earliest_ns": None,
+            "latest_ns": None,
+            "earliest_iso": None,
+            "latest_iso": None,
+            "files": [],
+        }
+
+    monkeypatch.setattr(
+        "services.optimizer.main.describe_dom_storage",
+        fake_describe,
+    )
+
+    result = collect_dom_coverage(["es", "nq", "es"], limit=0)
+    assert [entry["symbol"] for entry in result] == ["ES", "NQ"]
+    assert seen[0][0] == "ES"
+    assert seen[0][1] is None
+
+    result_all = collect_dom_coverage(None, limit=2)
+    assert [entry["symbol"] for entry in result_all] == ["ES", "NQ"]
+    assert seen[-1][1] == 2
+
+    def fail_list() -> list[str]:
+        raise RuntimeError("unmounted")
+
+    monkeypatch.setattr("services.optimizer.main.list_dom_symbols", fail_list)
+
+    with pytest.raises(OptimizerDataError):
+        collect_dom_coverage(None, limit=1)
+
+
 def test_get_result_returns_parsed_payload() -> None:
     redis = create_fake_redis()
 
@@ -174,3 +296,211 @@ def test_fastapi_endpoints_submit_and_read_results() -> None:
     assert payload["best_params"] == {"window": 3, "threshold": 0.05}
     assert payload["samples"] == 3
     assert pytest.approx(payload["metrics"]["score"], rel=1e-6) == 0.6
+
+
+def test_dom_strategy_requires_dom_storage(monkeypatch: pytest.MonkeyPatch) -> None:
+    redis = create_fake_redis()
+
+    async def scenario() -> None:
+        await redis.hset(
+            "hash:optimizer:strategy:mnq_dom:config",
+            mapping={
+                "name": json.dumps("mnq_dom"),
+                "symbol": json.dumps("MNQ"),
+                "requires_dom": json.dumps(True),
+                "start_date": json.dumps("2023-01-01"),
+                "end_date": json.dumps("2023-01-03"),
+            },
+        )
+        await redis.hset(
+            "hash:optimizer:strategy:mnq_dom:params",
+            mapping={"window": json.dumps([5]), "threshold": json.dumps([0.1])},
+        )
+        await redis.hset(
+            "hash:optimizer:strategy:mnq_dom:history",
+            mapping={"sharpe": json.dumps(1.0)},
+        )
+
+        class DummyWriter:
+            def __init__(self) -> None:
+                self.base_dir = Path("/tmp/dom")
+                self._reason = None
+
+            def read_dom(self, symbol: str, *, limit: int | None = None, **_: Any) -> list[dict[str, Any]]:
+                return []
+
+        summary = SimpleNamespace(total_rows=0, earliest_ns=None, latest_ns=None, files=[])
+
+        import services.optimizer.main as optimizer_main
+
+        monkeypatch.setattr(optimizer_main, "get_market_data_writer", lambda: DummyWriter())
+        monkeypatch.setattr(
+            optimizer_main,
+            "summarise_dom_directory",
+            lambda base_dir, symbol: summary,
+        )
+
+        async def db_query(_: str) -> list[dict[str, Any]]:
+            return [{"value": 0.5}]
+
+        service = OptimizerService(redis_factory=lambda: redis, db_query=db_query)
+
+        submission = TaskSubmission(
+            task_id="dom-missing",
+            strategy_id="mnq_dom",
+            training_query="parquet://dom",
+        )
+
+        with pytest.raises(OptimizerDataError) as excinfo:
+            await service.submit_task(submission)
+
+        assert "backfill" in str(excinfo.value).lower()
+
+    asyncio.run(scenario())
+
+
+def test_dom_strategy_validates_dom_coverage(monkeypatch: pytest.MonkeyPatch) -> None:
+    redis = create_fake_redis()
+
+    async def scenario() -> None:
+        await redis.hset(
+            "hash:optimizer:strategy:mnq_dom:config",
+            mapping={
+                "name": json.dumps("mnq_dom"),
+                "symbol": json.dumps("MNQ"),
+                "requires_dom": json.dumps(True),
+                "start_date": json.dumps("2023-01-01"),
+                "end_date": json.dumps("2023-01-03"),
+            },
+        )
+        await redis.hset(
+            "hash:optimizer:strategy:mnq_dom:params",
+            mapping={"window": json.dumps([5]), "threshold": json.dumps([0.1])},
+        )
+        await redis.hset(
+            "hash:optimizer:strategy:mnq_dom:history",
+            mapping={"sharpe": json.dumps(1.0)},
+        )
+
+        base_time = datetime(2023, 1, 1, tzinfo=timezone.utc)
+        summary = SimpleNamespace(
+            total_rows=100,
+            earliest_ns=int((base_time - timedelta(days=1)).timestamp() * 1_000_000_000),
+            latest_ns=int((base_time + timedelta(days=5)).timestamp() * 1_000_000_000),
+            files=[],
+        )
+
+        class DummyWriter:
+            def __init__(self) -> None:
+                self.base_dir = Path("/tmp/dom")
+                self._reason = None
+
+            def read_dom(self, symbol: str, *, limit: int | None = None, **_: Any) -> list[dict[str, Any]]:
+                return [
+                    {
+                        "symbol": symbol,
+                        "timestamp": "2023-01-01T00:00:00+00:00",
+                        "bids": [],
+                        "asks": [],
+                    }
+                ]
+
+        import services.optimizer.main as optimizer_main
+
+        monkeypatch.setattr(optimizer_main, "get_market_data_writer", lambda: DummyWriter())
+        monkeypatch.setattr(
+            optimizer_main,
+            "summarise_dom_directory",
+            lambda base_dir, symbol: summary,
+        )
+
+        async def db_query(_: str) -> list[dict[str, Any]]:
+            return [{"value": 0.4}, {"value": 0.6}]
+
+        service = OptimizerService(redis_factory=lambda: redis, db_query=db_query)
+
+        submission = TaskSubmission(
+            task_id="dom-ok",
+            strategy_id="mnq_dom",
+            training_query="parquet://dom",
+        )
+
+        result = await service.submit_task(submission)
+        assert result.status == "completed"
+
+    asyncio.run(scenario())
+
+
+def test_dom_strategy_rejects_insufficient_range(monkeypatch: pytest.MonkeyPatch) -> None:
+    redis = create_fake_redis()
+
+    async def scenario() -> None:
+        await redis.hset(
+            "hash:optimizer:strategy:mnq_dom:config",
+            mapping={
+                "name": json.dumps("mnq_dom"),
+                "symbol": json.dumps("MNQ"),
+                "requires_dom": json.dumps(True),
+                "start_date": json.dumps("2023-01-01"),
+                "end_date": json.dumps("2023-01-05"),
+            },
+        )
+        await redis.hset(
+            "hash:optimizer:strategy:mnq_dom:params",
+            mapping={"window": json.dumps([5]), "threshold": json.dumps([0.1])},
+        )
+        await redis.hset(
+            "hash:optimizer:strategy:mnq_dom:history",
+            mapping={"sharpe": json.dumps(1.0)},
+        )
+
+        base_time = datetime(2023, 1, 1, tzinfo=timezone.utc)
+        summary = SimpleNamespace(
+            total_rows=50,
+            earliest_ns=int(base_time.timestamp() * 1_000_000_000),
+            latest_ns=int((base_time + timedelta(days=1)).timestamp() * 1_000_000_000),
+            files=[],
+        )
+
+        class DummyWriter:
+            def __init__(self) -> None:
+                self.base_dir = Path("/tmp/dom")
+                self._reason = None
+
+            def read_dom(self, symbol: str, *, limit: int | None = None, **_: Any) -> list[dict[str, Any]]:
+                return [
+                    {
+                        "symbol": symbol,
+                        "timestamp": "2023-01-02T00:00:00+00:00",
+                        "bids": [],
+                        "asks": [],
+                    }
+                ]
+
+        import services.optimizer.main as optimizer_main
+
+        monkeypatch.setattr(optimizer_main, "get_market_data_writer", lambda: DummyWriter())
+        monkeypatch.setattr(
+            optimizer_main,
+            "summarise_dom_directory",
+            lambda base_dir, symbol: summary,
+        )
+
+        async def db_query(_: str) -> list[dict[str, Any]]:
+            return [{"value": 0.5}]
+
+        service = OptimizerService(redis_factory=lambda: redis, db_query=db_query)
+
+        submission = TaskSubmission(
+            task_id="dom-range",
+            strategy_id="mnq_dom",
+            training_query="parquet://dom",
+        )
+
+        with pytest.raises(OptimizerDataError) as excinfo:
+            await service.submit_task(submission)
+
+        message = str(excinfo.value)
+        assert "ends on" in message
+
+    asyncio.run(scenario())

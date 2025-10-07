@@ -36,6 +36,7 @@ from .schemas import (
     StrategyGenerationRequest,
     StrategyGenerationResponse,
     OptimizerDataRangeResponse,
+    OptimizerDomCoverageResponse,
     OptimizerMetadataResponse,
     ParameterGroupPerformanceResponse,
     TaskState,
@@ -47,6 +48,7 @@ from .metadata import (
     get_available_base_metrics,
     get_available_feature_metrics,
     get_symbol_data_range,
+    describe_dom_storage,
 )
 from .storage import store, TaskRecord
 from .analytics import summarize_parameter_groups
@@ -194,6 +196,33 @@ async def get_optimizer_metadata() -> OptimizerMetadataResponse:
 async def get_data_range(symbol: str = Query(..., min_length=1)) -> OptimizerDataRangeResponse:
     info = get_symbol_data_range(symbol)
     return OptimizerDataRangeResponse(**info)
+
+
+@router.get(
+    "/dom/coverage",
+    response_model=OptimizerDomCoverageResponse,
+    responses={
+        status.HTTP_400_BAD_REQUEST: {"model": ErrorResponse},
+        status.HTTP_503_SERVICE_UNAVAILABLE: {"model": ErrorResponse},
+    },
+)
+async def get_dom_coverage(
+    symbol: str = Query(..., min_length=1),
+    limit: int = Query(
+        5,
+        ge=0,
+        le=100,
+        description="Maximum number of DOM files to include in the response (0 = all)",
+    ),
+) -> OptimizerDomCoverageResponse:
+    try:
+        info = describe_dom_storage(symbol, limit=None if limit == 0 else limit)
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+    return OptimizerDomCoverageResponse(**info)
 
 
 @router.post(
