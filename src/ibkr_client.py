@@ -1476,7 +1476,7 @@ class IBKRClient:
                 })
 
             df = pd.DataFrame(data)
-            # ibkr_logger.info(f"Retrieved {len(df)} historical data points for {symbol}")
+            ibkr_logger.info(f"Retrieved {len(df)} historical data points for {symbol}")
             return df
         except Exception as e:
             ibkr_logger.error(f"Failed to get historical data for {symbol}: {e}")
