@@ -622,6 +622,7 @@ class OrdersRuntime:
                 await self._initialise_order_repository()
             self._redis = await self.redis_factory()
             await self._hydrate_from_repository()
+            await self._seed_stream_position()
             await self._publish_health()
         except Exception:
             await self._shutdown_order_repository()
@@ -1463,20 +1464,52 @@ class OrdersRuntime:
         if self._redis is None:
             return []
         try:
-            entries = await self._redis.xrange(self.results_stream)
+            last_message_id = self._last_message_id
+            if last_message_id:
+                minimum_id = f"({last_message_id}"
+            else:
+                minimum_id = "-"
+            entries = await self._redis.xrange(
+                self.results_stream,
+                min=minimum_id,
+            )
         except Exception as exc:  # pragma: no cover - defensive guard
             self.logger.debug("Failed to read orders stream: %s", exc)
             return []
         new_entries: list[tuple[str, Mapping[str, Any]]] = []
         for message_id, payload in entries:
-            if self._last_message_id and message_id <= self._last_message_id:
+            if isinstance(message_id, (bytes, bytearray)):
+                message_id_text = message_id.decode("utf-8", errors="ignore")
+            else:
+                message_id_text = str(message_id)
+            if self._last_message_id and message_id_text <= self._last_message_id:
                 continue
             if not isinstance(payload, Mapping):
                 continue
-            new_entries.append((message_id, payload))
+            new_entries.append((message_id_text, payload))
         if new_entries:
             self._last_message_id = new_entries[-1][0]
         return new_entries
+
+    async def _seed_stream_position(self) -> None:
+        if self._redis is None:
+            return
+        try:
+            entries = await self._redis.xrevrange(self.results_stream, count=1)
+        except Exception as exc:  # pragma: no cover - defensive guard
+            self.logger.debug("Failed to seed orders stream position: %s", exc)
+            return
+        if not entries:
+            if self._last_message_id is None:
+                self._last_message_id = ""
+            return
+        message_id, _ = entries[0]
+        if isinstance(message_id, (bytes, bytearray)):
+            message_id_text = message_id.decode("utf-8", errors="ignore")
+        else:
+            message_id_text = str(message_id)
+        if message_id_text:
+            self._last_message_id = message_id_text
 
     async def _handle_stream_entry(self, message_id: str, data: Mapping[str, Any]) -> None:
         payload = _normalise_stream_payload(data)

@@ -9,6 +9,20 @@ from collections import deque
 from typing import Any
 
 
+def _parse_stream_id(value: str | bytes | bytearray) -> tuple[int, int]:
+    if isinstance(value, (bytes, bytearray)):
+        text = value.decode("utf-8", errors="ignore")
+    else:
+        text = str(value)
+    if text in {"-", "+"}:
+        return (0 if text == "-" else 2**63, 0)
+    major, _, minor = text.partition("-")
+    try:
+        return int(major), int(minor or 0)
+    except ValueError:
+        return 0, 0
+
+
 class InMemoryRedis:
     """Minimal async Redis clone backed by in-memory Python structures."""
 
@@ -50,8 +64,73 @@ class InMemoryRedis:
         stream.append((message_id, dict(fields)))
         return message_id
 
-    async def xrange(self, key: str) -> list[tuple[str, dict[str, str]]]:
-        return list(self._streams.get(key, []))
+    async def xrange(
+        self,
+        key: str,
+        min: str = "-",
+        max: str = "+",
+        count: int | None = None,
+    ) -> list[tuple[str, dict[str, str]]]:
+        stream = list(self._streams.get(key, []))
+        min_exclusive = False
+        if min.startswith("("):
+            min_exclusive = True
+            min = min[1:]
+        max_exclusive = False
+        if max.startswith("("):
+            max_exclusive = True
+            max = max[1:]
+        min_id = _parse_stream_id(min)
+        max_id = _parse_stream_id(max)
+        results: list[tuple[str, dict[str, str]]] = []
+        for message_id, payload in stream:
+            message_id_tuple = _parse_stream_id(message_id)
+            if message_id_tuple < min_id or (
+                min_exclusive and message_id_tuple == min_id
+            ):
+                continue
+            if message_id_tuple > max_id or (
+                max_exclusive and message_id_tuple == max_id
+            ):
+                continue
+            results.append((message_id, dict(payload)))
+            if count is not None and len(results) >= count:
+                break
+        return results
+
+    async def xrevrange(
+        self,
+        key: str,
+        max: str = "+",
+        min: str = "-",
+        count: int | None = None,
+    ) -> list[tuple[str, dict[str, str]]]:
+        stream = list(reversed(self._streams.get(key, [])))
+        min_exclusive = False
+        if min.startswith("("):
+            min_exclusive = True
+            min = min[1:]
+        max_exclusive = False
+        if max.startswith("("):
+            max_exclusive = True
+            max = max[1:]
+        min_id = _parse_stream_id(min)
+        max_id = _parse_stream_id(max)
+        results: list[tuple[str, dict[str, str]]] = []
+        for message_id, payload in stream:
+            message_id_tuple = _parse_stream_id(message_id)
+            if message_id_tuple > max_id or (
+                max_exclusive and message_id_tuple == max_id
+            ):
+                continue
+            if message_id_tuple < min_id or (
+                min_exclusive and message_id_tuple == min_id
+            ):
+                continue
+            results.append((message_id, dict(payload)))
+            if count is not None and len(results) >= count:
+                break
+        return results
 
     async def hset(self, key: str, *, mapping: dict[str, Any]) -> int:
         normalised = {str(k): str(v) for k, v in mapping.items()}

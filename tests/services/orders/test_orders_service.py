@@ -198,6 +198,45 @@ async def test_list_orders_uses_repository_pagination() -> None:
 
 
 @pytest.mark.asyncio
+async def test_runtime_skips_existing_stream_entries_on_start() -> None:
+    repository = RecordingRepository()
+    redis = InMemoryRedis()
+    await redis.xadd(
+        "stream:ib:results",
+        {"type": "order_event", "detail": "legacy"},
+    )
+
+    async def redis_factory() -> InMemoryRedis:
+        return redis
+
+    async def repository_factory() -> RecordingRepository:
+        return repository
+
+    runtime = OrdersRuntime(
+        redis_factory=redis_factory,
+        order_repository_factory=repository_factory,
+        stream_poll_interval=0.0,
+        health_interval=0.0,
+    )
+    await runtime.start()
+    try:
+        # The runtime should seed the stream cursor to the last existing entry.
+        assert runtime._last_message_id == "1-0"
+        processed_initial = await runtime.poll_stream_once()
+        assert processed_initial == 0
+
+        await redis.xadd(
+            "stream:ib:results",
+            {"type": "order_event", "detail": "new"},
+        )
+        processed_after = await runtime.poll_stream_once()
+        assert processed_after == 1
+        assert runtime._last_message_id == "2-0"
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
 async def test_get_order_fetches_from_repository_when_missing() -> None:
     repository = RecordingRepository()
     runtime, redis, repo = await _create_runtime(repository=repository)
