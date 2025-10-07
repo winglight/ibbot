@@ -16,6 +16,7 @@ from fastapi import (
 from pydantic import BaseModel, Field
 
 from .auth import get_current_user
+from src.dom_service import DOMService, get_dom_service
 from src.dom_dependencies import dom_config
 from src.routes.service_clients import (
     MarketDataServiceClient,
@@ -26,6 +27,28 @@ from src.routes.service_clients import (
 from loguru import logger
 
 router = APIRouter()
+
+
+def get_dom_service_client() -> DOMService:
+    """Return the active DOM service instance.
+
+    Legacy route tests monkeypatch this helper to substitute a lightweight
+    in-memory service.  The module keeps referencing ``dom_service`` for
+    brevity, so we expose a proxy object that delegates attribute access to the
+    current client returned by this function.
+    """
+
+    return get_dom_service()
+
+
+class _DomServiceProxy:
+    def __getattr__(self, item):
+        return getattr(get_dom_service_client(), item)
+
+
+dom_service = _DomServiceProxy()
+
+DOM_STOP_TIMEOUT = 2.5
 
 
 def _ensure_not_read_only(request: Request) -> None:

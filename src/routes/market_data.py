@@ -37,6 +37,18 @@ CACHE_DURATION_MINUTES = 1  # 缓存1分钟
 _MARKET_DATA_SERVICE_CLIENT = MarketDataServiceClient()
 
 
+def get_market_data_service_client() -> MarketDataServiceClient:
+    """Return the shared market data service client instance.
+
+    The legacy ``tests/routes`` suites monkeypatch this helper to inject
+    lightweight doubles.  Routing dependencies continue to use
+    :func:`_get_market_data_service_client`, which now delegates through the
+    public accessor so that those monkeypatches take effect.
+    """
+
+    return _MARKET_DATA_SERVICE_CLIENT
+
+
 class MarketBackfillRequest(BaseModel):
     symbol: str
     duration: str
@@ -48,7 +60,7 @@ class MarketBackfillRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="ignore")
 
 def _get_market_data_service_client() -> MarketDataServiceClient:
-    return _MARKET_DATA_SERVICE_CLIENT
+    return get_market_data_service_client()
 
 
 def _market_service_base_url(client: Optional[MarketDataServiceClient] = None) -> str:

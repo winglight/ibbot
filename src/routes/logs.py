@@ -3,10 +3,11 @@ import re
 from datetime import datetime, timedelta
 from typing import Any, Optional, Dict
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from loguru import logger
 
 from src.utils import now_local
+from src.routes.service_clients import ServiceClientError, ServiceUnavailableError
 
 from .auth import get_current_user
 
@@ -154,6 +155,134 @@ async def load_logs_data(
     return {"success": True, "logs": window, "pagination": pagination}
 
 
+async def _load_log_modules(*, range: str = "today") -> Dict[str, Any]:
+    """Load available log modules within the requested time range."""
+
+    log_file = "logs/trading_bot.log"
+    if not os.path.exists(log_file):
+        return {"success": True, "modules": []}
+
+    import aiofiles
+
+    async with aiofiles.open(log_file, "r") as f:
+        content = await f.readlines()
+        if len(content) > 10000:
+            content = content[-10000:]
+
+    now = now_local()
+    if range == "today":
+        date_str = now.strftime("%Y-%m-%d")
+        content = [line for line in content if line.startswith(f"| {date_str}")]
+    elif range == "week":
+        start = now - timedelta(days=now.weekday())
+        filtered = []
+        for line in content:
+            try:
+                ts = datetime.strptime(line[2:21], "%Y-%m-%d %H:%M:%S")
+            except Exception:
+                continue
+            if ts.date() >= start.date():
+                filtered.append(line)
+        content = filtered
+
+    modules = set()
+    for line in content:
+        try:
+            parts = line.split("|")
+            if len(parts) >= 4:
+                module = parts[3].strip()
+                if module and module != "-":
+                    modules.add(module)
+        except Exception:
+            continue
+
+    return {"success": True, "modules": sorted(modules)}
+
+
+async def _load_log_stats(*, range: str = "today", module: str = "all") -> Dict[str, Any]:
+    """Compute per-route log statistics for the requested range and module."""
+
+    log_file = "logs/trading_bot.log"
+    if not os.path.exists(log_file):
+        return {"success": True, "stats": {}}
+
+    with open(log_file, "r") as f:
+        lines = f.readlines()
+
+    now = now_local()
+    if range == "today":
+        date_str = now.strftime("%Y-%m-%d")
+        lines = [line for line in lines if line.startswith(f"| {date_str}")]
+    elif range == "week":
+        start = now - timedelta(days=now.weekday())
+        filtered = []
+        for line in lines:
+            try:
+                ts = datetime.strptime(line[2:21], "%Y-%m-%d %H:%M:%S")
+            except Exception:
+                continue
+            if ts.date() >= start.date():
+                filtered.append(line)
+        lines = filtered
+
+    pattern = re.compile(
+        r"REQUEST \w+ (?P<path>\S+) status=(?P<status>\d+) duration=(?P<duration>[0-9.]+)ms"
+    )
+    stats: Dict[str, Dict[str, Dict[str, float]]] = {}
+
+    for line in lines:
+        parts = line.split("|")
+        if len(parts) < 6:
+            continue
+        mod = parts[3].strip()
+        if module != "all" and mod != module:
+            continue
+        match = pattern.search(line)
+        if not match:
+            continue
+        path = match.group("path")
+        status = int(match.group("status"))
+        duration = float(match.group("duration"))
+        module_stats = stats.setdefault(mod, {})
+        entry = module_stats.setdefault(path, {"count": 0, "total_time": 0.0, "success": 0})
+        entry["count"] += 1
+        entry["total_time"] += duration
+        if status < 400:
+            entry["success"] += 1
+
+    for module_stats in stats.values():
+        for path, data in module_stats.items():
+            total = data["count"] or 1
+            data["avg_time"] = round(data["total_time"] / total, 2)
+            data["success_rate"] = round(data["success"] / total, 2)
+            del data["total_time"]
+            del data["success"]
+
+    return {"success": True, "stats": stats}
+
+
+class _FileLogsServiceClient:
+    async def get_logs(self, **kwargs: Any) -> Dict[str, Any]:
+        return await load_logs_data(**kwargs)
+
+    async def get_modules(self, *, range: str = "today") -> Dict[str, Any]:
+        return await _load_log_modules(range=range)
+
+    async def get_stats(self, *, range: str = "today", module: str = "all") -> Dict[str, Any]:
+        return await _load_log_stats(range=range, module=module)
+
+
+_LOGS_SERVICE_CLIENT = _FileLogsServiceClient()
+
+
+def get_logs_service_client() -> _FileLogsServiceClient:
+    return _LOGS_SERVICE_CLIENT
+
+
+def _get_logs_service_client() -> _FileLogsServiceClient:
+    return get_logs_service_client()
+
+
 @router.get("/api/logs")
 async def get_logs(
     lines: int = 50,  # backwards compatibility fallback
@@ -166,9 +295,10 @@ async def get_logs(
     direction: str = "backward",
     search: Optional[str] = None,
     user: Optional[str] = Depends(get_current_user),
+    client: _FileLogsServiceClient = Depends(_get_logs_service_client),
 ):
     try:
-        return await load_logs_data(
+        return await client.get_logs(
             lines=lines,
             level=level,
             request_id=request_id,
@@ -179,66 +309,31 @@ async def get_logs(
             direction=direction,
             search=search,
         )
-    except Exception as e:
-        logger.error(f"Get logs error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    except ServiceUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ServiceClientError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error("Get logs error: {}", exc)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.get("/api/logs/modules")
 async def get_log_modules(
     range: str = "today",
     user: Optional[str] = Depends(get_current_user),
+    client: _FileLogsServiceClient = Depends(_get_logs_service_client),
 ):
     """Get unique module names from logs for dropdown filtering."""
     try:
-        log_file = "logs/trading_bot.log"
-        if not os.path.exists(log_file):
-            return {"success": True, "modules": []}
-        
-        import aiofiles
-        async with aiofiles.open(log_file, "r") as f:
-            content = await f.readlines()
-            # 限制最大读取行数，避免内存问题
-            if len(content) > 10000:
-                content = content[-10000:]
-
-        # Filter by date range
-        now = now_local()
-        if range == "today":
-            date_str = now.strftime("%Y-%m-%d")
-            content = [line for line in content if line.startswith(f"| {date_str}")]
-        elif range == "week":
-            start = now - timedelta(days=now.weekday())
-            filtered = []
-            for line in content:
-                try:
-                    ts = datetime.strptime(line[2:21], "%Y-%m-%d %H:%M:%S")
-                except Exception:
-                    continue
-                if ts.date() >= start.date():
-                    filtered.append(line)
-            content = filtered
-
-        # Extract unique modules from log lines
-        modules = set()
-        for line in content:
-            try:
-                parts = line.split('|')
-                # Expected format: | YYYY-mm-dd HH:MM:SS | LEVEL | MODULE | ...
-                if len(parts) >= 4:
-                    module = parts[3].strip()
-                    if module and module != "-":
-                        modules.add(module)
-            except Exception:
-                continue
-        
-        # Sort modules alphabetically
-        sorted_modules = sorted(list(modules))
-        
-        return {"success": True, "modules": sorted_modules}
-    except Exception as e:
-        logger.error(f"Get log modules error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        return await client.get_modules(range=range)
+    except ServiceUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ServiceClientError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error("Get log modules error: {}", exc)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.get("/api/logs/stats")
@@ -246,61 +341,14 @@ async def get_log_stats(
     range: str = "today",
     module: str = "all",
     user: Optional[str] = Depends(get_current_user),
+    client: _FileLogsServiceClient = Depends(_get_logs_service_client),
 ):
     try:
-        log_file = "logs/trading_bot.log"
-        if not os.path.exists(log_file):
-            return {"success": True, "stats": {}}
-        with open(log_file, "r") as f:
-            lines = f.readlines()
-
-        now = now_local()
-        if range == "today":
-            date_str = now.strftime("%Y-%m-%d")
-            lines = [line for line in lines if line.startswith(f"| {date_str}")]
-        elif range == "week":
-            start = now - timedelta(days=now.weekday())
-            filtered = []
-            for line in lines:
-                try:
-                    ts = datetime.strptime(line[2:21], "%Y-%m-%d %H:%M:%S")
-                except Exception:
-                    continue
-                if ts.date() >= start.date():
-                    filtered.append(line)
-            lines = filtered
-
-        pattern = re.compile(r"REQUEST \w+ (?P<path>\S+) status=(?P<status>\d+) duration=(?P<duration>[0-9.]+)ms")
-        stats: Dict[str, Dict[str, Dict[str, float]]] = {}
-
-        for line in lines:
-            parts = line.split("|")
-            if len(parts) < 6:
-                continue
-            mod = parts[3].strip()
-            if module != "all" and mod != module:
-                continue
-            m = pattern.search(line)
-            if not m:
-                continue
-            path = m.group("path")
-            status = int(m.group("status"))
-            duration = float(m.group("duration"))
-            mod_stats = stats.setdefault(mod, {})
-            entry = mod_stats.setdefault(path, {"count": 0, "total_time": 0.0, "success": 0})
-            entry["count"] += 1
-            entry["total_time"] += duration
-            if status < 400:
-                entry["success"] += 1
-
-        for mod, paths in stats.items():
-            for path, data in paths.items():
-                data["avg_time"] = round(data["total_time"] / data["count"], 2)
-                data["success_rate"] = round(data["success"] / data["count"], 2)
-                del data["total_time"]
-                del data["success"]
-
-        return {"success": True, "stats": stats}
-    except Exception as e:
-        logger.error(f"Get log stats error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        return await client.get_stats(range=range, module=module)
+    except ServiceUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ServiceClientError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error("Get log stats error: {}", exc)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc

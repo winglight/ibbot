@@ -52,6 +52,7 @@ if "src.connection_manager" not in sys.modules:
     stub_module = types.ModuleType("src.connection_manager")
     stub_module.connection_manager = _connection_manager_stub
     stub_module.ConnectionConfig = _ConnectionConfigStub
+    stub_module.ConnectionManager = _StubConnectionManager
     stub_module.connection_logger = _LoggerStub()
     sys.modules["src.connection_manager"] = stub_module
 
@@ -162,6 +163,7 @@ async def test_startup_raises_when_sqlite_handles_detected(monkeypatch: pytest.M
         return fake_redis
 
     reset_startup_checks()
+    monkeypatch.setenv("IGNORE_SQLITE_HANDLE_CHECK", "false")
     monkeypatch.setattr("main.detect_open_sqlite_handles", lambda: ["/tmp/leaky.sqlite"])
     monkeypatch.setenv("ADMIN_USERNAME", "admin")
     monkeypatch.setenv("ADMIN_PASSWORD", "change_me")
