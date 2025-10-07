@@ -205,7 +205,7 @@ class ConnectionManager:
                 return
             except Exception as exc:  # pragma: no cover - defensive guard
                 connection_logger.debug(
-                    "Failed to schedule %s on running loop: %s",
+                    "Failed to schedule {} on running loop: {}",
                     description,
                     exc,
                 )
@@ -217,7 +217,7 @@ class ConnectionManager:
                 return
             except Exception as exc:  # pragma: no cover - defensive guard
                 connection_logger.debug(
-                    "Failed to schedule %s on connection loop: %s",
+                    "Failed to schedule {} on connection loop: {}",
                     description,
                     exc,
                 )
@@ -227,7 +227,7 @@ class ConnectionManager:
                 asyncio.run(coro_factory())
             except Exception as exc:  # pragma: no cover - defensive guard
                 connection_logger.debug(
-                    "Background %s task raised: %s",
+                    "Background {} task raised: {}",
                     description,
                     exc,
                 )
@@ -241,7 +241,7 @@ class ConnectionManager:
                 await account_snapshot_cache.mark_all_snapshots_stale(reason)
             except Exception as exc:  # pragma: no cover - defensive guard
                 connection_logger.warning(
-                    "Failed to mark account snapshots stale (%s): %s",
+                    "Failed to mark account snapshots stale ({}): {}",
                     reason,
                     exc,
                 )
@@ -962,7 +962,10 @@ class ConnectionManager:
                         event += _signal_disconnect
                     except Exception as exc:
                         connection_logger.debug(
-                            "Failed to register %s handler on IB client", attr=attr, error=str(exc)
+                            "Failed to register {} handler on IB client",
+                            attr,
+                            attr=attr,
+                            error=str(exc),
                         )
                         continue
                     registered_handlers.append((attr, _signal_disconnect))

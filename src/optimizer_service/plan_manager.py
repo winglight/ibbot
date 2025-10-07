@@ -225,7 +225,7 @@ class PlanManager:
             if origin == "manual":
                 raise RuntimeError("plan_has_active_task")
             logger.info(
-                "Plan %s has an active task %s, skipping automatic trigger",
+                "Plan {} has an active task {}, skipping automatic trigger",
                 plan.id,
                 active[0],
             )
@@ -235,7 +235,7 @@ class PlanManager:
             return active[0]
         if origin != "manual" and self._task_store.has_running_tasks(exclude_plan_id=plan.id):
             logger.info(
-                "Detected other running tasks while triggering plan %s automatically; postponing",
+                "Detected other running tasks while triggering plan {} automatically; postponing",
                 plan.id,
             )
             if schedule_follow_up and plan.is_active:
@@ -311,7 +311,7 @@ class PlanManager:
         for task_id, record in pending_tasks:
             if task_id in self._resumed_tasks:
                 continue
-            logger.info("Resuming optimizer task %s", task_id)
+            logger.info("Resuming optimizer task {}", task_id)
             self._resumed_tasks.add(task_id)
             self._task_store.mark_resumed(task_id)
             self._task_store.update_state(

@@ -46,7 +46,7 @@ def _load_command_timeout() -> float:
         value = float(raw)
     except ValueError:
         logger.warning(
-            "Invalid %s value %r; falling back to %.2fs",
+            "Invalid {} value {!r}; falling back to {:.2f}s",
             COMMAND_TIMEOUT_ENV,
             raw,
             DEFAULT_COMMAND_TIMEOUT,
@@ -54,7 +54,7 @@ def _load_command_timeout() -> float:
         return DEFAULT_COMMAND_TIMEOUT
     if value <= 0:
         logger.warning(
-            "%s must be positive; falling back to %.2fs",
+            "{} must be positive; falling back to {:.2f}s",
             COMMAND_TIMEOUT_ENV,
             DEFAULT_COMMAND_TIMEOUT,
         )
@@ -71,7 +71,7 @@ def _load_scan_timeout(base_timeout: float) -> float:
         value = float(raw)
     except ValueError:
         logger.warning(
-            "Invalid %s value %r; falling back to %.2fs",
+            "Invalid {} value {!r}; falling back to {:.2f}s",
             SCAN_TIMEOUT_ENV,
             raw,
             baseline,
@@ -79,7 +79,7 @@ def _load_scan_timeout(base_timeout: float) -> float:
         return baseline
     if value <= 0:
         logger.warning(
-            "%s must be positive; falling back to %.2fs",
+            "{} must be positive; falling back to {:.2f}s",
             SCAN_TIMEOUT_ENV,
             baseline,
         )
@@ -188,7 +188,7 @@ async def _connection_module_fallback(module: str) -> dict[str, Any] | None:
     try:
         config = await _load_ib_connection_config()
     except Exception as exc:  # pragma: no cover - defensive guard
-        logger.debug("Failed to load fallback connection config: %s", exc)
+        logger.debug("Failed to load fallback connection config: {}", exc)
         return None
 
     if not isinstance(config, Mapping):

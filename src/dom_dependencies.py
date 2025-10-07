@@ -51,7 +51,7 @@ def _build_depth_subscriber():
         try:
             subscriber = RedisDomSubscriber()
         except Exception as exc:
-            logger.warning("Failed to initialise RedisDomSubscriber: %s", exc)
+            logger.warning("Failed to initialise RedisDomSubscriber: {}", exc)
             if backend == "redis":
                 raise
         else:

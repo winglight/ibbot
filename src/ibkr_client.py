@@ -2164,7 +2164,7 @@ class IBKRClient:
                 )
             except ServiceResponseError as exc:
                 ibkr_logger.warning(
-                    "Market data service rejected %s bars with status %s: %s",
+                    "Market data service rejected {} bars with status {}: {}",
                     symbol,
                     exc.status_code,
                     exc.detail,
@@ -2213,10 +2213,10 @@ class IBKRClient:
             )
         except DataSourceError as exc:
             ibkr_logger.warning(
-                "Unified real-time data unavailable: %s", exc, symbol=symbol
+                "Unified real-time data unavailable: {}", exc, symbol=symbol
             )
         except Exception as exc:
-            ibkr_logger.exception("Unified real-time data error: %s", exc)
+            ibkr_logger.exception("Unified real-time data error: {}", exc)
 
         return await self._get_real_time_data_legacy(symbol, exchange)
 
@@ -2484,7 +2484,7 @@ class IBKRClient:
             try:
                 self._data_layer_manager = get_data_source_manager()
             except Exception as exc:  # pragma: no cover - defensive guard
-                ibkr_logger.warning("Failed to initialise data source manager: %s", exc)
+                ibkr_logger.warning("Failed to initialise data source manager: {}", exc)
                 return None
         return self._data_layer_manager
 
@@ -3131,7 +3131,7 @@ class IBKRClient:
                 order_id = getattr(trade.order, "orderId", None)
                 if not order_id:
                     ibkr_logger.debug(
-                        "Skipping trade without valid order id: %s",
+                        "Skipping trade without valid order id: {}",
                         getattr(trade.contract, "symbol", "unknown"),
                     )
                     continue
@@ -3142,7 +3142,7 @@ class IBKRClient:
                 )
                 if remaining_qty <= 0:
                     ibkr_logger.debug(
-                        "Skipping completed order %s (remaining=%s)",
+                        "Skipping completed order {} (remaining={})",
                         order_id,
                         remaining_qty,
                     )
@@ -3180,7 +3180,7 @@ class IBKRClient:
                         auto_order.executed_at = now_local()
 
                 ibkr_logger.debug(
-                    "Processing order %s: totalQuantity=%s, action=%s, orderType=%s, status=%s",
+                    "Processing order {}: totalQuantity={}, action={}, orderType={}, status={}",
                     order_id_str,
                     getattr(trade.order, "totalQuantity", None),
                     getattr(trade.order, "action", None),
@@ -3565,7 +3565,7 @@ class IBKRClient:
         """处理订单错误，更新订单状态为失败"""
         try:
             connection_logger.error(
-                "Order error - ReqId: %s, Code: %s, Message: %s",
+                "Order error - ReqId: {}, Code: {}, Message: {}",
                 req_id,
                 error_code,
                 error_string,
@@ -3574,13 +3574,13 @@ class IBKRClient:
             order_id = self.req_id_to_order_id.get(req_id)
             if order_id:
                 connection_logger.info(
-                    "Marking order %s as failed due to IBKR error %s",
+                    "Marking order {} as failed due to IBKR error {}",
                     order_id,
                     error_code,
                 )
                 del self.req_id_to_order_id[req_id]
             else:
-                connection_logger.warning("No order mapping found for reqId %s", req_id)
+                connection_logger.warning("No order mapping found for reqId {}", req_id)
 
         except Exception as e:
             connection_logger.error(f"Failed to handle order error: {e}")
@@ -3652,7 +3652,7 @@ class IBKRClient:
         else:
             self._order_fill_cache.pop(oid, None)
             connection_logger.info(
-                "Updated order %s commission=%s, pnl=%s via orders service",
+                "Updated order {} commission={}, pnl={} via orders service",
                 oid,
                 commission,
                 pnl,

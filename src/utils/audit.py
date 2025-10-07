@@ -147,7 +147,7 @@ async def log_audit_event(
     try:
         await writer.record_event(payload)
     except MariaDBConfigurationError as exc:
-        logger.warning("Audit log persistence error: %s", exc)
+        logger.warning("Audit log persistence error: {}", exc)
         logger.bind(
             action=action,
             result=payload["result"],
@@ -155,9 +155,9 @@ async def log_audit_event(
             role=role,
             method=method,
             path=path,
-        ).info("AUDIT (fallback): %s", detail or "")
+        ).info("AUDIT (fallback): {}", detail or "")
     except Exception as exc:  # pragma: no cover - defensive safety net
-        logger.debug("Failed to persist audit log: %s", exc)
+        logger.debug("Failed to persist audit log: {}", exc)
         logger.bind(
             action=action,
             result=payload["result"],
@@ -165,4 +165,4 @@ async def log_audit_event(
             role=role,
             method=method,
             path=path,
-        ).info("AUDIT (fallback): %s", detail or "")
+        ).info("AUDIT (fallback): {}", detail or "")

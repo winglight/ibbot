@@ -652,7 +652,7 @@ class WebsocketRemediationRunbook:
             try:
                 result = await step.runner()
             except Exception as exc:  # pragma: no cover - defensive guard
-                logger.exception("Runbook step failed: %s", step.id)
+                logger.exception("Runbook step failed: {}", step.id)
                 result = StepResult(
                     status="error",
                     details={"message": f"任务执行失败：{exc}"},

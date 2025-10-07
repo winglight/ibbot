@@ -115,7 +115,7 @@ class MarketQuoteAdapter(DataSourceAdapter):
                         limit=self._candle_history,
                     )
                 except Exception as exc:  # pragma: no cover - defensive guard
-                    logger.warning("Failed to load candle history for %s: %s", symbol, exc)
+                    logger.warning("Failed to load candle history for {}: {}", symbol, exc)
                 else:
                     for entry in history:
                         self._cache.append_series(channel, symbol, dict(entry), limit=self._candle_history)
@@ -150,12 +150,12 @@ class MarketQuoteAdapter(DataSourceAdapter):
         except RuntimeError:
             asyncio.run(self.event_bus.publish(envelope))
         except Exception as exc:  # pragma: no cover - defensive guard
-            logger.exception("Failed to publish market tick: %s", exc)
+            logger.exception("Failed to publish market tick: {}", exc)
 
         try:
             self._persistence.write_event(envelope)
         except Exception as exc:  # pragma: no cover - defensive guard
-            logger.exception("Failed to persist market tick: %s", exc)
+            logger.exception("Failed to persist market tick: {}", exc)
 
         emissions = self._transformer.update(
             symbol, price=normalized["last"], volume=normalized["volume"], ts_ns=ts_ns
@@ -180,12 +180,12 @@ class MarketQuoteAdapter(DataSourceAdapter):
             except RuntimeError:
                 asyncio.run(self.event_bus.publish(candle_envelope))
             except Exception as exc:  # pragma: no cover - defensive guard
-                logger.exception("Failed to publish candle event: %s", exc)
+                logger.exception("Failed to publish candle event: {}", exc)
 
             try:
                 self._persistence.write_event(candle_envelope)
             except Exception as exc:  # pragma: no cover - defensive guard
-                logger.exception("Failed to persist candle event: %s", exc)
+                logger.exception("Failed to persist candle event: {}", exc)
 
     def _candle_channel(self, interval: str) -> str:
         interval_key = interval.strip().lower()

@@ -46,7 +46,7 @@ class ParquetPersistenceBackend(PersistenceBackend):
             interval = envelope.meta.get("interval")
         if not symbol or not interval:
             logger.debug(
-                "Skipping candle persistence without symbol/interval: event=%s symbol=%s interval=%s",
+                "Skipping candle persistence without symbol/interval: event={} symbol={} interval={}",
                 envelope.event_type,
                 symbol,
                 interval,
@@ -56,7 +56,7 @@ class ParquetPersistenceBackend(PersistenceBackend):
         try:
             self._writer.append_candle(symbol, interval, payload, timestamp_ns=timestamp_ns)
         except Exception as exc:
-            logger.exception("Failed to append candle to Parquet store: %s", exc)
+            logger.exception("Failed to append candle to Parquet store: {}", exc)
 
     def load_candles(
         self,
