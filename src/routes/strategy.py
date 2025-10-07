@@ -39,8 +39,14 @@ STRATEGY_EVENT_STREAM_KEY = os.getenv("STRATEGY_EVENT_STREAM_KEY", "stream:strat
 _STRATEGY_SERVICE_CLIENT = StrategyServiceClient()
 
 
-def _get_strategy_service_client() -> StrategyServiceClient:
+def get_strategies_service_client() -> StrategyServiceClient:
+    """Expose the shared strategy service client for legacy tests."""
+
     return _STRATEGY_SERVICE_CLIENT
+
+
+def _get_strategy_service_client() -> StrategyServiceClient:
+    return get_strategies_service_client()
 
 
 def _raise_strategy_service_error(exc: ServiceClientError) -> None:
