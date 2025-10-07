@@ -68,6 +68,7 @@ router = APIRouter()
 RATE_LIMIT_SECONDS = 15.0
 SERVICE_UNAVAILABLE_MESSAGE = "服务不可用"
 RISK_RULES_UPDATE_CHANNEL = "pubsub:risk:rules:update"
+_MARKET_SNAPSHOT_LOG_INTERVAL = 30.0
 
 _ACCOUNT_CLIENT = AccountServiceClient()
 _MARKET_CLIENT = MarketDataServiceClient()
@@ -224,8 +225,19 @@ def _extract_positions_payload(
     return None, metadata
 
 
+_LAST_MARKET_SNAPSHOT_LOG: Dict[str, float] = {}
+
+
+def _log_market_snapshot_request(symbol: str) -> None:
+    now = time.monotonic()
+    last_logged_at = _LAST_MARKET_SNAPSHOT_LOG.get(symbol)
+    if last_logged_at is None or now - last_logged_at >= _MARKET_SNAPSHOT_LOG_INTERVAL:
+        _LAST_MARKET_SNAPSHOT_LOG[symbol] = now
+        logger.debug("Fetching market snapshot via service for {}", symbol)
+
+
 async def _fetch_market_snapshot(symbol: str) -> Optional[Dict[str, Any]]:
-    logger.debug("Fetching market snapshot via service", symbol=symbol)
+    _log_market_snapshot_request(symbol)
     try:
         payload = await _MARKET_CLIENT.fetch_current_price(symbol)
     except ServiceUnavailableError as exc:
