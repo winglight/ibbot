@@ -24,6 +24,11 @@ from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
+SERVICE_ALIASES = {
+    "ib_command": "ib_gateway",
+    "ib_feed": "ib_gateway",
+}
+
 
 def _load_env() -> Path | None:
     """Load ``.env.local`` (or ``.env``) into the current environment."""
@@ -49,10 +54,16 @@ def _load_env() -> Path | None:
     return loaded_from
 
 
-def _import_service(service_name: str) -> ModuleType:
+def _resolve_module(service_name: str) -> tuple[str, str]:
+    canonical = SERVICE_ALIASES.get(service_name, service_name)
+    module_path = f"services.{canonical}.main"
+    return canonical, module_path
+
+
+def _import_service(service_name: str) -> tuple[ModuleType, str]:
     """Import the ``services.<name>.main`` module."""
 
-    module_path = f"services.{service_name}.main"
+    _, module_path = _resolve_module(service_name)
 
     try:
         module = importlib.import_module(module_path)
@@ -68,7 +79,7 @@ def _import_service(service_name: str) -> ModuleType:
             f"模块 '{module_path}' 缺少 'main' 入口函数，无法直接启动。"
         )
 
-    return module
+    return module, module_path
 
 
 def run_service(service_name: str, dry_run: bool = False) -> int:
@@ -83,10 +94,10 @@ def run_service(service_name: str, dry_run: bool = False) -> int:
     """
 
     env_path = _load_env()
-    module_path = f"services.{service_name}.main"
+    canonical_name, module_path = _resolve_module(service_name)
 
     try:
-        module = _import_service(service_name)
+        module, _ = _import_service(service_name)
     except (ModuleNotFoundError, AttributeError) as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)
         return 2
@@ -110,6 +121,12 @@ def run_service(service_name: str, dry_run: bool = False) -> int:
             f"  python -m {module_path}",
         )
         return 0
+
+    if canonical_name != service_name:
+        print(
+            f"[INFO] 服务 '{service_name}' 已重定向到 {module_path}。
+原始名称将逐步下线。"
+        )
 
     print(f"[INFO] 正在启动 {module_path} (Ctrl+C 退出)。")
     print(env_msg)

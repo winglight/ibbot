@@ -6,18 +6,13 @@ import asyncio
 import contextlib
 import inspect
 import json
-import os
-import signal
 from collections import defaultdict
-from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Mapping, Sequence
 
 from src.ibbot import update_service_health
-from src.ibbot.config import ConfigProvider
 from src.ibbot.logging import get_logger
-from src.ibbot.redis import DEFAULT_REDIS_URL, close_global_client, get_redis_client
 from src.ibbot.storage.parquet_writer import MarketDataParquetWriter, get_market_data_writer
 
 SERVICE_NAME = "ib-feed"
@@ -362,70 +357,14 @@ class MarketDataFeedService:
         return value
 
 
-def _resolve_redis_url(override_key: str) -> str:
-    for key in (override_key, "IBBOT_REDIS_URL"):
-        value = os.getenv(key, "").strip()
-        if value:
-            return value
-    return DEFAULT_REDIS_URL
-
-
-async def _create_ib_client() -> Any:
-    try:
-        from src.ib_client_registry import get_client  # type: ignore
-    except Exception:  # pragma: no cover - optional dependency
-        class _PlaceholderClient:
-            async def connect(self) -> None:
-                raise RuntimeError("IBKR client is not available")
-
-            async def subscribe_market_data(self, symbol: str) -> None:  # pragma: no cover - placeholder
-                raise RuntimeError("IBKR client is not available")
-
-        return _PlaceholderClient()
-    return await get_client("secondary")
-
-
 async def run_service() -> None:
-    logger = get_logger("ibbot.services.ib_feed.main")
-    redis_url = _resolve_redis_url("IB_FEED_REDIS_URL")
-    redis = await get_redis_client(redis_url)
-
-    provider = ConfigProvider(redis_url=redis_url)
-    await provider.start()
-    config = await provider.get_module(SERVICE_NAME)
-
-    subscriptions = config.get("symbols", [])
-    if not isinstance(subscriptions, Sequence) or isinstance(subscriptions, (str, bytes)):
-        subscriptions = []
-    reconnect_delay = float(config.get("reconnect_delay", 1.0))
-
-    ib_client = await _create_ib_client()
-    service = MarketDataFeedService(
-        ib_client,
-        redis,
-        subscriptions=subscriptions,
-        reconnect_delay=reconnect_delay,
+    logger = get_logger("ibbot.services.ib_feed.delegator")
+    logger.warning(
+        "ib-feed runtime has been replaced by ib-gateway; forwarding to unified service",
     )
+    from services.ib_gateway import run_service as _run_gateway
 
-    stop_event = asyncio.Event()
-
-    def _handle_stop(*_: Any) -> None:
-        logger.info("Received stop signal")
-        stop_event.set()
-
-    loop = asyncio.get_running_loop()
-    for signame in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.add_signal_handler(signame, _handle_stop)
-        except NotImplementedError:  # pragma: no cover - platform dependent
-            signal.signal(signame, lambda *_: asyncio.create_task(stop_event.set()))
-
-    async with AsyncExitStack() as stack:
-        stack.push_async_callback(provider.close)
-        stack.push_async_callback(close_global_client)
-        stack.push_async_callback(service.stop)
-        await service.start()
-        await stop_event.wait()
+    await _run_gateway()
 
 
 def main() -> None:
