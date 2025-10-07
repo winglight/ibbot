@@ -51,6 +51,12 @@ async def dom_start(
         raise HTTPException(status_code=400, detail="Symbol is required")
 
     client = get_dom_service_client()
+    logger.debug(
+        "Dispatching DOM start request",
+        symbol=symbol.upper(),
+        num_rows=req.num_rows,
+        force_restart=bool(req.force_restart),
+    )
     try:
         return await client.start_dom(
             {
@@ -78,6 +84,7 @@ async def dom_stop(
     if not symbol:
         raise HTTPException(status_code=400, detail="Symbol is required")
     client = get_dom_service_client()
+    logger.debug("Dispatching DOM stop request", symbol=symbol.upper())
     try:
         return await client.stop_dom({"symbol": symbol})
     except ServiceClientError as exc:
