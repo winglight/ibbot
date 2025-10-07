@@ -187,6 +187,50 @@ def _first_nonempty(*candidates: Any) -> Any:
     return None
 
 
+_ORDER_EVENT_MARKER_KEYS = {
+    "order",
+    "order_id",
+    "orderid",
+    "ib_order_id",
+    "iborderid",
+    "perm_id",
+    "permid",
+    "client_order_id",
+    "clientorderid",
+    "order_status",
+    "orderstatus",
+    "avg_fill_price",
+    "avgfillprice",
+    "filled",
+    "remaining",
+}
+
+
+def _payload_has_order_markers(*candidates: Mapping[str, Any] | None) -> bool:
+    stack: list[Mapping[str, Any]] = [
+        mapping for mapping in candidates if isinstance(mapping, Mapping)
+    ]
+    seen: set[int] = set()
+    while stack:
+        mapping = stack.pop()
+        mapping_id = id(mapping)
+        if mapping_id in seen:
+            continue
+        seen.add(mapping_id)
+        for key, value in mapping.items():
+            try:
+                key_text = str(key).strip().lower()
+            except Exception:
+                continue
+            if key_text in _ORDER_EVENT_MARKER_KEYS:
+                return True
+            if isinstance(value, Mapping):
+                stack.append(value)
+            elif isinstance(value, (list, tuple, set)):
+                stack.extend(item for item in value if isinstance(item, Mapping))
+    return False
+
+
 def _resolve_start_date(
     start_date: datetime | str | None,
     tz: str | None,
@@ -1521,9 +1565,6 @@ class OrdersRuntime:
                 self._last_updated_at = _utc_now()
 
     async def _apply_order_event(self, payload: Mapping[str, Any]) -> bool:
-        command_id = str(
-            payload.get("command_id") or payload.get("ib_command_id") or ""
-        ).strip()
         parsed_payload = dict(payload)
         result_mapping = _coerce_mapping(parsed_payload.get("result"))
         if result_mapping is not None:
@@ -1531,11 +1572,46 @@ class OrdersRuntime:
         response_mapping = _coerce_mapping(parsed_payload.get("response"))
         if response_mapping is not None:
             parsed_payload["response"] = response_mapping
+
+        command_candidates: list[str] = []
+        for candidate in (
+            payload.get("command_id"),
+            payload.get("ib_command_id"),
+        ):
+            text = _coerce_str(candidate)
+            if text:
+                command_candidates.append(text)
+        if result_mapping is not None:
+            for key in ("command_id", "ib_command_id"):
+                text = _coerce_str(result_mapping.get(key))
+                if text:
+                    command_candidates.append(text)
+        if response_mapping is not None:
+            for key in ("command_id", "ib_command_id"):
+                text = _coerce_str(response_mapping.get(key))
+                if text:
+                    command_candidates.append(text)
+        command_id = command_candidates[0] if command_candidates else ""
+
+        has_order_markers = _payload_has_order_markers(
+            parsed_payload, result_mapping, response_mapping
+        )
         order_id = self._extract_order_id(parsed_payload, result_mapping, command_id)
+        if order_id and order_id != command_id:
+            has_order_markers = True
         status = self._extract_status(parsed_payload, result_mapping)
+        if command_id and command_id not in self._command_to_order and not has_order_markers:
+            return False
         if not (command_id or order_id):
-            descriptor = str(parsed_payload.get("type") or parsed_payload.get("category") or "").lower()
-            if "order" not in descriptor:
+            descriptor = _coerce_str(
+                parsed_payload.get("type")
+                or parsed_payload.get("category")
+                or parsed_payload.get("event")
+                or parsed_payload.get("event_type")
+                or parsed_payload.get("topic")
+            )
+            descriptor_lower = descriptor.lower() if descriptor else ""
+            if "order" not in descriptor_lower:
                 return False
         identifier = order_id or command_id
         if not identifier:
