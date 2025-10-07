@@ -237,6 +237,29 @@ async def test_runtime_skips_existing_stream_entries_on_start() -> None:
 
 
 @pytest.mark.asyncio
+async def test_runtime_ignores_non_order_command_results() -> None:
+    runtime, redis, repo = await _create_runtime()
+    try:
+        await redis.xadd(
+            "stream:ib:results",
+            {
+                "command_id": "cmd-non-order",
+                "status": "success",
+                "result": json.dumps({"message": "pong"}),
+            },
+        )
+        processed = await runtime.poll_stream_once()
+        assert processed == 1
+        async with runtime._lock:
+            assert not runtime._active_orders
+            assert "cmd-non-order" not in runtime._command_to_order
+        assert repo.insert_calls == 0
+        assert repo.update_calls == 0
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
 async def test_get_order_fetches_from_repository_when_missing() -> None:
     repository = RecordingRepository()
     runtime, redis, repo = await _create_runtime(repository=repository)
