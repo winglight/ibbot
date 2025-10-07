@@ -121,7 +121,7 @@ class IBQuoteFeed(QuoteFeed):
 
                 return _cancel_existing
 
-        client = self._resolve_ibkr_client()
+        client = await asyncio.to_thread(self._resolve_ibkr_client)
         ensure_fn = getattr(client, "ensure_connection", None)
         if callable(ensure_fn):
             try:
@@ -201,7 +201,11 @@ class IBQuoteFeed(QuoteFeed):
         try:
             ticker.updateEvent += _on_update
         except Exception as exc:  # pragma: no cover - defensive guard
-            logger.error("Failed to attach update handler for %s: %s", symbol, exc)
+            logger.error(
+                "Failed to attach update handler",
+                symbol=symbol,
+                error=exc,
+            )
             connection_manager.run_in_connection_thread(
                 lambda: connection_manager.get_ib_instance().cancelMktData(contract)
             )
@@ -220,8 +224,8 @@ class IBQuoteFeed(QuoteFeed):
             if ib:
                 try:
                     ib.cancelMktData(contract)
-                except Exception as exc:
-                    logger.warning("Failed to cancel market data for %s", contract)
+                except Exception:
+                    logger.warning("Failed to cancel market data", contract=contract)
             try:
                 ticker.updateEvent -= subscription.handler
             except Exception:
@@ -262,7 +266,11 @@ class IBQuoteFeed(QuoteFeed):
             try:
                 cb(payload)
             except Exception as exc:
-                logger.debug("Quote callback failed for %s: %s", symbol, exc)
+                logger.debug(
+                    "Quote callback failed",
+                    symbol=symbol,
+                    error=exc,
+                )
 
     def _extract_payload(self, symbol: str, ticker: any) -> Optional[Dict[str, float]]:
         try:
@@ -289,7 +297,11 @@ class IBQuoteFeed(QuoteFeed):
                 "ts_ns": ts_ns,
             }
         except Exception as exc:  # pragma: no cover - defensive guard
-            logger.debug("Failed to extract ticker payload for %s: %s", symbol, exc)
+            logger.debug(
+                "Failed to extract ticker payload",
+                symbol=symbol,
+                error=exc,
+            )
             return None
 
     def _build_contract(self, symbol: str, options: Dict[str, any]):
@@ -310,7 +322,10 @@ class IBQuoteFeed(QuoteFeed):
             try:
                 return get_client_sync("secondary")
             except Exception as exc:
-                logger.error("Failed to resolve shared IBKR client: %s", exc)
+                logger.error(
+                    "Failed to resolve shared IBKR client",
+                    error=exc,
+                )
 
         try:
             import core  # type: ignore
@@ -627,10 +642,10 @@ def resolve_default_quote_feed() -> QuoteFeed:
         try:
             return RedisQuoteFeed()
         except Exception as exc:
-            logger.warning("Failed to initialise Redis quote feed: %s", exc)
+            logger.warning("Failed to initialise Redis quote feed", error=exc)
 
     try:
         return IBQuoteFeed()
     except Exception as exc:  # pragma: no cover - defensive fallback
-        logger.warning("Falling back to in-memory quote feed: %s", exc)
+        logger.warning("Falling back to in-memory quote feed", error=exc)
         return InMemoryQuoteFeed()
