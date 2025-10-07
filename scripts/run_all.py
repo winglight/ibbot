@@ -17,14 +17,16 @@ from urllib.parse import urlparse, urlsplit, urlunsplit
 
 from dotenv import dotenv_values
 
-from scripts.run_service import SERVICE_ALIASES, _resolve_module
-
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 # Ensure the repository root is available for absolute imports like `services.*`
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+# Import from run_service after adding PROJECT_ROOT to sys.path
+sys.path.insert(0, str(Path(__file__).parent))
+from run_service import SERVICE_ALIASES, _resolve_module
 
 from src.utils.dataclass_compat import enable_slots_compat
 
