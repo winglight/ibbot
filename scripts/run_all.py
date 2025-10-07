@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Iterable, Sequence
 from urllib.parse import urlparse, urlsplit, urlunsplit
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -223,7 +223,12 @@ def _redact_url_secret(value: str) -> str:
     )
 
 
-def _log_environment_summary(env_source: Path | None) -> None:
+def _log_environment_summary(
+    env_source: Path | None,
+    *,
+    overridden: Sequence[str] = (),
+    newly_added: Sequence[str] = (),
+) -> None:
     if env_source is None:
         print("[INFO] 未找到 .env.local/.env，沿用当前进程环境变量。")
         return
@@ -234,6 +239,13 @@ def _log_environment_summary(env_source: Path | None) -> None:
         relative_path = env_source
 
     print(f"[INFO] 从 {relative_path} 加载了环境变量。")
+
+    if overridden:
+        overridden_keys = "、".join(sorted(set(overridden)))
+        print(f"        覆盖已有变量：{overridden_keys}")
+    if newly_added:
+        added_keys = "、".join(sorted(set(newly_added)))
+        print(f"        新增变量：{added_keys}")
 
     watched_keys = (
         DEFAULT_REDIS_URL_ENV,
@@ -249,13 +261,34 @@ def _log_environment_summary(env_source: Path | None) -> None:
         print(f"        {key} = {_redact_url_secret(value)}")
 
 
-def _load_env() -> Path | None:
+def _load_env() -> tuple[Path | None, tuple[str, ...], tuple[str, ...]]:
+    overridden: list[str] = []
+    newly_added: list[str] = []
+
     for candidate in (".env.local", ".env"):
         env_file = PROJECT_ROOT / candidate
-        if env_file.exists():
-            load_dotenv(env_file, override=False)
-            return env_file
-    return None
+        if not env_file.exists():
+            continue
+
+        # Mimic ``python -m dotenv run`` semantics: values in the dotenv file
+        # override anything that is already defined in the environment.
+        values = {
+            key: value
+            for key, value in dotenv_values(env_file).items()
+            if value is not None
+        }
+
+        for key, value in values.items():
+            previous = os.environ.get(key)
+            if previous is None:
+                newly_added.append(key)
+            elif previous != value:
+                overridden.append(key)
+            os.environ[key] = value
+
+        return env_file, tuple(overridden), tuple(newly_added)
+
+    return None, tuple(), tuple()
 
 
 def _resolve_import_module(service: str) -> str:
@@ -326,8 +359,8 @@ def run_services(
     *,
     skip_redis_check: bool = False,
 ) -> int:
-    env_source = _load_env()
-    _log_environment_summary(env_source)
+    env_source, overridden, newly_added = _load_env()
+    _log_environment_summary(env_source, overridden=overridden, newly_added=newly_added)
 
     missing = _check_service_imports(services)
     if missing:
