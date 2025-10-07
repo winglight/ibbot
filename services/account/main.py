@@ -5,6 +5,7 @@ import json
 import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from time import perf_counter
 from typing import Any, AsyncIterator, Dict, Iterable, Mapping, Optional, Sequence, Tuple
 
 from contextlib import asynccontextmanager
@@ -62,6 +63,7 @@ class AccountServiceState:
     orders_stale: Optional[bool] = None
     orders_stale_reason: Optional[str] = None
     orders_last_error: Optional[str] = None
+    orders_response_time_ms: Optional[float] = None
     daily_summary_last_refreshed_at: Optional[str] = None
     daily_summary_source: Optional[str] = None
     daily_summary_from_cache: Optional[bool] = None
@@ -104,6 +106,9 @@ class AccountServiceState:
                 "orders_stale": "" if self.orders_stale is None else self.orders_stale,
                 "orders_stale_reason": self.orders_stale_reason or "",
                 "orders_last_error": self.orders_last_error or "",
+                "orders_response_time_ms": ""
+                if self.orders_response_time_ms is None
+                else round(self.orders_response_time_ms, 3),
                 "daily_summary_last_refreshed_at": self.daily_summary_last_refreshed_at or "",
                 "daily_summary_source": self.daily_summary_source or "",
                 "daily_summary_from_cache": ""
@@ -239,6 +244,7 @@ def _orders_payload_to_response(
 async def _fetch_orders_from_service(
     *, limit: int, offset: int, start_date: str | None = None
 ) -> Tuple[list[Dict[str, Any]], int, Dict[str, Any]]:
+    start = perf_counter()
     try:
         payload = await _ORDERS_CLIENT.list_orders(
             limit=limit,
@@ -251,6 +257,8 @@ async def _fetch_orders_from_service(
     except ServiceClientError as exc:
         detail = f"Orders service error: {exc}"
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=detail) from exc
+
+    duration_ms = max((perf_counter() - start) * 1000.0, 0.0)
 
     if not isinstance(payload, Mapping):
         detail = "Invalid orders service response"
@@ -269,6 +277,7 @@ async def _fetch_orders_from_service(
     metadata.setdefault("from_cache", False)
     metadata.setdefault("stale", False)
     metadata.setdefault("stale_reason", None)
+    metadata["response_time_ms"] = round(duration_ms, 3)
     return orders, total, metadata
 
 
@@ -373,6 +382,7 @@ async def _record_orders_metrics(
     stale: bool,
     stale_reason: Optional[str],
     error: Optional[str],
+    response_time_ms: Optional[float],
 ) -> None:
     _state.orders_source = source
     _state.orders_last_refreshed_at = updated_at
@@ -380,6 +390,7 @@ async def _record_orders_metrics(
     _state.orders_stale = stale
     _state.orders_stale_reason = stale_reason
     _state.orders_last_error = error
+    _state.orders_response_time_ms = response_time_ms
     await _publish_account_metrics()
 
 
@@ -972,6 +983,7 @@ async def get_account_orders(
             stale=True,
             stale_reason=reason,
             error=detail,
+            response_time_ms=None,
         )
         raise
 
@@ -989,6 +1001,7 @@ async def get_account_orders(
         stale=bool(metadata.get("stale", False)),
         stale_reason=metadata.get("stale_reason"),
         error=None,
+        response_time_ms=metadata.get("response_time_ms"),
     )
 
     return _orders_response(

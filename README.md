@@ -169,6 +169,28 @@ python scripts/run_all.py --dry-run ib_command
 | `notification` | `python scripts/run_service.py notification` | Redis（事件队列） | 推送通知到浏览器/Telegram。 |
 | `optimizer` | `python scripts/run_service.py optimizer` | Redis、MariaDB | 需要历史数据（MariaDB）与事件流（Redis）。 |
 
+#### 订单服务持久化更新
+
+自 2024-08 起，订单服务的历史/活跃订单全部持久化在数据库中。Redis 仅承担命令队列与健康状态上报，不再缓存订单快照：
+
+- `services/orders` 在启动时会直接从数据库仓储初始化内存状态，不会再尝试加载 Redis 快照或写入 `json:orders:*` 键。
+- 主程序、账户服务与 WebSocket 路由均通过 `OrdersServiceClient` 查询订单，避免绕过服务层访问 Redis。
+
+部署升级后建议执行一次 Redis 清理，移除旧版快照键防止遗留数据被误用：
+
+1. 连接到运行时 Redis 实例（可使用 `redis-cli` 或可视化工具）。
+2. 检查是否存在 `json:orders:*`、`hash:orders:*` 或 `stream:orders_snapshot` 等历史键：
+   ```bash
+   redis-cli --scan --pattern 'json:orders:*'
+   redis-cli --scan --pattern 'hash:orders:*'
+   ```
+3. 对确认不再使用的键执行删除，可结合 `xargs` 一次性清理：
+   ```bash
+   redis-cli --scan --pattern 'json:orders:*' | xargs -r redis-cli del
+   redis-cli --scan --pattern 'hash:orders:*' | xargs -r redis-cli del
+   ```
+4. 重启 `services/orders` 与主程序，确认订单列表数据来自数据库且健康指标正常刷新。
+
 ### Redis 健康键约定
 
 | Redis 键 | 默认来源 | 主要字段 |
