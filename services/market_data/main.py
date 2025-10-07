@@ -35,6 +35,7 @@ from src.utils import NY_TZ, now_local, to_local_iso
 
 PRICE_CHANNEL_TEMPLATE = "pubsub:ib:price:{symbol}"
 DOM_CHANNEL_TEMPLATE = "pubsub:ib:dom:{symbol}"
+SNAPSHOT_KEY_TEMPLATE = "hash:market:snapshot:{symbol}"
 STREAM_KEY = "stream:market-service"
 CACHE_PREFIX_ENV = "DATA_LAYER_REDIS_PREFIX"
 DEFAULT_CACHE_PREFIX = "market-data"
@@ -2411,9 +2412,119 @@ def create_app(*, runtime: MarketDataRuntime | None = None) -> FastAPI:
 
         return await chart_data(query)
 
+    async def _load_snapshot_from_cache(symbol: str, logger: Any) -> Dict[str, Any] | None:
+        redis_client = await _ensure_redis(logger)
+        key = SNAPSHOT_KEY_TEMPLATE.format(symbol=symbol)
+        try:
+            raw_fields = await redis_client.hgetall(key)
+        except Exception:
+            if logger:
+                logger.warning(
+                    "Failed to load cached market snapshot", extra={"symbol": symbol}, exc_info=True
+                )
+            return None
+
+        if not raw_fields:
+            return None
+
+        def _decode(value: Any) -> str:
+            if isinstance(value, bytes):
+                return value.decode("utf-8", "ignore")
+            return str(value)
+
+        decoded: dict[str, str] = {
+            _decode(field): _decode(value) for field, value in raw_fields.items()
+        }
+
+        price_fields = {
+            "symbol",
+            "bid",
+            "ask",
+            "last",
+            "bid_size",
+            "ask_size",
+            "volume",
+            "mid",
+            "timestamp",
+        }
+
+        def _coerce_float(text: str) -> float | None:
+            try:
+                stripped = text.strip()
+            except AttributeError:
+                stripped = str(text)
+            if stripped == "":
+                return None
+            try:
+                return float(stripped)
+            except (TypeError, ValueError):
+                return None
+
+        price_component: dict[str, Any] | None = None
+        if decoded.keys() & price_fields:
+            component: dict[str, Any] = {}
+            for field in price_fields:
+                if field not in decoded:
+                    continue
+                value = decoded[field]
+                if field in {"bid", "ask", "last", "bid_size", "ask_size", "volume", "mid"}:
+                    coerced = _coerce_float(value)
+                    if coerced is not None:
+                        component[field] = coerced
+                elif field == "symbol":
+                    component[field] = symbol
+                else:
+                    component[field] = value
+            if component:
+                price_component = component
+
+        dom_component: dict[str, Any] | None = None
+        dom_payload = decoded.get("dom")
+        if dom_payload:
+            try:
+                dom_data = json.loads(dom_payload)
+            except json.JSONDecodeError:
+                if logger:
+                    logger.warning(
+                        "Invalid DOM snapshot in cache", extra={"symbol": symbol}
+                    )
+            else:
+                if isinstance(dom_data, Mapping):
+                    dom_component = dict(dom_data)
+                    dom_component["symbol"] = symbol
+
+        dom_updated_at = decoded.get("dom_updated_at")
+
+        latest_timestamp: datetime | None = None
+        for candidate in (
+            price_component.get("timestamp") if price_component else None,
+            dom_component.get("timestamp") if dom_component else None,
+            dom_updated_at,
+        ):
+            parsed = _parse_timestamp(candidate) if candidate else None
+            if parsed and (latest_timestamp is None or parsed > latest_timestamp):
+                latest_timestamp = parsed
+
+        entry = runtime._snapshots.setdefault(
+            symbol, {"symbol": symbol, "price": None, "dom": None}
+        )
+        if price_component is not None:
+            entry["price"] = price_component
+        if dom_component is not None:
+            entry["dom"] = dom_component
+        runtime._snapshots[symbol] = entry
+        if latest_timestamp is not None:
+            runtime._updated_at[symbol] = latest_timestamp
+
+        return runtime.get_snapshot(symbol)
+
     @app.get("/market/{symbol}")
     async def get_market(symbol: str) -> JSONResponse:
-        snapshot = runtime.get_snapshot(symbol)
+        resolved_symbol = symbol.strip().upper()
+        snapshot = runtime.get_snapshot(resolved_symbol)
+        if snapshot is None:
+            logger = _get_logger()
+            snapshot = await _load_snapshot_from_cache(resolved_symbol, logger)
         if snapshot is None:
             raise HTTPException(status_code=404, detail="Symbol not found")
         return JSONResponse(snapshot)
