@@ -1,7 +1,11 @@
 import asyncio
+import contextlib
 import json
 import math
+import os
 import time
+from copy import deepcopy
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import (
     Any,
@@ -23,6 +27,15 @@ from src.account_snapshot_cache import (
 )
 from src.connection_manager import connection_manager
 from src.websocket_manager import websocket_manager as global_websocket_manager
+from src.data_layer import (
+    DataSubscriptionRequest,
+    DataSubscriptionToken,
+    DataSourceError,
+    EventEnvelope,
+    get_data_layer_mode,
+    get_data_source_manager,
+    is_legacy_mode,
+)
 from src.dom_service import get_dom_service
 from src.utils import now_local, parse_local_datetime, to_local_iso
 from src.routes.logs import load_logs_data
@@ -45,7 +58,7 @@ from src.routes.service_clients import (
     ServiceUnavailableError,
 )
 from services.risk.engine import RiskRule
-from src.ibbot.redis import PubSubListener
+from src.ibbot.redis import PubSubListener, get_redis_client
 from src.utils.strategy_cache import (
     compute_performance_metrics as _compute_performance_metrics,
     get_strategy_stats as _get_strategy_stats,
@@ -749,6 +762,758 @@ def _enrich_sizing_history_items(items: List[Dict[str, Any]]) -> List[Dict[str, 
 
     return items
 
+
+@dataclass
+class _PerformanceEntry:
+    payload: Dict[str, Any]
+    stored_at: float
+    signature: str
+
+
+class StrategyPerformanceCache:
+    """Share recent strategy performance responses across websocket clients."""
+
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self._entries: Dict[str, _PerformanceEntry] = {}
+        ttl_raw = os.getenv("STRATEGY_PERFORMANCE_CACHE_TTL_SECONDS", "45")
+        try:
+            self._ttl = max(float(ttl_raw), 1.0)
+        except (TypeError, ValueError):
+            self._ttl = 45.0
+
+    @staticmethod
+    def _clone_payload(payload: Mapping[str, Any]) -> Dict[str, Any]:
+        try:
+            return deepcopy(payload)  # type: ignore[arg-type]
+        except Exception:
+            try:
+                return dict(payload)
+            except Exception:
+                return {}
+
+    @staticmethod
+    def _clone_value(value: Any) -> Any:
+        try:
+            return deepcopy(value)
+        except Exception:
+            return value
+
+    @staticmethod
+    def _normalise_timestamp(value: Any) -> Any:
+        if isinstance(value, datetime):
+            return to_local_iso(value)
+        return value
+
+    @staticmethod
+    def _coerce_text(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value.strip()
+        return str(value).strip()
+
+    @classmethod
+    def _normalise_name(cls, value: str) -> str:
+        return cls._coerce_text(value).lower()
+
+    @classmethod
+    def _normalise_range(cls, value: str | None) -> str:
+        return cls._coerce_text(value or "").lower()
+
+    @classmethod
+    def _build_key(
+        cls,
+        name: str,
+        range_value: str | None,
+        start: str | None,
+        end: str | None,
+    ) -> str:
+        return "::".join(
+            (
+                cls._normalise_name(name),
+                cls._normalise_range(range_value),
+                cls._coerce_text(start),
+                cls._coerce_text(end),
+            )
+        )
+
+    def _prune_expired(self, *, now: Optional[float] = None) -> None:
+        now_value = now or time.monotonic()
+        if not self._entries:
+            return
+        expired: List[str] = []
+        for key, entry in self._entries.items():
+            if now_value - entry.stored_at > self._ttl:
+                expired.append(key)
+        for key in expired:
+            self._entries.pop(key, None)
+
+    @staticmethod
+    def _compute_signature(payload: Mapping[str, Any]) -> str:
+        try:
+            return json.dumps(payload, sort_keys=True, ensure_ascii=False)
+        except TypeError:
+            try:
+                serialisable = json.loads(json.dumps(payload, default=str))
+            except Exception:
+                serialisable = {
+                    str(key): str(value) for key, value in payload.items()
+                }
+            if isinstance(serialisable, Mapping):
+                serialisable = dict(serialisable)
+            return json.dumps(serialisable, sort_keys=True, ensure_ascii=False)
+
+    async def store_message(
+        self,
+        name: str,
+        range_value: str | None,
+        start: str | None,
+        end: str | None,
+        message: Mapping[str, Any],
+    ) -> bool:
+        if not name:
+            return False
+        if not isinstance(message, Mapping):
+            return False
+
+        payload = self._clone_payload(message)
+        if not payload:
+            return False
+
+        if payload.get("type") != "strategy_performance":
+            return False
+
+        payload.setdefault("name", name)
+        if range_value is not None and "range" not in payload:
+            payload["range"] = self._coerce_text(range_value)
+        if start is not None and "start" not in payload:
+            payload["start"] = self._coerce_text(start)
+        if end is not None and "end" not in payload:
+            payload["end"] = self._coerce_text(end)
+
+        if "timestamp" in payload:
+            payload["timestamp"] = self._normalise_timestamp(payload["timestamp"])
+
+        key = self._build_key(name, range_value, start, end)
+        signature = self._compute_signature(payload)
+        async with self._lock:
+            self._prune_expired()
+            existing = self._entries.get(key)
+            if existing and existing.signature == signature:
+                existing.stored_at = time.monotonic()
+                return False
+            self._entries[key] = _PerformanceEntry(
+                payload=payload,
+                stored_at=time.monotonic(),
+                signature=signature,
+            )
+        return True
+
+    async def get_message(
+        self,
+        name: str,
+        range_value: str | None,
+        start: str | None,
+        end: str | None,
+    ) -> Optional[Dict[str, Any]]:
+        key = self._build_key(name, range_value, start, end)
+        async with self._lock:
+            self._prune_expired()
+            entry = self._entries.get(key)
+            if not entry:
+                return None
+            return self._clone_payload(entry.payload)
+
+    async def remember_from_status(
+        self,
+        name: str,
+        status: Mapping[str, Any],
+        *,
+        message_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        if not isinstance(status, Mapping):
+            return None
+
+        performance = status.get("performance")
+        if not isinstance(performance, Mapping):
+            return None
+
+        metrics: Any = (
+            performance.get("metrics")
+            or performance.get("data")
+            or performance.get("payload")
+        )
+        if metrics is None:
+            # Fallback to using the raw mapping minus metadata fields.
+            metrics = {
+                key: value
+                for key, value in performance.items()
+                if key
+                not in {
+                    "range",
+                    "start",
+                    "start_date",
+                    "end",
+                    "end_date",
+                    "source",
+                    "timestamp",
+                }
+            }
+            if not metrics:
+                return None
+
+        range_value = performance.get("range") or status.get("range")
+        start_value = (
+            performance.get("start")
+            or performance.get("start_date")
+            or status.get("start")
+        )
+        end_value = (
+            performance.get("end")
+            or performance.get("end_date")
+            or status.get("end")
+        )
+
+        if isinstance(metrics, Mapping):
+            metrics_payload: Any = self._clone_payload(metrics)
+        else:
+            metrics_payload = self._clone_value(metrics)
+
+        message: Dict[str, Any] = {
+            "type": "strategy_performance",
+            "success": True,
+            "name": name,
+            "range": range_value or "",
+            "metrics": metrics_payload,
+            "source": performance.get("source") or "stream",
+        }
+
+        stats = status.get("stats") or performance.get("stats")
+        if isinstance(stats, Mapping):
+            message["stats"] = self._clone_payload(stats)
+
+        timestamp = (
+            performance.get("timestamp")
+            or status.get("timestamp")
+            or status.get("updated_at")
+            or status.get("created_at")
+        )
+        if timestamp is not None:
+            message["timestamp"] = self._normalise_timestamp(timestamp)
+        if message_id is not None:
+            message["event_id"] = message_id
+
+        stored = await self.store_message(
+            name, range_value, start_value, end_value, message
+        )
+        if not stored:
+            return None
+
+        return self._clone_payload(message)
+
+
+def _decode_json_mapping(data: Any) -> Dict[str, Any]:
+    """Return a mapping parsed from a JSON payload if possible."""
+
+    if not data:
+        return {}
+
+    if isinstance(data, Mapping):
+        return {str(key): value for key, value in data.items()}
+
+    text: str
+    if isinstance(data, (bytes, bytearray)):
+        try:
+            text = data.decode("utf-8")
+        except Exception:
+            text = data.decode("utf-8", errors="ignore")
+    elif isinstance(data, str):
+        text = data
+    else:
+        return {}
+
+    text = text.strip()
+    if not text:
+        return {}
+
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return {}
+
+    if isinstance(payload, Mapping):
+        return {str(key): value for key, value in payload.items()}
+    return {}
+
+
+class StrategyStatusStreamer:
+    """Bridge strategy event stream updates to websocket clients."""
+
+    def __init__(self) -> None:
+        self._stream_key = os.getenv("STRATEGY_EVENT_STREAM_KEY", "stream:strategy:events").strip()
+        self._metadata_prefix = os.getenv(
+            "STRATEGY_METADATA_REDIS_PREFIX", "json:strategy"
+        ).strip(" :")
+        self._task: Optional[asyncio.Task[None]] = None
+        self._lock = asyncio.Lock()
+        self._running = False
+        self._last_id: Optional[str] = None
+        self._status_signatures: Dict[str, str] = {}
+        self._statuses: Dict[str, Dict[str, Any]] = {}
+
+    @staticmethod
+    def _clone_status(status: Mapping[str, Any]) -> Dict[str, Any]:
+        if isinstance(status, Mapping):
+            try:
+                return deepcopy(status)  # type: ignore[arg-type]
+            except Exception:
+                try:
+                    return dict(status)
+                except Exception:
+                    return {}
+        return {}
+
+    @staticmethod
+    def _compute_signature(status: Mapping[str, Any]) -> str:
+        try:
+            return json.dumps(status, sort_keys=True, ensure_ascii=False)
+        except TypeError:
+            try:
+                serialisable = json.loads(json.dumps(status, default=str))
+            except Exception:
+                serialisable = {str(key): str(value) for key, value in status.items()}
+            if isinstance(serialisable, Mapping):
+                serialisable = dict(serialisable)
+            return json.dumps(serialisable, sort_keys=True, ensure_ascii=False)
+
+    def _remember_status(self, strategy: str, status: Mapping[str, Any]) -> Dict[str, Any]:
+        clone = self._clone_status(status)
+        clone.setdefault("strategy", strategy)
+        self._statuses[strategy] = clone
+        return clone
+
+    def remember_external_status(self, strategy: str, status: Mapping[str, Any]) -> None:
+        stored = self._remember_status(strategy, status)
+        self._status_signatures[strategy] = self._compute_signature(stored)
+
+    async def start(self) -> None:
+        """Ensure the background stream consumer is running."""
+
+        if not self._stream_key:
+            return
+
+        async with self._lock:
+            if self._task and not self._task.done():
+                return
+            self._running = True
+            self._task = asyncio.create_task(
+                self._run(), name="strategy-status-streamer"
+            )
+
+    async def _run(self) -> None:
+        backoff = 1.0
+        while self._running:
+            try:
+                redis = await get_redis_client()
+            except Exception as exc:  # pragma: no cover - redis initialisation guard
+                logger.debug(
+                    "Failed to initialise Redis client for strategy stream", error=str(exc)
+                )
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 30.0)
+                continue
+
+            backoff = 1.0
+
+            try:
+                await self._consume(redis)
+            except asyncio.CancelledError:  # pragma: no cover - cooperative shutdown
+                raise
+            except Exception as exc:  # pragma: no cover - defensive logging
+                logger.debug(
+                    "Strategy status streamer encountered an error", error=str(exc)
+                )
+                await asyncio.sleep(1.0)
+
+    async def _consume(self, redis) -> None:
+        last_id = self._last_id or "$"
+        while self._running:
+            try:
+                records = await redis.xread({self._stream_key: last_id}, block=1000, count=20)
+            except asyncio.CancelledError:  # pragma: no cover - cooperative shutdown
+                raise
+            except Exception as exc:  # pragma: no cover - redis read guard
+                logger.debug(
+                    "Failed to read strategy event stream", stream=self._stream_key, error=str(exc)
+                )
+                await asyncio.sleep(1.0)
+                break
+
+            if not records:
+                continue
+
+            for _, entries in records:
+                for message_id, payload in entries:
+                    last_id = message_id
+                    await self._handle_entry(redis, message_id, payload)
+
+        self._last_id = last_id
+
+    async def _handle_entry(self, redis, message_id: str, payload: Mapping[str, Any]) -> None:
+        data = self._normalise_stream_payload(payload)
+        strategy = (data.get("strategy") or data.get("name") or "").strip()
+        if not strategy:
+            return
+
+        status = await self._load_status(redis, strategy)
+        if not status:
+            await asyncio.sleep(0.05)
+            status = await self._load_status(redis, strategy)
+            if not status:
+                return
+
+        previous_signature = self._status_signatures.get(strategy)
+        stored_status = self._remember_status(strategy, status)
+        new_signature = self._compute_signature(stored_status)
+        self._status_signatures[strategy] = new_signature
+        if previous_signature == new_signature:
+            return
+
+        message: Dict[str, Any] = {
+            "type": "strategy_status",
+            "success": True,
+            "name": strategy,
+            "status": self._clone_status(stored_status),
+            "source": "stream",
+            "event_id": message_id,
+        }
+
+        timestamp = (
+            data.get("timestamp")
+            or data.get("updated_at")
+            or data.get("created_at")
+            or data.get("ts")
+        )
+        if timestamp:
+            message["timestamp"] = timestamp
+
+        performance_message: Optional[Dict[str, Any]] = None
+        try:
+            performance_message = await _STRATEGY_PERFORMANCE_CACHE.remember_from_status(
+                strategy,
+                stored_status,
+                message_id=message_id,
+            )
+        except Exception as exc:  # pragma: no cover - defensive guard
+            logger.debug(
+                "Failed to cache streamed strategy performance",
+                strategy=strategy,
+                error=str(exc),
+            )
+
+        await _websocket_manager().broadcast(message)
+        if performance_message:
+            await _websocket_manager().broadcast(performance_message)
+
+    async def get_cached_status(self, strategy: str) -> Optional[Tuple[Dict[str, Any], str]]:
+        name = (strategy or "").strip()
+        if not name:
+            return None
+
+        cached = self._statuses.get(name)
+        if cached:
+            if name not in self._status_signatures:
+                self._status_signatures[name] = self._compute_signature(cached)
+            return self._clone_status(cached), "stream"
+
+        try:
+            redis = await get_redis_client()
+        except Exception as exc:  # pragma: no cover - redis initialisation guard
+            logger.debug(
+                "Failed to initialise Redis client for cached strategy status",
+                strategy=name,
+                error=str(exc),
+            )
+            return None
+
+        status = await self._load_status(redis, name)
+        if not status:
+            return None
+
+        stored = self._remember_status(name, status)
+        self._status_signatures[name] = self._compute_signature(stored)
+        return self._clone_status(stored), "cache"
+
+    def _normalise_stream_payload(self, payload: Mapping[str, Any]) -> Dict[str, Any]:
+        result: Dict[str, Any] = {}
+        for key, value in payload.items():
+            if isinstance(key, (bytes, bytearray)):
+                key = key.decode("utf-8", errors="ignore")
+            key_text = str(key)
+            if isinstance(value, (bytes, bytearray)):
+                value = value.decode("utf-8", errors="ignore")
+            result[key_text] = value
+
+        signals = result.get("signals")
+        if isinstance(signals, str):
+            candidate = signals.strip()
+            if candidate:
+                try:
+                    result["signals"] = json.loads(candidate)
+                except json.JSONDecodeError:
+                    pass
+
+        orders = result.get("orders")
+        if orders is not None and not isinstance(orders, (dict, list)):
+            try:
+                result["orders"] = int(float(str(orders)))
+            except (TypeError, ValueError):
+                result["orders"] = orders
+
+        return result
+
+    async def _load_status(self, redis, strategy: str) -> Dict[str, Any]:
+        key = f"{self._metadata_prefix}:{strategy}:status"
+        try:
+            raw = await redis.get(key)
+        except Exception as exc:  # pragma: no cover - redis read guard
+            logger.debug(
+                "Failed to read strategy status cache", strategy=strategy, error=str(exc)
+            )
+            return {}
+
+        status = _decode_json_mapping(raw)
+        if not status:
+            return {}
+
+        status.setdefault("strategy", strategy)
+        return status
+
+
+class RealtimeSubscriptionError(RuntimeError):
+    """Raised when realtime price subscriptions via the data layer fail."""
+
+
+@dataclass
+class _RealtimeSymbolState:
+    queues: set[asyncio.Queue[Dict[str, Any]]]
+    last_message: Optional[Dict[str, Any]] = None
+
+
+class RealtimeSubscription:
+    """Handle tying a websocket connection to a realtime price stream."""
+
+    __slots__ = ("symbol", "token", "queue", "_hub", "_closed")
+
+    def __init__(
+        self,
+        hub: "RealtimePriceHub",
+        symbol: str,
+        token: DataSubscriptionToken,
+        queue: "asyncio.Queue[Dict[str, Any]]",
+    ) -> None:
+        self.symbol = symbol
+        self.token = token
+        self.queue = queue
+        self._hub = hub
+        self._closed = False
+
+    async def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        await self._hub._unsubscribe(self.symbol, self.queue, self.token)
+
+
+class RealtimePriceHub:
+    """Multiplex unified market tick updates across websocket clients."""
+
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self._states: Dict[str, _RealtimeSymbolState] = {}
+        self._manager = None
+        self._event_token = None
+
+    def _is_enabled(self) -> bool:
+        return not is_legacy_mode(get_data_layer_mode())
+
+    def _ensure_manager(self):
+        if self._manager is not None:
+            return self._manager
+        try:
+            manager = get_data_source_manager()
+        except Exception as exc:  # pragma: no cover - defensive guard
+            logger.error("Failed to initialise data source manager: {}", exc)
+            raise RealtimeSubscriptionError("Unified data layer unavailable") from exc
+        self._manager = manager
+        return manager
+
+    def _ensure_event_subscription(self, manager) -> None:
+        if self._event_token is not None:
+            return
+        self._event_token = manager.event_bus.subscribe(
+            "market.tick", self._handle_tick_event
+        )
+
+    async def subscribe(self, symbol: str) -> RealtimeSubscription:
+        symbol_key = (symbol or "").strip().upper()
+        if not symbol_key:
+            raise RealtimeSubscriptionError("Symbol is required")
+        if not self._is_enabled():
+            raise RealtimeSubscriptionError("Unified data layer disabled")
+
+        manager = self._ensure_manager()
+        self._ensure_event_subscription(manager)
+
+        request = DataSubscriptionRequest(channel="market.tick", symbol=symbol_key)
+        try:
+            token = await manager.subscribe(request)
+        except DataSourceError as exc:
+            raise RealtimeSubscriptionError(str(exc) or "Failed to subscribe to market ticks") from exc
+        except Exception as exc:  # pragma: no cover - defensive guard
+            raise RealtimeSubscriptionError("Failed to subscribe to market ticks") from exc
+
+        queue: "asyncio.Queue[Dict[str, Any]]" = asyncio.Queue(maxsize=5)
+
+        snapshot_required = False
+        last_message: Optional[Dict[str, Any]] = None
+
+        async with self._lock:
+            state = self._states.get(symbol_key)
+            if state is None:
+                state = _RealtimeSymbolState(queues=set())
+                self._states[symbol_key] = state
+                snapshot_required = True
+            state.queues.add(queue)
+            last_message = state.last_message
+
+        initial_message: Optional[Dict[str, Any]] = None
+        if last_message is not None:
+            initial_message = last_message
+        elif snapshot_required:
+            initial_message = await self._load_snapshot(manager, request)
+            if initial_message is not None:
+                async with self._lock:
+                    state = self._states.get(symbol_key)
+                    if state and state.last_message is None:
+                        state.last_message = initial_message
+
+        if initial_message is not None:
+            self._offer(queue, initial_message)
+
+        return RealtimeSubscription(self, symbol_key, token, queue)
+
+    async def _load_snapshot(
+        self,
+        manager,
+        request: DataSubscriptionRequest,
+    ) -> Optional[Dict[str, Any]]:
+        try:
+            snapshot = await manager.snapshot(request)
+        except DataSourceError as exc:
+            logger.debug(
+                "Failed to load market snapshot during subscription", symbol=request.symbol, error=str(exc)
+            )
+            return None
+        except Exception as exc:  # pragma: no cover - defensive guard
+            logger.debug(
+                "Unexpected error loading market snapshot", symbol=request.symbol, error=str(exc)
+            )
+            return None
+
+        if isinstance(snapshot, Mapping) and snapshot:
+            return self._build_message(request.symbol or "", snapshot)
+        return None
+
+    async def _unsubscribe(
+        self,
+        symbol: str,
+        queue: "asyncio.Queue[Dict[str, Any]]",
+        token: DataSubscriptionToken,
+    ) -> None:
+        async with self._lock:
+            state = self._states.get(symbol)
+            if state:
+                state.queues.discard(queue)
+                if not state.queues:
+                    self._states.pop(symbol, None)
+
+        manager = self._manager
+        if manager is not None:
+            try:
+                await manager.unsubscribe(token)
+            except Exception as exc:  # pragma: no cover - defensive guard
+                logger.debug(
+                    "Failed to release market tick subscription", symbol=symbol, error=str(exc)
+                )
+
+    async def _handle_tick_event(self, envelope: EventEnvelope) -> None:
+        symbol = (envelope.symbol or "").strip().upper()
+        if not symbol:
+            return
+
+        message = self._build_message(symbol, envelope.payload or {}, envelope.ts_ns)
+
+        async with self._lock:
+            state = self._states.get(symbol)
+            if not state or not state.queues:
+                return
+            state.last_message = message
+            queues = list(state.queues)
+
+        for queue in queues:
+            self._offer(queue, message)
+
+    def _build_message(
+        self,
+        symbol: str,
+        payload: Mapping[str, Any],
+        ts_ns: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        data = dict(payload)
+        data.setdefault("symbol", symbol)
+        ts_value = data.get("ts_ns")
+        if isinstance(ts_value, int):
+            ts_ns_value = ts_value
+        else:
+            ts_ns_value = ts_ns if isinstance(ts_ns, int) else time.time_ns()
+        data["ts_ns"] = ts_ns_value
+        timestamp_ms = ts_ns_value // 1_000_000
+        message = {
+            "type": "realtime_data",
+            "symbol": symbol,
+            "timestamp": timestamp_ms,
+            "timestamp_ms": timestamp_ms,
+            "timestamp_ns": ts_ns_value,
+            "data": data,
+        }
+        return message
+
+    @staticmethod
+    def _offer(queue: "asyncio.Queue[Dict[str, Any]]", message: Dict[str, Any]) -> None:
+        try:
+            queue.put_nowait(message)
+        except asyncio.QueueFull:
+            try:
+                queue.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+            try:
+                queue.put_nowait(message)
+            except asyncio.QueueFull:  # pragma: no cover - best effort
+                pass
+
+
+_REALTIME_PRICE_HUB = RealtimePriceHub()
+
+
+_STRATEGY_PERFORMANCE_CACHE = StrategyPerformanceCache()
+
+
+_STRATEGY_STATUS_STREAMER = StrategyStatusStreamer()
+
+
 async def _realtime_price_sender(
     ws: WebSocket,
     symbol: str,
@@ -786,9 +1551,10 @@ async def _realtime_price_sender(
 @router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await _ensure_risk_rules_listener()
+    await _STRATEGY_STATUS_STREAMER.start()
     await _websocket_manager().connect(websocket)
 
-    realtime_tasks: Dict[str, asyncio.Task] = {}
+    realtime_streams: Dict[str, Tuple[asyncio.Task, Optional[RealtimeSubscription]]] = {}
 
     account_service_outage_logged = False
     account_service_readiness: Optional[bool] = None
@@ -1426,16 +2192,37 @@ async def websocket_endpoint(websocket: WebSocket):
                 last_responses[key] = payload
                 await _send_or_disconnect(websocket, payload)
             elif msg_type == "subscribe_realtime":
-                symbol = message.get("symbol")
-                if symbol and symbol not in realtime_tasks:
-                    realtime_tasks[symbol] = asyncio.create_task(
-                        _realtime_price_sender(websocket, symbol)
+                raw_symbol = message.get("symbol")
+                symbol_key = (raw_symbol or "").strip().upper()
+                if not symbol_key or symbol_key in realtime_streams:
+                    continue
+
+                try:
+                    subscription = await _REALTIME_PRICE_HUB.subscribe(symbol_key)
+                except RealtimeSubscriptionError as exc:
+                    logger.debug(
+                        "Falling back to polling realtime feed", symbol=symbol_key, error=str(exc)
                     )
+                    task = asyncio.create_task(
+                        _realtime_price_sender(websocket, symbol_key)
+                    )
+                    realtime_streams[symbol_key] = (task, None)
+                else:
+                    forward_task = asyncio.create_task(
+                        _forward_realtime_subscription(websocket, subscription)
+                    )
+                    realtime_streams[symbol_key] = (forward_task, subscription)
             elif msg_type == "unsubscribe_realtime":
-                symbol = message.get("symbol")
-                task = realtime_tasks.pop(symbol, None)
-                if task:
+                raw_symbol = message.get("symbol")
+                symbol_key = (raw_symbol or "").strip().upper()
+                entry = realtime_streams.pop(symbol_key, None)
+                if entry:
+                    task, subscription = entry
                     task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await task
+                    if subscription is not None:
+                        await subscription.close()
             elif msg_type == "request_orders_snapshot":
                 try:
                     limit = int(message.get("limit", 10))
@@ -2391,6 +3178,28 @@ async def websocket_endpoint(websocket: WebSocket):
                         )
                     continue
 
+                cached_status: Optional[Tuple[Dict[str, Any], str]] = None
+                if not force:
+                    try:
+                        cached_status = await _STRATEGY_STATUS_STREAMER.get_cached_status(name)
+                    except Exception as exc:  # pragma: no cover - defensive guard
+                        logger.debug(
+                            "Failed to load cached strategy status", strategy=name, error=str(exc)
+                        )
+
+                if cached_status:
+                    status_payload, cache_source = cached_status
+                    payload = {
+                        "type": "strategy_status",
+                        "success": True,
+                        "name": name,
+                        "status": status_payload,
+                        "source": cache_source,
+                    }
+                    last_responses[key] = payload
+                    await _send_or_disconnect(websocket, payload)
+                    continue
+
                 try:
                     response = await _STRATEGY_CLIENT.get_strategy_status(name)
                 except ServiceUnavailableError as exc:
@@ -2422,6 +3231,9 @@ async def websocket_endpoint(websocket: WebSocket):
                     last_responses[key] = payload
                     await _send_or_disconnect(websocket, payload)
                     continue
+
+                if isinstance(status_payload, Mapping):
+                    _STRATEGY_STATUS_STREAMER.remember_external_status(name, status_payload)
 
                 payload = {
                     "type": "strategy_status",
@@ -2490,6 +3302,29 @@ async def websocket_endpoint(websocket: WebSocket):
                         )
                     continue
 
+                cached_performance: Optional[Dict[str, Any]] = None
+                if not force:
+                    try:
+                        cached_performance = await _STRATEGY_PERFORMANCE_CACHE.get_message(
+                            name,
+                            range_value,
+                            start_raw,
+                            end_raw,
+                        )
+                    except Exception as exc:  # pragma: no cover - defensive guard
+                        logger.debug(
+                            "Failed to load cached strategy performance",
+                            strategy=name,
+                            range=range_value,
+                            error=str(exc),
+                        )
+
+                if cached_performance:
+                    payload = dict(cached_performance)
+                    last_responses[key] = payload
+                    await _send_or_disconnect(websocket, payload)
+                    continue
+
                 if not force:
                     cache_stats: Dict[str, Any] = {}
                     try:
@@ -2518,6 +3353,21 @@ async def websocket_endpoint(websocket: WebSocket):
                         }
                         if cache_stats:
                             payload["stats"] = cache_stats
+                        try:
+                            await _STRATEGY_PERFORMANCE_CACHE.store_message(
+                                name,
+                                range_value,
+                                start_raw,
+                                end_raw,
+                                payload,
+                            )
+                        except Exception as exc:  # pragma: no cover - defensive guard
+                            logger.debug(
+                                "Failed to cache computed strategy performance",
+                                strategy=name,
+                                range=range_value,
+                                error=str(exc),
+                            )
                         last_responses[key] = payload
                         await _send_or_disconnect(websocket, payload)
                         continue
@@ -2588,9 +3438,45 @@ async def websocket_endpoint(websocket: WebSocket):
                     "metrics": metrics,
                     "source": source,
                 }
+                try:
+                    await _STRATEGY_PERFORMANCE_CACHE.store_message(
+                        name,
+                        range_value,
+                        start_raw,
+                        end_raw,
+                        payload,
+                    )
+                except Exception as exc:  # pragma: no cover - defensive guard
+                    logger.debug(
+                        "Failed to store streamed strategy performance response",
+                        strategy=name,
+                        range=range_value,
+                        error=str(exc),
+                    )
                 last_responses[key] = payload
                 await _send_or_disconnect(websocket, payload)
     except WebSocketDisconnect:
-        for task in realtime_tasks.values():
+        pass
+    finally:
+        for task, subscription in realtime_streams.values():
             task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+            if subscription is not None:
+                await subscription.close()
         _websocket_manager().disconnect(websocket)
+
+
+async def _forward_realtime_subscription(
+    websocket: WebSocket, subscription: RealtimeSubscription
+) -> None:
+    try:
+        while True:
+            message = await subscription.queue.get()
+            await websocket.send_json(message)
+    except asyncio.CancelledError:
+        raise
+    except WebSocketDisconnect:
+        raise
+    except Exception as exc:  # pragma: no cover - defensive guard
+        logger.debug("Realtime websocket forwarder stopped", error=str(exc))
