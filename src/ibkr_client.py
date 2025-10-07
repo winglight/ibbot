@@ -320,6 +320,9 @@ class IBKRClient:
         self._dom_listeners: List[Callable[[str, Sequence[Mapping[str, Any]]], None]] = []
         self._disconnect_listeners: List[Callable[[], None]] = []
         self._default_dom_rows = int(self._parse_env_float('IBKR_DOM_ROWS', 10) or 10)
+
+        # Track the last time we surfaced a historical-data connection loss per symbol
+        self._historical_connection_loss_log: Dict[str, float] = {}
     
     def _sanitize_float(self, value):
         """清理无效的浮点数值，将NaN和Infinity转换为None"""
@@ -331,7 +334,23 @@ class IBKRClient:
             return float(value)
         except (TypeError, ValueError):
             return None
-    
+
+    def _should_log_historical_connection_loss(self, symbol: str, *, window: float = 60.0) -> bool:
+        """Rate-limit repeated connection loss logs for the same symbol."""
+
+        now = time.monotonic()
+        last = self._historical_connection_loss_log.get(symbol)
+        if last is not None and now - last < window:
+            return False
+        self._historical_connection_loss_log[symbol] = now
+        return True
+
+    def _clear_historical_connection_loss(self, symbol: str) -> None:
+        """Reset the connection loss throttling for ``symbol``."""
+
+        if symbol in self._historical_connection_loss_log:
+            del self._historical_connection_loss_log[symbol]
+
     @property
     def connected(self) -> bool:
         """检查连接状态 - 为兼容性提供connected属性"""
@@ -1414,15 +1433,16 @@ class IBKRClient:
             # 获取IB实例
             ib = self.ib
             if not ib or not ib.isConnected():
-                message = f"IBKR connection lost for historical data: {symbol}"
-                ibkr_logger.error(message)
-                raise IBKRConnectionError(message)
+                raise IBKRConnectionError(f"IBKR connection lost for historical data: {symbol}")
 
             # MNQ是期货合约
             if symbol.upper() in INDEX_FUTURE_SYMBOLS:
                 contract = self.get_future_contract(symbol, 'CME')
             else:
                 contract = self.get_stock_contract(symbol, exchange)
+
+            # Connection recovered – reset throttling for this symbol
+            self._clear_historical_connection_loss(symbol)
 
             qualified = await ib.qualifyContractsAsync(contract)
             if not qualified:
@@ -1479,6 +1499,10 @@ class IBKRClient:
             df = pd.DataFrame(data)
             ibkr_logger.info(f"Retrieved {len(df)} historical data points for {symbol}")
             return df
+        except IBKRConnectionError as exc:
+            if self._should_log_historical_connection_loss(symbol):
+                ibkr_logger.error(str(exc))
+            return pd.DataFrame()
         except Exception as e:
             ibkr_logger.error(f"Failed to get historical data for {symbol}: {e}")
             return pd.DataFrame()
