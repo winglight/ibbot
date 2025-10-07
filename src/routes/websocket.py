@@ -14,6 +14,7 @@ from typing import (
     Mapping,
     NamedTuple,
     Optional,
+    Protocol,
     Tuple,
 )
 
@@ -1322,6 +1323,47 @@ class RealtimeSubscription:
         await self._hub._unsubscribe(self.symbol, self.queue, self.token)
 
 
+class MarketDataPubSubError(RuntimeError):
+    """Raised when realtime price subscriptions via Redis pubsub fail."""
+
+
+class _RealtimeSubscriptionProtocol(Protocol):
+    queue: "asyncio.Queue[Dict[str, Any]]"
+
+    async def close(self) -> None:
+        ...
+
+
+def _build_realtime_message(
+    symbol: str, payload: Mapping[str, Any], ts_ns: Optional[int] = None
+) -> Dict[str, Any]:
+    data = dict(payload)
+    data.setdefault("symbol", symbol)
+    ts_value = data.get("ts_ns")
+    if isinstance(ts_value, int):
+        ts_ns_value = ts_value
+    else:
+        if isinstance(ts_ns, int):
+            ts_ns_value = ts_ns
+        else:
+            timestamp = data.get("timestamp")
+            if isinstance(timestamp, (int, float)):
+                ts_ns_value = int(float(timestamp) * 1_000_000)
+            else:
+                ts_ns_value = time.time_ns()
+    data["ts_ns"] = ts_ns_value
+    timestamp_ms = ts_ns_value // 1_000_000
+    message = {
+        "type": "realtime_data",
+        "symbol": symbol,
+        "timestamp": timestamp_ms,
+        "timestamp_ms": timestamp_ms,
+        "timestamp_ns": ts_ns_value,
+        "data": data,
+    }
+    return message
+
+
 class RealtimePriceHub:
     """Multiplex unified market tick updates across websocket clients."""
 
@@ -1460,7 +1502,7 @@ class RealtimePriceHub:
         if not symbol:
             return
 
-        message = self._build_message(symbol, envelope.payload or {}, envelope.ts_ns)
+        message = _build_realtime_message(symbol, envelope.payload or {}, envelope.ts_ns)
 
         async with self._lock:
             state = self._states.get(symbol)
@@ -1478,24 +1520,7 @@ class RealtimePriceHub:
         payload: Mapping[str, Any],
         ts_ns: Optional[int] = None,
     ) -> Dict[str, Any]:
-        data = dict(payload)
-        data.setdefault("symbol", symbol)
-        ts_value = data.get("ts_ns")
-        if isinstance(ts_value, int):
-            ts_ns_value = ts_value
-        else:
-            ts_ns_value = ts_ns if isinstance(ts_ns, int) else time.time_ns()
-        data["ts_ns"] = ts_ns_value
-        timestamp_ms = ts_ns_value // 1_000_000
-        message = {
-            "type": "realtime_data",
-            "symbol": symbol,
-            "timestamp": timestamp_ms,
-            "timestamp_ms": timestamp_ms,
-            "timestamp_ns": ts_ns_value,
-            "data": data,
-        }
-        return message
+        return _build_realtime_message(symbol, payload, ts_ns)
 
     @staticmethod
     def _offer(queue: "asyncio.Queue[Dict[str, Any]]", message: Dict[str, Any]) -> None:
@@ -1512,7 +1537,143 @@ class RealtimePriceHub:
                 pass
 
 
+class MarketDataPubSubSubscription:
+    __slots__ = ("symbol", "queue", "_hub", "_closed")
+
+    def __init__(
+        self,
+        hub: "MarketDataPubSubHub",
+        symbol: str,
+        queue: "asyncio.Queue[Dict[str, Any]]",
+    ) -> None:
+        self.symbol = symbol
+        self.queue = queue
+        self._hub = hub
+        self._closed = False
+
+    async def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        await self._hub._unsubscribe(self.symbol, self.queue)
+
+
+class MarketDataPubSubHub:
+    """Stream market data updates via Redis pubsub when the data layer is unavailable."""
+
+    PRICE_CHANNEL_TEMPLATE = "pubsub:ib:price:{symbol}"
+
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self._states: Dict[str, _RealtimeSymbolState] = {}
+        self._listener = PubSubListener(redis_factory=get_redis_client)
+        self._listener_lock = asyncio.Lock()
+        self._listener_started = False
+
+    async def _ensure_listener(self) -> None:
+        if self._listener_started:
+            return
+        async with self._listener_lock:
+            if self._listener_started:
+                return
+            await self._listener.start()
+            self._listener_started = True
+
+    def _channel_name(self, symbol: str) -> str:
+        return self.PRICE_CHANNEL_TEMPLATE.format(symbol=symbol)
+
+    async def subscribe(self, symbol: str) -> MarketDataPubSubSubscription:
+        symbol_key = (symbol or "").strip().upper()
+        if not symbol_key:
+            raise MarketDataPubSubError("Symbol is required")
+
+        try:
+            await self._ensure_listener()
+        except Exception as exc:
+            raise MarketDataPubSubError("Failed to start market data pubsub listener") from exc
+
+        queue: "asyncio.Queue[Dict[str, Any]]" = asyncio.Queue(maxsize=5)
+
+        snapshot_required = False
+        last_message: Optional[Dict[str, Any]] = None
+
+        async with self._lock:
+            state = self._states.get(symbol_key)
+            if state is None:
+                state = _RealtimeSymbolState(queues=set())
+                self._states[symbol_key] = state
+                snapshot_required = True
+                channel = self._channel_name(symbol_key)
+                self._listener.register_callback(channel, self._handle_price_message)
+            state.queues.add(queue)
+            last_message = state.last_message
+
+        if last_message is None and snapshot_required:
+            snapshot = await _fetch_market_snapshot(symbol_key)
+            if isinstance(snapshot, Mapping) and snapshot:
+                last_message = _build_realtime_message(symbol_key, snapshot)
+                async with self._lock:
+                    state = self._states.get(symbol_key)
+                    if state is not None:
+                        state.last_message = last_message
+
+        if last_message is not None:
+            RealtimePriceHub._offer(queue, last_message)
+
+        async with self._lock:
+            state = self._states.get(symbol_key)
+            consumer_count = len(state.queues) if state else 0
+        logger.debug(
+            "MarketDataPubSubHub subscription established",
+            symbol=symbol_key,
+            snapshot_delivered=bool(last_message),
+            consumers=consumer_count,
+        )
+        return MarketDataPubSubSubscription(self, symbol_key, queue)
+
+    async def _unsubscribe(
+        self,
+        symbol: str,
+        queue: "asyncio.Queue[Dict[str, Any]]",
+    ) -> None:
+        channel = None
+        async with self._lock:
+            state = self._states.get(symbol)
+            if state:
+                state.queues.discard(queue)
+                if not state.queues:
+                    self._states.pop(symbol, None)
+                    channel = self._channel_name(symbol)
+        logger.debug("MarketDataPubSubHub unsubscribing", symbol=symbol)
+        if channel is not None:
+            self._listener.unregister_callback(channel, self._handle_price_message)
+
+    async def _handle_price_message(self, channel: str, payload: str) -> None:
+        try:
+            data = json.loads(payload)
+        except json.JSONDecodeError:
+            logger.debug("Invalid market data payload on %s", channel)
+            return
+        symbol = str(data.get("symbol") or "").strip().upper()
+        if not symbol:
+            logger.debug("Market data payload missing symbol on %s", channel)
+            return
+
+        message = _build_realtime_message(symbol, data)
+
+        async with self._lock:
+            state = self._states.get(symbol)
+            if not state or not state.queues:
+                return
+            state.last_message = message
+            queues = list(state.queues)
+
+        for queue in queues:
+            RealtimePriceHub._offer(queue, message)
+
+
 _REALTIME_PRICE_HUB = RealtimePriceHub()
+_MARKET_DATA_PUBSUB_HUB = MarketDataPubSubHub()
 
 
 _STRATEGY_PERFORMANCE_CACHE = StrategyPerformanceCache()
@@ -1561,7 +1722,7 @@ async def websocket_endpoint(websocket: WebSocket):
     await _STRATEGY_STATUS_STREAMER.start()
     await _websocket_manager().connect(websocket)
 
-    realtime_streams: Dict[str, Tuple[asyncio.Task, Optional[RealtimeSubscription]]] = {}
+    realtime_streams: Dict[str, Tuple[asyncio.Task, Optional[_RealtimeSubscriptionProtocol]]] = {}
 
     account_service_outage_logged = False
     account_service_readiness: Optional[bool] = None
@@ -2208,12 +2369,25 @@ async def websocket_endpoint(websocket: WebSocket):
                     subscription = await _REALTIME_PRICE_HUB.subscribe(symbol_key)
                 except RealtimeSubscriptionError as exc:
                     logger.debug(
-                        "Falling back to polling realtime feed", symbol=symbol_key, error=str(exc)
+                        "Falling back to Redis market data feed", symbol=symbol_key, error=str(exc)
                     )
-                    task = asyncio.create_task(
-                        _realtime_price_sender(websocket, symbol_key)
-                    )
-                    realtime_streams[symbol_key] = (task, None)
+                    try:
+                        subscription = await _MARKET_DATA_PUBSUB_HUB.subscribe(symbol_key)
+                    except MarketDataPubSubError as pubsub_exc:
+                        logger.debug(
+                            "Falling back to polling realtime feed",
+                            symbol=symbol_key,
+                            error=str(pubsub_exc),
+                        )
+                        task = asyncio.create_task(
+                            _realtime_price_sender(websocket, symbol_key)
+                        )
+                        realtime_streams[symbol_key] = (task, None)
+                    else:
+                        forward_task = asyncio.create_task(
+                            _forward_realtime_subscription(websocket, subscription)
+                        )
+                        realtime_streams[symbol_key] = (forward_task, subscription)
                 else:
                     forward_task = asyncio.create_task(
                         _forward_realtime_subscription(websocket, subscription)
@@ -3475,7 +3649,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
 
 async def _forward_realtime_subscription(
-    websocket: WebSocket, subscription: RealtimeSubscription
+    websocket: WebSocket, subscription: _RealtimeSubscriptionProtocol
 ) -> None:
     try:
         while True:
