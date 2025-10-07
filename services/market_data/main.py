@@ -128,6 +128,7 @@ _IB_CONNECT_BACKOFF_UNTIL = 0.0
 
 MAX_RETURNED_CANDLES = 1000
 _MAX_SOURCE_FETCH = 120_000
+MAX_IB_DURATION_SECONDS = 86_400
 
 _INTERVAL_TO_BAR_SIZES: dict[str, list[str]] = {}
 for _bar_size, _interval_name in _BAR_SIZE_TO_INTERVAL.items():
@@ -980,14 +981,46 @@ async def _fetch_candles_from_ib(
             for start_ns, end_ns in missing_segments:
                 if end_ns <= start_ns:
                     continue
-                duration_seconds = math.ceil((end_ns - start_ns) / 1_000_000_000)
-                duration_seconds = max(duration_seconds, interval_seconds)
+                gap_seconds = math.ceil((end_ns - start_ns) / 1_000_000_000)
+                duration_seconds = max(gap_seconds, interval_seconds)
                 duration_seconds += interval_seconds
                 try:
                     end_dt = datetime.fromtimestamp(end_ns / 1_000_000_000, tz=NY_TZ)
                 except Exception:
                     end_dt = None
-                requests.append((end_dt, f"{int(duration_seconds)} S"))
+                segment_requests: list[tuple[datetime | None, str]] = []
+                if gap_seconds > MAX_IB_DURATION_SECONDS:
+                    remaining_gap = gap_seconds
+                    current_end = end_dt
+                    while remaining_gap > 0:
+                        chunk_length = min(remaining_gap, MAX_IB_DURATION_SECONDS)
+                        chunk_duration = chunk_length + interval_seconds
+                        if chunk_duration > MAX_IB_DURATION_SECONDS:
+                            chunk_duration = MAX_IB_DURATION_SECONDS
+                        segment_requests.append((current_end, f"{int(chunk_duration)} S"))
+                        remaining_gap -= chunk_length
+                        if current_end is not None:
+                            current_end = current_end - timedelta(seconds=chunk_length)
+                else:
+                    limited_duration = min(duration_seconds, MAX_IB_DURATION_SECONDS)
+                    segment_requests.append((end_dt, f"{int(limited_duration)} S"))
+
+                requests.extend(segment_requests)
+                if logger:
+                    logger.debug(
+                        "IB fallback gap %s-%s interval=%s generated %s request(s): %s",
+                        start_ns,
+                        end_ns,
+                        interval,
+                        len(segment_requests),
+                        [
+                            {
+                                "end": dt.isoformat() if isinstance(dt, datetime) else None,
+                                "duration": duration,
+                            }
+                            for dt, duration in segment_requests
+                        ],
+                    )
 
         if not requests:
             requests.append((None, query.duration))
