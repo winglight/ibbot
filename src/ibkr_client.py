@@ -1415,7 +1415,283 @@ class IBKRClient:
         except Exception as e:
             ibkr_logger.error(f"Failed to get historical data for {symbol}: {e}")
             return pd.DataFrame()
-    
+
+    # ------------------------------------------------------------------
+    def get_dom_history(
+        self,
+        symbol: str,
+        *,
+        end_datetime: datetime | str | None = None,
+        start_datetime: datetime | str | None = None,
+        duration: str | None = None,
+        depth: int = 10,
+        exchange: str = "SMART",
+        limit: int | None = None,
+    ) -> list[dict[str, object]]:
+        """Fetch historical DOM snapshots for *symbol* using historical ticks.
+
+        Interactive Brokers does not provide full depth-of-book history; the
+        closest available data comes from ``reqHistoricalTicks`` with
+        ``whatToShow='BID_ASK'``.  Each returned snapshot therefore represents
+        the top-of-book only.  When the upstream session lacks
+        ``reqHistoricalTicks`` (for example in unit tests using the lightweight
+        stub) a :class:`NotImplementedError` is raised so callers can surface an
+        "unsupported" status to operators.
+        """
+
+        symbol_key = (symbol or "").strip().upper()
+        if not symbol_key:
+            return []
+
+        manager = self.connection_manager
+        ib = getattr(manager, "ib", None)
+        if ib is None:
+            raise RuntimeError("IBKR connection manager has no active session")
+
+        if not hasattr(ib, "reqHistoricalTicks"):
+            raise NotImplementedError("reqHistoricalTicks not available on IBKR client")
+
+        def _coerce_datetime(value: datetime | str | None) -> datetime | None:
+            if value is None or value == "":
+                return None
+            if isinstance(value, datetime):
+                dt = value
+            else:
+                text = str(value).strip()
+                if not text:
+                    return None
+                if text.endswith("Z"):
+                    text = text[:-1] + "+00:00"
+                try:
+                    dt = datetime.fromisoformat(text)
+                except ValueError:
+                    for fmt in ("%Y%m%d %H:%M:%S", "%Y%m%d"):
+                        try:
+                            dt = datetime.strptime(text, fmt)
+                            break
+                        except ValueError:
+                            continue
+                    else:
+                        return None
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            else:
+                dt = dt.astimezone(timezone.utc)
+            return dt
+
+        def _parse_duration(value: str | None) -> timedelta | None:
+            if not value:
+                return None
+            text = value.strip().lower()
+            if not text:
+                return None
+            condensed = text.replace(" ", "")
+            match = re.match(r"^(?P<count>\d+(?:\.\d+)?)(?P<unit>[a-z]+)$", condensed)
+            if match is None:
+                parts = text.split()
+                if len(parts) == 2:
+                    try:
+                        count = float(parts[0])
+                    except (TypeError, ValueError):
+                        return None
+                    unit = parts[1]
+                else:
+                    return None
+            else:
+                try:
+                    count = float(match.group("count"))
+                except (TypeError, ValueError):
+                    return None
+                unit = match.group("unit")
+
+            unit_seconds = {
+                "s": 1,
+                "sec": 1,
+                "secs": 1,
+                "second": 1,
+                "seconds": 1,
+                "m": 60,
+                "min": 60,
+                "mins": 60,
+                "minute": 60,
+                "minutes": 60,
+                "h": 3600,
+                "hr": 3600,
+                "hrs": 3600,
+                "hour": 3600,
+                "hours": 3600,
+                "d": 86400,
+                "day": 86400,
+                "days": 86400,
+                "w": 604800,
+                "week": 604800,
+                "weeks": 604800,
+                "mon": 2628000,
+                "month": 2628000,
+                "months": 2628000,
+                "y": 31536000,
+                "yr": 31536000,
+                "yrs": 31536000,
+                "year": 31536000,
+                "years": 31536000,
+            }.get(unit)
+
+            if unit_seconds is None:
+                return None
+            return timedelta(seconds=count * unit_seconds)
+
+        def _format_ib_datetime(value: datetime | None) -> str:
+            if value is None:
+                return ""
+            return value.astimezone(timezone.utc).strftime("%Y%m%d %H:%M:%S")
+
+        def _coerce_tick_time(value: Any) -> datetime | None:
+            if isinstance(value, datetime):
+                dt = value
+            elif isinstance(value, (int, float)):
+                try:
+                    dt = datetime.fromtimestamp(float(value), tz=timezone.utc)
+                except Exception:
+                    return None
+            else:
+                return None
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            else:
+                dt = dt.astimezone(timezone.utc)
+            return dt
+
+        end_dt = _coerce_datetime(end_datetime) or datetime.now(timezone.utc)
+        start_dt = _coerce_datetime(start_datetime)
+        if start_dt is None and duration:
+            duration_delta = _parse_duration(duration)
+            if duration_delta:
+                start_dt = end_dt - duration_delta
+        if start_dt is not None and start_dt >= end_dt:
+            start_dt = end_dt - timedelta(seconds=1)
+
+        try:
+            limit_value = int(limit) if limit is not None else 0
+        except (TypeError, ValueError):
+            limit_value = 0
+        limit_value = max(0, limit_value)
+        total_remaining = limit_value or 1000
+        max_per_request = 1000
+
+        sec_type = "FUT" if symbol_key in INDEX_FUTURE_SYMBOLS else "STK"
+        contract = self.get_contract(symbol_key, sec_type=sec_type, exchange=exchange)
+
+        def _qualify() -> Any:
+            try:
+                qualifier = getattr(ib, "qualifyContracts", None)
+                if callable(qualifier):
+                    qualified = qualifier(contract)
+                    if qualified:
+                        return qualified[0]
+            except Exception as exc:
+                ibkr_logger.debug(
+                    "qualifyContracts failed for DOM history",
+                    symbol=symbol_key,
+                    error=str(exc),
+                )
+            return contract
+
+        qualified_contract = manager.run_in_connection_thread(_qualify, timeout=10.0) or contract
+
+        collected: list[Any] = []
+        current_end = end_dt
+        iterations = 0
+        while total_remaining > 0:
+            iterations += 1
+            batch_size = min(total_remaining, max_per_request)
+            start_str = _format_ib_datetime(start_dt)
+            end_str = _format_ib_datetime(current_end)
+
+            def _request() -> list[Any]:
+                return ib.reqHistoricalTicks(
+                    qualified_contract,
+                    startDateTime=start_str,
+                    endDateTime=end_str,
+                    numberOfTicks=batch_size,
+                    whatToShow="BID_ASK",
+                    useRth=False,
+                    ignoreSize=False,
+                    miscOptions=[],
+                )
+
+            try:
+                batch = manager.run_in_connection_thread(_request, timeout=30.0)
+            except Exception as exc:
+                raise RuntimeError(f"IBKR historical DOM request failed: {exc}") from exc
+
+            if not batch:
+                break
+
+            collected.extend(batch)
+            total_remaining -= len(batch)
+
+            if start_dt is None:
+                break
+
+            earliest = None
+            for item in batch:
+                ts = _coerce_tick_time(getattr(item, "time", None))
+                if ts is None:
+                    continue
+                earliest = ts if earliest is None else min(earliest, ts)
+            if earliest is None:
+                break
+            if earliest <= start_dt or len(batch) < batch_size:
+                break
+
+            current_end = earliest - timedelta(milliseconds=1)
+            if iterations > 20:
+                break
+
+        if not collected:
+            return []
+
+        def _build_levels(price: Any, size: Any) -> list[dict[str, float]]:
+            price_value = self._sanitize_float(price)
+            size_value = self._sanitize_float(size)
+            if price_value is None:
+                return []
+            return [
+                {
+                    "level": 0,
+                    "price": price_value,
+                    "size": size_value if size_value is not None else 0.0,
+                }
+            ]
+
+        snapshots: list[dict[str, object]] = []
+        seen_ns: set[int] = set()
+        collected.sort(key=lambda item: _coerce_tick_time(getattr(item, "time", None)) or datetime.min)
+        for entry in collected:
+            ts = _coerce_tick_time(getattr(entry, "time", None))
+            if ts is None:
+                continue
+            ts_ns = int(ts.timestamp() * 1_000_000_000)
+            if ts_ns in seen_ns:
+                continue
+            seen_ns.add(ts_ns)
+            bids = _build_levels(getattr(entry, "priceBid", None), getattr(entry, "sizeBid", None))
+            asks = _build_levels(getattr(entry, "priceAsk", None), getattr(entry, "sizeAsk", None))
+            snapshots.append(
+                {
+                    "symbol": symbol_key,
+                    "timestamp": ts.isoformat(),
+                    "timestamp_ns": ts_ns,
+                    "bids": bids,
+                    "asks": asks,
+                }
+            )
+
+        if limit_value and len(snapshots) > limit_value:
+            snapshots = snapshots[-limit_value:]
+
+        return snapshots
+
     def _ensure_backup_directory(self):
         """确保备份目录存在"""
         # 注释掉备份功能

@@ -312,6 +312,82 @@
                         </div>
                         <div id="marketDataBackfillStatus" class="small text-muted"></div>
                     </div>
+
+                    <hr class="text-muted">
+
+                    <div class="mt-3">
+                        <div class="d-flex align-items-center justify-content-between gap-2 mb-3 flex-wrap">
+                            <div class="d-flex align-items-center gap-2">
+                                <h6 class="mb-0"><i class="fas fa-stream me-2"></i> DOM 数据补拉</h6>
+                                <small class="text-muted">检查本地盘口覆盖并按需补齐</small>
+                            </div>
+                            <div class="d-flex gap-2">
+                                <button class="btn btn-outline-light btn-sm" type="button" id="domBackfillRefreshBtn" title="刷新 DOM 概览">
+                                    <i class="fas fa-rotate-right"></i>
+                                </button>
+                                <button class="btn btn-outline-light btn-sm" type="button" id="domBackfillRunBtn">
+                                    <i class="fas fa-download"></i> 回补 DOM
+                                </button>
+                            </div>
+                        </div>
+
+                        <div class="row g-3 align-items-end">
+                            <div class="col-12 col-sm-4">
+                                <label class="form-label" for="domBackfillDuration">Duration</label>
+                                <select class="form-select form-select-sm" id="domBackfillDuration">
+                                    <option value="1 H">1 H</option>
+                                    <option value="4 H">4 H</option>
+                                    <option value="1 D" selected>1 D</option>
+                                    <option value="3 D">3 D</option>
+                                    <option value="5 D">5 D</option>
+                                    <option value="2 W">2 W</option>
+                                </select>
+                                <div class="form-text">若填写开始/结束时间将覆盖 Duration</div>
+                            </div>
+                            <div class="col-12 col-sm-4 col-lg-3">
+                                <label class="form-label" for="domBackfillStart">开始时间 (可选)</label>
+                                <input type="datetime-local" class="form-control form-control-sm" id="domBackfillStart" placeholder="自动">
+                            </div>
+                            <div class="col-12 col-sm-4 col-lg-3">
+                                <label class="form-label" for="domBackfillEnd">结束时间 (可选)</label>
+                                <input type="datetime-local" class="form-control form-control-sm" id="domBackfillEnd" placeholder="当前">
+                            </div>
+                            <div class="col-6 col-sm-3 col-lg-2">
+                                <label class="form-label" for="domBackfillDepth">深度行数</label>
+                                <input type="number" class="form-control form-control-sm" id="domBackfillDepth" value="10" min="1" max="40">
+                            </div>
+                            <div class="col-6 col-sm-3 col-lg-2">
+                                <label class="form-label" for="domBackfillLimit">最大快照数 (可选)</label>
+                                <input type="number" class="form-control form-control-sm" id="domBackfillLimit" placeholder="自动" min="1" max="50000">
+                            </div>
+                        </div>
+
+                        <div class="mt-3">
+                            <div class="d-flex align-items-center gap-2 mb-2">
+                                <h6 class="mb-0"><i class="fas fa-database me-2"></i> DOM 覆盖概览</h6>
+                                <div class="spinner-border spinner-border-sm text-secondary d-none" role="status" id="domBackfillSpinner">
+                                    <span class="visually-hidden">Loading...</span>
+                                </div>
+                            </div>
+                            <div class="table-responsive">
+                                <table class="table table-sm table-striped align-middle mb-2" id="domBackfillTable">
+                                    <thead>
+                                        <tr>
+                                            <th>来源</th>
+                                            <th>状态</th>
+                                            <th>详情</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="domBackfillTableBody">
+                                        <tr>
+                                            <td colspan="3" class="text-muted small">请输入 Symbol 并点击刷新</td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                            <div id="domBackfillStatus" class="small text-muted"></div>
+                        </div>
+                    </div>
                 </div>
             </div>
 

@@ -6,14 +6,19 @@ import asyncio
 import os
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Literal, Mapping, Optional
 from urllib.parse import urlparse, urlunparse
 
 from loguru import logger
 
 from src.db import DatabaseConfigError, MariaDBConfigurationError, get_database_url
+from src.data_layer import DataSourceError, DataSubscriptionRequest
+from src.data_layer.bootstrap import get_data_source_manager
+from src.dom_service import get_dom_service
+from src.ibbot.storage import get_market_data_writer, summarise_dom_directory
+from src.utils import to_local_iso
 
 StepStatus = Literal["success", "warning", "error"]
 TaskStatus = Literal["pending", "running", "success", "warning", "error"]
@@ -106,6 +111,33 @@ def _parse_positive_float(value: Optional[str]) -> Optional[float]:
     except (TypeError, ValueError):
         return None
     return max(parsed, 0.0)
+
+
+def _coerce_int(value: Any) -> Optional[int]:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _ns_to_iso_local(ns: Optional[int]) -> Optional[str]:
+    if ns is None:
+        return None
+    try:
+        dt = datetime.fromtimestamp(ns / 1_000_000_000, tz=timezone.utc)
+    except Exception:
+        return None
+    return to_local_iso(dt) or dt.isoformat()
+
+
+def _ms_to_iso_local(ms: Optional[float | int]) -> Optional[str]:
+    if ms is None:
+        return None
+    try:
+        dt = datetime.fromtimestamp(float(ms) / 1000.0, tz=timezone.utc)
+    except Exception:
+        return None
+    return to_local_iso(dt) or dt.isoformat()
 
 
 def _normalize_redis_endpoint(url: Optional[str]) -> str:
@@ -296,6 +328,221 @@ async def _database_consistency_step() -> StepResult:
     return StepResult(status=status, details=details)
 
 
+async def _realtime_price_step() -> StepResult:
+    symbol = (_env("RUNBOOK_SYMBOL_TICK", "ES") or "ES").strip().upper()
+    wait_seconds = _parse_positive_float(_env("RUNBOOK_MARKET_WAIT_SECONDS")) or 3.0
+
+    try:
+        manager = get_data_source_manager()
+    except Exception as exc:
+        return StepResult(
+            status="error",
+            details={"message": f"数据层初始化失败：{exc}"},
+        )
+
+    request = DataSubscriptionRequest(channel="market.tick", symbol=symbol)
+
+    try:
+        snapshot = await manager.snapshot(request)
+    except DataSourceError as exc:
+        return StepResult(
+            status="error",
+            details={"message": f"读取快照失败：{exc}", "symbol": symbol},
+        )
+
+    details: Dict[str, Any] = {
+        "symbol": symbol,
+        "wait_seconds": wait_seconds,
+    }
+
+    snapshot_ts = _coerce_int((snapshot or {}).get("ts_ns") or (snapshot or {}).get("timestamp_ns"))
+    details["snapshot"] = {
+        "timestamp": _ns_to_iso_local(snapshot_ts),
+        "last": (snapshot or {}).get("last"),
+        "bid": (snapshot or {}).get("bid"),
+        "ask": (snapshot or {}).get("ask"),
+    } if snapshot else None
+
+    queue: "asyncio.Queue[Any]" = asyncio.Queue(maxsize=1)
+    token = None
+    bus_token = None
+    event_payload: Optional[Any] = None
+
+    def _handler(envelope: Any) -> None:
+        if getattr(envelope, "symbol", None) == symbol and not queue.full():
+            queue.put_nowait(envelope)
+
+    try:
+        token = await manager.subscribe(request)
+        bus_token = manager.event_bus.subscribe("market.tick", _handler)
+        try:
+            event_payload = await asyncio.wait_for(queue.get(), timeout=wait_seconds)
+        except asyncio.TimeoutError:
+            event_payload = None
+    except DataSourceError as exc:
+        return StepResult(
+            status="error",
+            details={"message": f"订阅实时价格失败：{exc}", "symbol": symbol},
+        )
+    finally:
+        if bus_token is not None:
+            manager.event_bus.unsubscribe(bus_token)
+        if token is not None:
+            try:
+                await manager.unsubscribe(token)
+            except Exception as exc:  # pragma: no cover - defensive guard
+                logger.debug("Failed to release market tick subscription", error=str(exc), symbol=symbol)
+
+    if event_payload is not None:
+        ts_ns = _coerce_int(getattr(event_payload, "ts_ns", None))
+        details["event"] = {
+            "timestamp": _ns_to_iso_local(ts_ns),
+            "source": getattr(event_payload, "source", None),
+        }
+        details["message"] = "成功接收实时价格推送。"
+        return StepResult(status="success", details=details)
+
+    if snapshot:
+        details["message"] = "存在价格快照，但等待窗口内未收到推送，请检查行情订阅或 IB Feed。"
+        return StepResult(status="warning", details=details)
+
+    details["message"] = "缺少实时价格快照，请确认 IB Feed 是否运行以及 Redis 是否可写。"
+    return StepResult(status="error", details=details)
+
+
+async def _dom_depth_step() -> StepResult:
+    base_symbol = _env("RUNBOOK_SYMBOL_DOM") or _env("RUNBOOK_SYMBOL_TICK") or "ES"
+    symbol = (base_symbol or "ES").strip().upper()
+    num_rows = _parse_positive_int(_env("RUNBOOK_DOM_ROWS")) or 5
+    wait_seconds = _parse_positive_float(_env("RUNBOOK_DOM_WAIT_SECONDS")) or 3.0
+
+    try:
+        manager = get_data_source_manager()
+    except Exception as exc:
+        return StepResult(
+            status="error",
+            details={"message": f"数据层初始化失败：{exc}"},
+        )
+
+    request = DataSubscriptionRequest(
+        channel="dom.depth",
+        symbol=symbol,
+        options={"num_rows": num_rows},
+    )
+
+    try:
+        snapshot = await manager.snapshot(request)
+    except DataSourceError as exc:
+        return StepResult(
+            status="error",
+            details={"message": f"读取盘口快照失败：{exc}", "symbol": symbol},
+        )
+
+    snapshot_ts = _coerce_int((snapshot or {}).get("ts_ns") or (snapshot or {}).get("timestamp_ns"))
+    details: Dict[str, Any] = {
+        "symbol": symbol,
+        "requested_rows": num_rows,
+        "wait_seconds": wait_seconds,
+        "snapshot": {
+            "timestamp": _ns_to_iso_local(snapshot_ts),
+            "bid_levels": len((snapshot or {}).get("bids", []) or []),
+            "ask_levels": len((snapshot or {}).get("asks", []) or []),
+        }
+        if snapshot
+        else None,
+    }
+
+    queue: "asyncio.Queue[Any]" = asyncio.Queue(maxsize=1)
+    token = None
+    bus_token = None
+    event_payload: Optional[Any] = None
+
+    def _dom_handler(envelope: Any) -> None:
+        if getattr(envelope, "symbol", None) == symbol and not queue.full():
+            queue.put_nowait(envelope)
+
+    try:
+        token = await manager.subscribe(request)
+        bus_token = manager.event_bus.subscribe("dom.depth", _dom_handler)
+        try:
+            event_payload = await asyncio.wait_for(queue.get(), timeout=wait_seconds)
+        except asyncio.TimeoutError:
+            event_payload = None
+    except DataSourceError as exc:
+        return StepResult(
+            status="error",
+            details={"message": f"订阅盘口数据失败：{exc}", "symbol": symbol},
+        )
+    finally:
+        if bus_token is not None:
+            manager.event_bus.unsubscribe(bus_token)
+        if token is not None:
+            try:
+                await manager.unsubscribe(token)
+            except Exception as exc:  # pragma: no cover - defensive guard
+                logger.debug("Failed to release DOM depth subscription", error=str(exc), symbol=symbol)
+
+    writer = None
+    storage_details: Dict[str, Any] = {}
+    try:
+        writer = get_market_data_writer()
+    except Exception as exc:
+        storage_details["error"] = str(exc)
+
+    if writer is not None:
+        try:
+            summary = summarise_dom_directory(writer.base_dir, symbol)
+        except Exception as exc:
+            storage_details["error"] = str(exc)
+        else:
+            storage_details.update(
+                {
+                    "total_files": len(summary.files),
+                    "total_rows": summary.total_rows,
+                    "earliest": _ns_to_iso_local(summary.earliest_ns),
+                    "latest": _ns_to_iso_local(summary.latest_ns),
+                }
+            )
+
+    dom_service = get_dom_service()
+    cache_history = dom_service.get_history(symbol, limit=1, include_snapshots=False)
+    cache_metrics = cache_history.get("metrics") or []
+    latest_metric_ts = None
+    if cache_metrics:
+        candidate = cache_metrics[-1]
+        if isinstance(candidate, Mapping):
+            latest_metric_ts = candidate.get("timestamp")
+
+    cache_details = {
+        "total_snapshots": cache_history.get("total_snapshots", 0),
+        "total_metrics": cache_history.get("total_metrics", 0),
+        "latest_metric": _ms_to_iso_local(latest_metric_ts),
+    }
+
+    if event_payload is not None:
+        ts_ns = _coerce_int(getattr(event_payload, "ts_ns", None))
+        details["event"] = {
+            "timestamp": _ns_to_iso_local(ts_ns),
+            "source": getattr(event_payload, "source", None),
+        }
+        details["message"] = "成功接收 DOM 深度推送。"
+        status: StepStatus = "success"
+    elif snapshot:
+        details["message"] = "存在盘口快照，但未收到实时推送，请检查 depth 订阅或 IB Feed。"
+        status = "warning"
+    else:
+        details["message"] = "缺少盘口快照，请确认 DOM 服务是否运行并与 IB Feed 连通。"
+        status = "error"
+
+    details["storage"] = storage_details
+    details["cache"] = cache_details
+
+    if not storage_details and status == "success":
+        details["note"] = "本地未发现 DOM 落盘文件，如需供优化器使用请执行补拉。"
+
+    return StepResult(status=status, details=details)
+
+
 class WebsocketRemediationRunbook:
     """Runbook executing a sequence of configuration checks for WebSocket data."""
 
@@ -310,6 +557,18 @@ class WebsocketRemediationRunbook:
                 title="Redis 配置一致性",
                 description="校验主程序、独立服务与缓存的 Redis 地址是否一致。",
                 runner=_redis_configuration_step,
+            ),
+            RunbookStep(
+                id="realtime-price",
+                title="实时价格订阅",
+                description="检查 market.tick 快照与推送是否正常，提示行情链路异常。",
+                runner=_realtime_price_step,
+            ),
+            RunbookStep(
+                id="dom-depth",
+                title="DOM 深度订阅",
+                description="验证 dom.depth 推送、缓存与本地落盘覆盖情况。",
+                runner=_dom_depth_step,
             ),
             RunbookStep(
                 id="snapshot-refresh",

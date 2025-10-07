@@ -7,7 +7,10 @@ import asyncio
 import inspect
 import json
 import os
+import re
+import sys
 from dataclasses import dataclass
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable, Mapping, Sequence
 
@@ -20,6 +23,7 @@ from pydantic import BaseModel
 
 from src.config import load_project_env
 from src.optimizer_service import router as optimizer_router
+from src.optimizer_service.metadata import describe_dom_storage, list_dom_symbols
 
 try:  # redis is optional for some test environments
     from redis.asyncio import Redis
@@ -28,11 +32,18 @@ except Exception:  # pragma: no cover - redis optional in CI
 
 from src.db import MariaDBConfigurationError, run_sql_query
 from src.ibbot.redis import get_redis_client
+from src.ibbot.storage import get_market_data_writer, summarise_dom_directory
 
 OPTIMIZER_APP_TITLE = "IBBot Optimizer"
 OPTIMIZER_APP_VERSION = "0.2.0"
 DEFAULT_HOST = os.getenv("OPTIMIZER_HOST", "0.0.0.0")
 DEFAULT_PORT = 8001
+
+_DOM_WORD_PATTERN = re.compile(r"(?<![A-Za-z0-9])dom(?![A-Za-z0-9])", re.IGNORECASE)
+_SYMBOL_KEY_PATTERN = re.compile(r"(symbol|ticker|contract|instrument)", re.IGNORECASE)
+_DATE_KEY_PATTERN = re.compile(r"(start|end)[-_]?(date|day|time)", re.IGNORECASE)
+_DOM_BOOL_KEYS = {"requires_dom", "use_dom", "dom_required", "dom_enabled"}
+_DOM_VALUE_KEYS = {"data_source", "data_type", "mode", "category", "strategy", "strategy_type"}
 
 ROOT_DIR = Path(__file__).resolve().parents[3]
 OPTIMIZER_UI_DIR = ROOT_DIR / "optimizer_ui"
@@ -125,6 +136,220 @@ def _compute_score(training_data: Iterable[Any]) -> float:
     return sum(values) / len(values)
 
 
+def _coerce_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, date):
+        dt = datetime(value.year, value.month, value.day, tzinfo=timezone.utc)
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        try:
+            dt = datetime.fromisoformat(text)
+        except ValueError:
+            try:
+                dt = datetime.strptime(text, "%Y%m%d")
+            except ValueError:
+                return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+    elif isinstance(value, (int, float)):
+        try:
+            dt = datetime.fromtimestamp(float(value), tz=timezone.utc)
+        except Exception:
+            return None
+    else:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _coerce_symbol(value: Any) -> str | None:
+    if isinstance(value, str):
+        token = value.strip().upper().split()[0]
+        if not token:
+            return None
+        if re.fullmatch(r"[A-Z][A-Z0-9\.-]{0,15}", token):
+            return token
+        return None
+    if isinstance(value, Mapping):
+        for inner in value.values():
+            candidate = _coerce_symbol(inner)
+            if candidate:
+                return candidate
+        return None
+    if isinstance(value, (list, tuple, set)):
+        for item in value:
+            candidate = _coerce_symbol(item)
+            if candidate:
+                return candidate
+    return None
+
+
+def _ns_to_date(ns: int | None) -> date | None:
+    if ns is None:
+        return None
+    try:
+        dt = datetime.fromtimestamp(ns / 1_000_000_000, tz=timezone.utc)
+    except Exception:
+        return None
+    return dt.date()
+
+
+def _ns_to_iso(ns: int | None) -> str:
+    if ns is None:
+        return ""
+    try:
+        dt = datetime.fromtimestamp(ns / 1_000_000_000, tz=timezone.utc)
+    except Exception:
+        return ""
+    return dt.isoformat()
+
+
+def _extract_dom_requirements(
+    strategy_id: str,
+    config: Mapping[str, Any] | None,
+) -> tuple[bool, str | None, datetime | None, datetime | None]:
+    requires_dom = bool(_DOM_WORD_PATTERN.search(strategy_id or ""))
+    symbol: str | None = None
+    start_dt: datetime | None = None
+    end_dt: datetime | None = None
+
+    def _walk(value: Any, key_hint: str = "") -> None:
+        nonlocal requires_dom, symbol, start_dt, end_dt
+
+        if isinstance(value, Mapping):
+            for key, inner in value.items():
+                key_text = str(key)
+                lower_key = key_text.lower()
+                if _DOM_WORD_PATTERN.search(key_text):
+                    requires_dom = True
+                if lower_key in _DOM_BOOL_KEYS:
+                    if isinstance(inner, bool) and inner:
+                        requires_dom = True
+                    elif isinstance(inner, str) and _DOM_WORD_PATTERN.search(inner):
+                        requires_dom = True
+                if lower_key in _DOM_VALUE_KEYS and isinstance(inner, str):
+                    if _DOM_WORD_PATTERN.search(inner):
+                        requires_dom = True
+                if symbol is None and _SYMBOL_KEY_PATTERN.search(lower_key):
+                    candidate = _coerce_symbol(inner)
+                    if candidate:
+                        symbol = candidate
+                if _DATE_KEY_PATTERN.search(lower_key):
+                    candidate_dt = _coerce_datetime(inner)
+                    if candidate_dt is not None:
+                        if "start" in lower_key and start_dt is None:
+                            start_dt = candidate_dt
+                        elif "end" in lower_key and end_dt is None:
+                            end_dt = candidate_dt
+                _walk(inner, key_text)
+            return
+
+        if isinstance(value, (list, tuple, set)):
+            for item in value:
+                _walk(item, key_hint)
+            return
+
+        lower_hint = key_hint.lower()
+        if isinstance(value, bool):
+            if lower_hint in _DOM_BOOL_KEYS and value:
+                requires_dom = True
+            return
+
+        if isinstance(value, str):
+            if _DOM_WORD_PATTERN.search(value):
+                if not lower_hint or lower_hint in _DOM_VALUE_KEYS or lower_hint in _DOM_BOOL_KEYS:
+                    requires_dom = True
+            if symbol is None and _SYMBOL_KEY_PATTERN.search(lower_hint):
+                candidate = _coerce_symbol(value)
+                if candidate:
+                    symbol = candidate
+            if _DATE_KEY_PATTERN.search(lower_hint):
+                candidate_dt = _coerce_datetime(value)
+                if candidate_dt is not None:
+                    if "start" in lower_hint and start_dt is None:
+                        start_dt = candidate_dt
+                    elif "end" in lower_hint and end_dt is None:
+                        end_dt = candidate_dt
+            return
+
+        if _DATE_KEY_PATTERN.search(lower_hint):
+            candidate_dt = _coerce_datetime(value)
+            if candidate_dt is not None:
+                if "start" in lower_hint and start_dt is None:
+                    start_dt = candidate_dt
+                elif "end" in lower_hint and end_dt is None:
+                    end_dt = candidate_dt
+
+    if config:
+        _walk(config)
+
+    return requires_dom, symbol, start_dt, end_dt
+
+
+def _ensure_dom_training_data(
+    strategy_id: str,
+    config: Mapping[str, Any] | None,
+) -> None:
+    requires_dom, symbol, start_dt, end_dt = _extract_dom_requirements(strategy_id, config)
+    if not requires_dom:
+        return
+
+    if not symbol:
+        raise OptimizerDataError(
+            f"Unable to determine DOM symbol for strategy '{strategy_id}'. Update the strategy configuration with a symbol before running optimization."
+        )
+
+    try:
+        writer = get_market_data_writer()
+    except Exception as exc:  # pragma: no cover - defensive guard
+        raise OptimizerDataError(f"Failed to initialise market data storage: {exc}") from exc
+
+    reason = getattr(writer, "_reason", None)
+    if reason:
+        raise OptimizerDataError(
+            f"DOM data storage unavailable ({reason}). Install PyArrow and configure MARKET_DATA_STORAGE_PATH before optimising DOM strategies."
+        )
+
+    try:
+        summary = summarise_dom_directory(writer.base_dir, symbol)
+    except Exception as exc:
+        raise OptimizerDataError(f"Failed to inspect DOM storage for {symbol}: {exc}") from exc
+
+    if summary.total_rows <= 0:
+        raise OptimizerDataError(
+            f"No DOM snapshots found for {symbol}. Run a DOM backfill from the Market Data panel before optimising '{strategy_id}'."
+        )
+
+    earliest_date = _ns_to_date(summary.earliest_ns)
+    latest_date = _ns_to_date(summary.latest_ns)
+
+    if start_dt and earliest_date and earliest_date > start_dt.date():
+        raise OptimizerDataError(
+            f"DOM data for {symbol} starts on {earliest_date.isoformat()}, earlier than the optimisation start date {start_dt.date().isoformat()}. Run a backfill to cover the missing range."
+        )
+
+    if end_dt and latest_date and latest_date < end_dt.date():
+        raise OptimizerDataError(
+            f"DOM data for {symbol} ends on {latest_date.isoformat()}, before the optimisation end date {end_dt.date().isoformat()}. Run a backfill to extend the coverage."
+        )
+
+    try:
+        sample = writer.read_dom(symbol, limit=1)
+    except Exception as exc:
+        raise OptimizerDataError(f"Failed to read DOM snapshots for {symbol}: {exc}") from exc
+
+    if not sample:
+        earliest_iso = _ns_to_iso(summary.earliest_ns)
+        latest_iso = _ns_to_iso(summary.latest_ns)
+        raise OptimizerDataError(
+            f"DOM storage under {writer.base_dir}/dom/{symbol} contains metadata but yielded no snapshots (coverage {earliest_iso or 'unknown'} – {latest_iso or 'unknown'}). Verify the files and rerun backfill."
+        )
+
+
 @dataclass
 class OptimizerService:
     """Encapsulates access to Redis and MariaDB for optimizer tasks."""
@@ -175,6 +400,9 @@ class OptimizerService:
                 f"Missing optimizer prerequisites for strategy {submission.strategy_id}"
             )
 
+        parsed_config = _parse_mapping(strategy_config)
+        _ensure_dom_training_data(submission.strategy_id, parsed_config)
+
         await redis.xadd(
             EVENT_STREAM_KEY,
             {"type": "task_progress", "task_id": submission.task_id, "progress": "50"},
@@ -184,7 +412,6 @@ class OptimizerService:
 
         parsed_params = _parse_mapping(param_space)
         parsed_history = _parse_mapping(history_metrics)
-        parsed_config = _parse_mapping(strategy_config)
 
         best_params: dict[str, Any] = {}
         for key, value in parsed_params.items():
@@ -311,11 +538,86 @@ def create_app(*, service: OptimizerService | None = None) -> FastAPI:
 app = create_app()
 
 
+def _normalise_symbols(symbols: Sequence[str] | None) -> list[str]:
+    if not symbols:
+        return []
+    seen: set[str] = set()
+    result: list[str] = []
+    for entry in symbols:
+        if not entry:
+            continue
+        text = entry.strip().upper()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
+
+
+def collect_dom_coverage(
+    symbols: Sequence[str] | None = None,
+    *,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    if limit is not None:
+        try:
+            limit_value = int(limit)
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            limit_value = 0
+    else:
+        limit_value = 0
+
+    resolved_limit = limit_value if limit_value > 0 else None
+
+    try:
+        available_symbols = list_dom_symbols()
+    except RuntimeError as exc:
+        raise OptimizerDataError(str(exc)) from exc
+
+    targets = _normalise_symbols(symbols)
+    if not targets:
+        targets = available_symbols
+
+    results: list[dict[str, Any]] = []
+    for symbol in targets:
+        try:
+            summary = describe_dom_storage(symbol, limit=resolved_limit)
+        except RuntimeError as exc:
+            results.append({"symbol": symbol, "error": str(exc)})
+            continue
+        results.append(summary)
+
+    return results
+
+
+def print_dom_coverage(symbols: Sequence[str] | None, limit: int | None) -> int:
+    try:
+        coverage = collect_dom_coverage(symbols, limit=limit)
+    except OptimizerDataError as exc:
+        print(json.dumps({"error": str(exc)}), file=sys.stderr)
+        return 1
+
+    print(json.dumps(coverage, indent=2, ensure_ascii=False))
+    return 0
+
+
 def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run optimizer FastAPI service")
     parser.add_argument("--host", default=DEFAULT_HOST, help="Service host (default 0.0.0.0)")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="Service port (default 8001)")
     parser.add_argument("--reload", action="store_true", help="Enable auto-reload for development")
+    parser.add_argument(
+        "--dom-coverage",
+        nargs="*",
+        metavar="SYMBOL",
+        help="Display DOM storage coverage for the provided symbols (or all symbols if omitted) and exit",
+    )
+    parser.add_argument(
+        "--dom-limit",
+        type=int,
+        default=5,
+        help="Maximum number of DOM files to include per symbol when using --dom-coverage (0 = all)",
+    )
     return parser.parse_args(argv)
 
 
@@ -330,6 +632,12 @@ def configure_logging() -> None:
 def main() -> None:
     args = parse_args()
     configure_logging()
+
+    if args.dom_coverage is not None:
+        exit_code = print_dom_coverage(args.dom_coverage, args.dom_limit)
+        if exit_code != 0:
+            sys.exit(exit_code)
+        return
     logger.info(
         "Starting optimizer service on http://{}:{} (reload={})",
         args.host,
