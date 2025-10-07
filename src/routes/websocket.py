@@ -225,6 +225,7 @@ def _extract_positions_payload(
 
 
 async def _fetch_market_snapshot(symbol: str) -> Optional[Dict[str, Any]]:
+    logger.debug("Fetching market snapshot via service", symbol=symbol)
     try:
         payload = await _MARKET_CLIENT.fetch_current_price(symbol)
     except ServiceUnavailableError as exc:
@@ -1358,6 +1359,7 @@ class RealtimePriceHub:
         if not self._is_enabled():
             raise RealtimeSubscriptionError("Unified data layer disabled")
 
+        logger.debug("RealtimePriceHub subscribe requested", symbol=symbol_key)
         manager = self._ensure_manager()
         self._ensure_event_subscription(manager)
 
@@ -1397,6 +1399,15 @@ class RealtimePriceHub:
         if initial_message is not None:
             self._offer(queue, initial_message)
 
+        async with self._lock:
+            state = self._states.get(symbol_key)
+            consumer_count = len(state.queues) if state else 0
+        logger.debug(
+            "RealtimePriceHub subscription established",
+            symbol=symbol_key,
+            snapshot_delivered=bool(initial_message),
+            consumers=consumer_count,
+        )
         return RealtimeSubscription(self, symbol_key, token, queue)
 
     async def _load_snapshot(
@@ -1433,6 +1444,7 @@ class RealtimePriceHub:
                 state.queues.discard(queue)
                 if not state.queues:
                     self._states.pop(symbol, None)
+        logger.debug("RealtimePriceHub unsubscribing", symbol=symbol)
 
         manager = self._manager
         if manager is not None:

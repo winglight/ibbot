@@ -9,12 +9,19 @@ triggering circular import issues.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import List
 
-from src.connection_manager import connection_manager
-from src.depth_subscriber import DepthSubscriber
+from loguru import logger
+
 from src.dom_processor import DOMProcessor
+from src.redis_depth_subscriber import RedisDomSubscriber
+
+try:  # depth subscriber is optional when using Redis backend
+    from src.depth_subscriber import DepthSubscriber
+except Exception:  # pragma: no cover - fallback when module unavailable
+    DepthSubscriber = None  # type: ignore[misc, assignment]
 
 
 @dataclass
@@ -32,7 +39,35 @@ dom_config = DOMConfig()
 
 # Shared instances that other modules rely on
 dom_processor = DOMProcessor(window=dom_config.window, max_levels=dom_config.max_levels)
-depth_subscriber = DepthSubscriber(connection_manager)
+
+
+def _build_depth_subscriber():
+    backend = (os.getenv("DOM_SUBSCRIBER_BACKEND") or "auto").strip().lower()
+    prefer_redis = backend in {"auto", "redis", ""}
+    if os.getenv("PYTEST_CURRENT_TEST") and backend in {"auto", ""}:
+        prefer_redis = False
+
+    if prefer_redis:
+        try:
+            subscriber = RedisDomSubscriber()
+        except Exception as exc:
+            logger.warning("Failed to initialise RedisDomSubscriber: %s", exc)
+            if backend == "redis":
+                raise
+        else:
+            logger.debug("Using RedisDomSubscriber for DOM depth updates")
+            return subscriber
+
+    if DepthSubscriber is None:
+        raise RuntimeError("DepthSubscriber unavailable and Redis backend disabled")
+
+    from src.connection_manager import connection_manager  # local import to avoid eager dependency
+
+    logger.debug("Falling back to legacy DepthSubscriber with connection manager")
+    return DepthSubscriber(connection_manager)
+
+
+depth_subscriber = _build_depth_subscriber()
 
 
 def get_dom_processor() -> DOMProcessor:
