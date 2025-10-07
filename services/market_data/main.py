@@ -1866,13 +1866,22 @@ def create_app(*, runtime: MarketDataRuntime | None = None) -> FastAPI:
                 coverage=coverage,
             )
 
-            ib_candles = await _fetch_candles_from_ib(
-                query,
-                interval=interval,
-                persist=_persist_ib_candles,
-                logger=logger,
-                missing_segments=missing_segments,
-            )
+            if not missing_segments:
+                if logger:
+                    logger.debug(
+                        "Skipping IB fallback for %s interval=%s: no missing segments detected",
+                        query.symbol,
+                        interval,
+                    )
+                ib_candles = []
+            else:
+                ib_candles = await _fetch_candles_from_ib(
+                    query,
+                    interval=interval,
+                    persist=_persist_ib_candles,
+                    logger=logger,
+                    missing_segments=missing_segments,
+                )
 
             if ib_candles:
                 combined = _combine_candle_sets(normalised, ib_candles)
