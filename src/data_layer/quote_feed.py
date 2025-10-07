@@ -334,14 +334,22 @@ class IBQuoteFeed(QuoteFeed):
 
         client = getattr(core, "ibkr_client", None)
         if client is not None:
+            resolver = getattr(client, "_resolve", None)
+            if callable(resolver):
+                try:
+                    return resolver()
+                except RuntimeError:
+                    client = None
+            else:
+                return client
+
+        if client is None:
+            from src.ibkr_client import IBKRClient
+
+            client = IBKRClient()
+            core.ibkr_client = client
             return client
 
-        factory = getattr(core, "IBKRClient", None)
-        if factory is None:
-            raise RuntimeError("IBKRClient factory not available on core module")
-
-        client = factory()
-        core.ibkr_client = client
         return client
 
     @property
