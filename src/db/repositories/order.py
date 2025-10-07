@@ -836,7 +836,15 @@ class OrderRepository:
             try:
                 cursor.execute(count_sql, tuple(params))
                 total_row = cursor.fetchone()
-                total = int(total_row[0]) if total_row else 0
+                if not total_row:
+                    total = 0
+                elif isinstance(total_row, Mapping):
+                    first_value = next(iter(total_row.values()), 0)
+                    total = int(first_value or 0)
+                elif isinstance(total_row, Sequence):
+                    total = int(total_row[0]) if total_row else 0
+                else:
+                    total = int(total_row)
                 order_sql = (
                     "SELECT * FROM orders "
                     f"WHERE {where_sql} "
