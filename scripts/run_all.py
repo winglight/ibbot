@@ -33,7 +33,7 @@ from src.ibbot.redis import DEFAULT_REDIS_URL, DEFAULT_REDIS_URL_ENV
 DEFAULT_SERVICES: tuple[str, ...] = (
     "connection_control",
     "account",
-    "orders",
+    # "orders",
     "ib_command",
     "ib_feed",
     "strategy",

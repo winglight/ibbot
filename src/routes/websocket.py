@@ -25,7 +25,6 @@ from src.account_snapshot_cache import (
     read_account_info_snapshot,
     read_positions_snapshot,
 )
-from src.connection_manager import connection_manager
 from src.websocket_manager import websocket_manager as global_websocket_manager
 from src.data_layer import (
     DataSubscriptionRequest,
@@ -36,7 +35,7 @@ from src.data_layer import (
     get_data_source_manager,
     is_legacy_mode,
 )
-from src.dom_service import get_dom_service
+from src.routes.dom import get_dom_service_client
 from src.utils import now_local, parse_local_datetime, to_local_iso
 from src.routes.logs import load_logs_data
 from src.routes.monitoring import build_metric_series_payload, get_queue_metrics
@@ -79,10 +78,6 @@ _STRATEGY_CLIENT = StrategyServiceClient()
 
 def _services():
     return core.get_container()
-
-
-def _connection_manager():
-    return connection_manager
 
 
 def _websocket_manager():
@@ -2074,7 +2069,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
     request_tracker: Dict[str, float] = {}
     last_responses: Dict[str, Dict[str, Any]] = {}
-    dom_service = get_dom_service()
+    dom_client = get_dom_service_client()
     try:
         while True:
             data = await websocket.receive_text()
@@ -2739,11 +2734,11 @@ async def websocket_endpoint(websocket: WebSocket):
                     continue
 
                 try:
-                    result = await dom_service.get_stats_async(
+                    result = await dom_client.get_stats(
                         symbol,
                         lookback_seconds=lookback_val,
-                        start_time=start_param,
-                        end_time=end_param,
+                        start=start_param,
+                        end=end_param,
                         max_points=max_points,
                     )
                     payload = {"type": "dom_stats", "success": True, "symbol": symbol}

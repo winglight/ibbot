@@ -278,35 +278,7 @@ async def _module_data_subscriptions(context: ModuleRuntimeContext) -> ModuleHan
         )
         return handle
 
-    try:
-        dom_service = core.get_dom_service()
-    except Exception as exc:
-        context.logger.warning(f"DOM service unavailable for auto-start: {exc}")
-        return handle
-
-    try:
-        scheduled = dom_service.ensure_auto_start_worker()
-    except Exception as exc:
-        context.logger.warning(f"DOM auto-start scheduling warning: {exc}")
-        return handle
-
-    symbol = dom_service.auto_start_symbol
-    if scheduled:
-        if symbol:
-            context.logger.info(
-                "DOM auto-start worker scheduled for symbol {}",
-                symbol,
-            )
-        else:
-            context.logger.info("DOM auto-start worker scheduled (no default symbol configured)")
-    else:
-        if symbol:
-            context.logger.info(
-                "DOM auto-start worker already initialised for symbol {}",
-                symbol,
-            )
-        else:
-            context.logger.info("DOM auto-start disabled; no default symbol configured")
+    context.logger.info("DOM auto-start handled by external market data service; no gateway scheduling required")
 
     return handle
 

@@ -7,6 +7,48 @@ from fastapi.testclient import TestClient
 from src.routes import websocket as websocket_module
 
 
+class DummyDomClient:
+    async def get_stats(
+        self,
+        symbol: str,
+        *,
+        lookback_seconds: int | None = None,
+        start: str | None = None,
+        end: str | None = None,
+        max_points: int | None = None,
+    ) -> Dict[str, Any]:
+        return {"success": True, "symbol": symbol, "stats": {}}
+
+    async def get_history(
+        self,
+        symbol: str,
+        *,
+        limit: int | None = None,
+        start: str | None = None,
+        end: str | None = None,
+        include_snapshots: bool | None = None,
+    ) -> Dict[str, Any]:
+        return {"success": True, "symbol": symbol, "history": []}
+
+    async def get_data(self, symbol: str | None = None) -> Dict[str, Any]:
+        return {"success": True, "metrics": {}, "depth": {}}
+
+    async def get_alerts(self) -> Dict[str, Any]:
+        return {"success": True, "alerts": []}
+
+    async def acknowledge_alert(self, alert_id: int) -> Dict[str, Any]:
+        return {"success": True}
+
+    async def start_dom(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return {"success": True}
+
+    async def stop_dom(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return {"success": True}
+
+    async def update_config(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return {"success": True}
+
+
 @pytest.fixture
 def anyio_backend() -> str:
     return "asyncio"
@@ -57,7 +99,7 @@ async def test_websocket_emits_connection_status(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(websocket_module, "_fetch_account_info", noop_fetch_account)
     monkeypatch.setattr(websocket_module, "_fetch_positions", noop_fetch_positions)
     monkeypatch.setattr(websocket_module, "_fetch_orders", stub_fetch_orders)
-    monkeypatch.setattr(websocket_module, "get_dom_service", lambda: None)
+    monkeypatch.setattr(websocket_module, "get_dom_service_client", lambda: DummyDomClient())
 
     with TestClient(app) as client:
         with client.websocket_connect("/ws") as websocket:
@@ -126,7 +168,7 @@ async def test_websocket_emits_disconnected_status(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(websocket_module, "_fetch_account_info", empty_account_info)
     monkeypatch.setattr(websocket_module, "_fetch_positions", empty_positions)
     monkeypatch.setattr(websocket_module, "_fetch_orders", empty_orders)
-    monkeypatch.setattr(websocket_module, "get_dom_service", lambda: None)
+    monkeypatch.setattr(websocket_module, "get_dom_service_client", lambda: DummyDomClient())
 
     with TestClient(app) as client:
         with client.websocket_connect("/ws") as websocket:
@@ -193,7 +235,7 @@ async def test_websocket_handles_service_unavailable(monkeypatch: pytest.MonkeyP
         websocket_module._ACCOUNT_CLIENT, "fetch_positions", fail_fetch_positions
     )
     monkeypatch.setattr(websocket_module._ORDERS_CLIENT, "list_orders", fail_list_orders)
-    monkeypatch.setattr(websocket_module, "get_dom_service", lambda: None)
+    monkeypatch.setattr(websocket_module, "get_dom_service_client", lambda: DummyDomClient())
 
     with TestClient(app) as client:
         with client.websocket_connect("/ws") as websocket:

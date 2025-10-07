@@ -26,52 +26,90 @@ class StubDomServiceClient:
         self.calls.append(("get_alerts", None))
         if self.should_fail:
             raise ServiceUnavailableError("DOM service unavailable")
-        return self.alerts_response
+        return {"success": True, **self.alerts_response}
 
     async def get_config(self) -> Mapping[str, Any]:
         self.calls.append(("get_config", None))
         if self.should_fail:
             raise ServiceUnavailableError("DOM service unavailable")
-        return self.config_response
+        return {"success": True, **self.config_response}
 
-    async def get_data(self) -> Mapping[str, Any]:
-        self.calls.append(("get_data", None))
+    async def get_data(self, symbol: str | None = None) -> Mapping[str, Any]:
+        self.calls.append(("get_data", symbol))
         if self.should_fail:
             raise ServiceUnavailableError("DOM service unavailable")
-        return self.data_response
+        return {"success": True, **self.data_response}
 
-    async def get_history(self, symbol: str) -> Mapping[str, Any]:
-        self.calls.append(("get_history", symbol))
+    async def get_history(
+        self,
+        symbol: str,
+        *,
+        limit: int | None = None,
+        start: str | None = None,
+        end: str | None = None,
+        include_snapshots: bool | None = None,
+    ) -> Mapping[str, Any]:
+        self.calls.append(
+            (
+                "get_history",
+                {
+                    "symbol": symbol,
+                    "limit": limit,
+                    "start": start,
+                    "end": end,
+                    "include_snapshots": include_snapshots,
+                },
+            )
+        )
         if self.should_fail:
             raise ServiceUnavailableError("DOM service unavailable")
-        return self.history_response
+        return {"success": True, "symbol": symbol, **self.history_response}
 
-    async def get_stats(self, symbol: str) -> Mapping[str, Any]:
-        self.calls.append(("get_stats", symbol))
+    async def get_stats(
+        self,
+        symbol: str,
+        *,
+        lookback_seconds: int | None = None,
+        start: str | None = None,
+        end: str | None = None,
+        max_points: int | None = None,
+    ) -> Mapping[str, Any]:
+        self.calls.append(
+            (
+                "get_stats",
+                {
+                    "symbol": symbol,
+                    "lookback_seconds": lookback_seconds,
+                    "start": start,
+                    "end": end,
+                    "max_points": max_points,
+                },
+            )
+        )
         if self.should_fail:
             raise ServiceUnavailableError("DOM service unavailable")
-        return self.stats_response
+        return {"success": True, "symbol": symbol, **self.stats_response}
 
-    async def acknowledge_alert(self, alert_id: str) -> Mapping[str, Any]:
+    async def acknowledge_alert(self, alert_id: int) -> Mapping[str, Any]:
         self.calls.append(("acknowledge_alert", alert_id))
         if self.should_fail:
             raise ServiceUnavailableError("DOM service unavailable")
         return {"success": True}
 
-    async def start_dom(self) -> Mapping[str, Any]:
-        self.calls.append(("start_dom", None))
+    async def start_dom(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
+        self.calls.append(("start_dom", dict(payload)))
         if self.should_fail:
             raise ServiceUnavailableError("DOM service unavailable")
-        return {"success": True, "status": "started"}
+        return {"success": True, "pending": False, "already_running": False}
 
-    async def stop_dom(self) -> Mapping[str, Any]:
-        self.calls.append(("stop_dom", None))
+    async def stop_dom(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
+        self.calls.append(("stop_dom", dict(payload)))
         if self.should_fail:
             raise ServiceUnavailableError("DOM service unavailable")
-        return {"success": True, "status": "stopped"}
+        return {"success": True, "pending": False}
 
     async def update_config(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
-        self.calls.append(("update_config", payload))
+        self.calls.append(("update_config", dict(payload)))
         if self.should_fail:
             raise ServiceUnavailableError("DOM service unavailable")
         return {"success": True}
@@ -179,7 +217,18 @@ def test_get_dom_history_returns_symbol_history(dom_app: tuple[FastAPI, StubDomS
     assert response.status_code == status.HTTP_200_OK
     data = response.json()
     assert "history" in data
-    assert stub_client.calls == [("get_history", "AAPL")]
+    assert stub_client.calls == [
+        (
+            "get_history",
+            {
+                "symbol": "AAPL",
+                "limit": 500,
+                "start": None,
+                "end": None,
+                "include_snapshots": True,
+            },
+        )
+    ]
 
 
 def test_get_dom_history_returns_503_when_service_unavailable(dom_app: tuple[FastAPI, StubDomServiceClient]) -> None:
@@ -203,7 +252,18 @@ def test_get_dom_stats_returns_symbol_stats(dom_app: tuple[FastAPI, StubDomServi
     assert response.status_code == status.HTTP_200_OK
     data = response.json()
     assert "stats" in data
-    assert stub_client.calls == [("get_stats", "AAPL")]
+    assert stub_client.calls == [
+        (
+            "get_stats",
+            {
+                "symbol": "AAPL",
+                "lookback_seconds": None,
+                "start": None,
+                "end": None,
+                "max_points": None,
+            },
+        )
+    ]
 
 
 def test_get_dom_stats_returns_503_when_service_unavailable(dom_app: tuple[FastAPI, StubDomServiceClient]) -> None:
@@ -222,12 +282,12 @@ def test_acknowledge_alert_calls_service(dom_app: tuple[FastAPI, StubDomServiceC
     app, stub_client = dom_app
     client = TestClient(app)
 
-    response = client.post("/api/alerts/alert123/ack")
+    response = client.post("/api/alerts/123/ack")
 
     assert response.status_code == status.HTTP_200_OK
     data = response.json()
     assert data["success"] is True
-    assert stub_client.calls == [("acknowledge_alert", "alert123")]
+    assert stub_client.calls == [("acknowledge_alert", 123)]
 
 
 def test_acknowledge_alert_returns_503_when_service_unavailable(dom_app: tuple[FastAPI, StubDomServiceClient]) -> None:
@@ -236,7 +296,7 @@ def test_acknowledge_alert_returns_503_when_service_unavailable(dom_app: tuple[F
     stub_client.should_fail = True
     client = TestClient(app)
 
-    response = client.post("/api/alerts/alert123/ack")
+    response = client.post("/api/alerts/123/ack")
 
     assert response.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
 
@@ -246,13 +306,22 @@ def test_start_dom_calls_service(dom_app: tuple[FastAPI, StubDomServiceClient]) 
     app, stub_client = dom_app
     client = TestClient(app)
 
-    response = client.post("/api/dom/start")
+    response = client.post("/api/dom/start", json={"symbol": "ES"})
 
     assert response.status_code == status.HTTP_200_OK
     data = response.json()
     assert data["success"] is True
-    assert data["status"] == "started"
-    assert stub_client.calls == [("start_dom", None)]
+    assert data["pending"] is False
+    assert stub_client.calls == [
+        (
+            "start_dom",
+            {
+                "symbol": "ES",
+                "num_rows": 5,
+                "force_restart": False,
+            },
+        )
+    ]
 
 
 def test_start_dom_returns_503_when_service_unavailable(dom_app: tuple[FastAPI, StubDomServiceClient]) -> None:
@@ -261,7 +330,7 @@ def test_start_dom_returns_503_when_service_unavailable(dom_app: tuple[FastAPI, 
     stub_client.should_fail = True
     client = TestClient(app)
 
-    response = client.post("/api/dom/start")
+    response = client.post("/api/dom/start", json={"symbol": "ES"})
 
     assert response.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
 
@@ -271,13 +340,18 @@ def test_stop_dom_calls_service(dom_app: tuple[FastAPI, StubDomServiceClient]) -
     app, stub_client = dom_app
     client = TestClient(app)
 
-    response = client.post("/api/dom/stop")
+    response = client.post("/api/dom/stop", json={"symbol": "ES"})
 
     assert response.status_code == status.HTTP_200_OK
     data = response.json()
     assert data["success"] is True
-    assert data["status"] == "stopped"
-    assert stub_client.calls == [("stop_dom", None)]
+    assert data["pending"] is False
+    assert stub_client.calls == [
+        (
+            "stop_dom",
+            {"symbol": "ES"},
+        )
+    ]
 
 
 def test_stop_dom_returns_503_when_service_unavailable(dom_app: tuple[FastAPI, StubDomServiceClient]) -> None:
@@ -286,7 +360,7 @@ def test_stop_dom_returns_503_when_service_unavailable(dom_app: tuple[FastAPI, S
     stub_client.should_fail = True
     client = TestClient(app)
 
-    response = client.post("/api/dom/stop")
+    response = client.post("/api/dom/stop", json={"symbol": "ES"})
 
     assert response.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
 

@@ -168,12 +168,53 @@ def test_websocket_handshake_with_mock_manager(monkeypatch: pytest.MonkeyPatch) 
         async def get_positions(self, *, fast: bool = True) -> list[dict[str, Any]]:
             return []
 
+    class _DummyDomClient:
+        async def get_stats(
+            self,
+            symbol: str,
+            *,
+            lookback_seconds: int | None = None,
+            start: str | None = None,
+            end: str | None = None,
+            max_points: int | None = None,
+        ) -> Dict[str, Any]:
+            return {"success": True, "symbol": symbol, "stats": {}}
+
+        async def get_history(
+            self,
+            symbol: str,
+            *,
+            limit: int | None = None,
+            start: str | None = None,
+            end: str | None = None,
+            include_snapshots: bool | None = None,
+        ) -> Dict[str, Any]:
+            return {"success": True, "symbol": symbol, "history": []}
+
+        async def get_data(self, symbol: str | None = None) -> Dict[str, Any]:
+            return {"success": True, "metrics": {}, "depth": {}}
+
+        async def get_alerts(self) -> Dict[str, Any]:
+            return {"success": True, "alerts": []}
+
+        async def acknowledge_alert(self, alert_id: int) -> Dict[str, Any]:
+            return {"success": True}
+
+        async def start_dom(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+            return {"success": True}
+
+        async def stop_dom(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+            return {"success": True}
+
+        async def update_config(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+            return {"success": True}
+
     dummy_conn = _DummyConnectionManager()
     dummy_ws_manager = _DummyWebSocketManager()
 
     monkeypatch.setattr(websocket_module, "_connection_manager", lambda: dummy_conn)
     monkeypatch.setattr(websocket_module, "_websocket_manager", lambda: dummy_ws_manager)
-    monkeypatch.setattr(websocket_module, "get_dom_service", lambda: None)
+    monkeypatch.setattr(websocket_module, "get_dom_service_client", lambda: _DummyDomClient())
     monkeypatch.setattr(websocket_module.core, "ibkr_client", _DummyIBClient(), raising=False)
 
     with TestClient(app) as client:
