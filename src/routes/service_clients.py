@@ -807,6 +807,68 @@ class MarketDataServiceClient(ServiceClient):
             params={"symbol": symbol},
         )
 
+    async def dom_start(self, payload: Mapping[str, Any]) -> Any:
+        return await self.request("POST", "/dom/start", json=dict(payload))
+
+    async def dom_stop(self, payload: Mapping[str, Any]) -> Any:
+        return await self.request("POST", "/dom/stop", json=dict(payload))
+
+    async def dom_get_config(self) -> Any:
+        return await self.request("GET", "/dom/config")
+
+    async def dom_update_config(self, payload: Mapping[str, Any]) -> Any:
+        return await self.request("PUT", "/dom/config", json=dict(payload))
+
+    async def dom_get_data(self, symbol: str | None = None) -> Any:
+        params = {"symbol": symbol} if symbol else None
+        return await self.request("GET", "/dom/data", params=params)
+
+    async def dom_get_history(
+        self,
+        symbol: str,
+        *,
+        limit: int | None = None,
+        start: str | None = None,
+        end: str | None = None,
+        include_snapshots: bool | None = None,
+    ) -> Any:
+        params: Dict[str, Any] = {}
+        if limit is not None:
+            params["limit"] = limit
+        if start is not None:
+            params["start"] = start
+        if end is not None:
+            params["end"] = end
+        if include_snapshots is not None:
+            params["include_snapshots"] = str(bool(include_snapshots)).lower()
+        return await self.request("GET", f"/dom/history/{symbol}", params=params or None)
+
+    async def dom_get_stats(
+        self,
+        symbol: str,
+        *,
+        lookback_seconds: int | None = None,
+        start: str | None = None,
+        end: str | None = None,
+        max_points: int | None = None,
+    ) -> Any:
+        params: Dict[str, Any] = {}
+        if lookback_seconds is not None:
+            params["lookback_seconds"] = lookback_seconds
+        if start is not None:
+            params["start"] = start
+        if end is not None:
+            params["end"] = end
+        if max_points is not None:
+            params["max_points"] = max_points
+        return await self.request("GET", f"/dom/stats/{symbol}", params=params or None)
+
+    async def dom_get_alerts(self) -> Any:
+        return await self.request("GET", "/dom/alerts")
+
+    async def dom_ack_alert(self, alert_id: int) -> Any:
+        return await self.request("POST", f"/dom/alerts/{alert_id}/ack")
+
     async def request_historical_data(self, payload: Mapping[str, Any]) -> Any:
         return await self.request(
             "POST",

@@ -1,6 +1,6 @@
 import asyncio
 import json
-from typing import Any
+from typing import Any, Dict
 
 import pytest
 from fastapi import FastAPI
@@ -8,6 +8,48 @@ from fastapi.testclient import TestClient
 from starlette.testclient import WebSocketTestSession
 
 from src.routes import websocket as websocket_module
+
+
+class DummyDomClient:
+    async def get_stats(
+        self,
+        symbol: str,
+        *,
+        lookback_seconds: int | None = None,
+        start: str | None = None,
+        end: str | None = None,
+        max_points: int | None = None,
+    ) -> Dict[str, Any]:
+        return {"success": True, "symbol": symbol, "stats": {}}
+
+    async def get_history(
+        self,
+        symbol: str,
+        *,
+        limit: int | None = None,
+        start: str | None = None,
+        end: str | None = None,
+        include_snapshots: bool | None = None,
+    ) -> Dict[str, Any]:
+        return {"success": True, "symbol": symbol, "history": []}
+
+    async def get_data(self, symbol: str | None = None) -> Dict[str, Any]:
+        return {"success": True, "metrics": {}, "depth": {}}
+
+    async def get_alerts(self) -> Dict[str, Any]:
+        return {"success": True, "alerts": []}
+
+    async def acknowledge_alert(self, alert_id: int) -> Dict[str, Any]:
+        return {"success": True}
+
+    async def start_dom(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return {"success": True}
+
+    async def stop_dom(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return {"success": True}
+
+    async def update_config(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return {"success": True}
 from src.routes.service_clients import ServiceUnavailableError
 
 
@@ -201,7 +243,7 @@ def websocket_app(monkeypatch: pytest.MonkeyPatch) -> tuple[FastAPI, Any]:
             raising=False,
         )
 
-    monkeypatch.setattr(websocket_module, "get_dom_service", lambda: None)
+    monkeypatch.setattr(websocket_module, "get_dom_service_client", lambda: DummyDomClient())
 
     return app, account_client
 

@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import threading
 import time
 from collections import defaultdict
-import os
 from dataclasses import dataclass
+from datetime import datetime
 from importlib import import_module
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
@@ -20,6 +21,7 @@ __all__ = [
     "QuoteFeed",
     "InMemoryQuoteFeed",
     "IBQuoteFeed",
+    "RedisQuoteFeed",
     "resolve_default_quote_feed",
 ]
 
@@ -119,7 +121,7 @@ class IBQuoteFeed(QuoteFeed):
 
                 return _cancel_existing
 
-        client = self._resolve_ibkr_client()
+        client = await asyncio.to_thread(self._resolve_ibkr_client)
         ensure_fn = getattr(client, "ensure_connection", None)
         if callable(ensure_fn):
             try:
@@ -199,7 +201,11 @@ class IBQuoteFeed(QuoteFeed):
         try:
             ticker.updateEvent += _on_update
         except Exception as exc:  # pragma: no cover - defensive guard
-            logger.error("Failed to attach update handler for %s: %s", symbol, exc)
+            logger.error(
+                "Failed to attach update handler",
+                symbol=symbol,
+                error=exc,
+            )
             connection_manager.run_in_connection_thread(
                 lambda: connection_manager.get_ib_instance().cancelMktData(contract)
             )
@@ -218,8 +224,8 @@ class IBQuoteFeed(QuoteFeed):
             if ib:
                 try:
                     ib.cancelMktData(contract)
-                except Exception as exc:
-                    logger.warning("Failed to cancel market data for %s", contract)
+                except Exception:
+                    logger.warning("Failed to cancel market data", contract=contract)
             try:
                 ticker.updateEvent -= subscription.handler
             except Exception:
@@ -260,7 +266,11 @@ class IBQuoteFeed(QuoteFeed):
             try:
                 cb(payload)
             except Exception as exc:
-                logger.debug("Quote callback failed for %s: %s", symbol, exc)
+                logger.debug(
+                    "Quote callback failed",
+                    symbol=symbol,
+                    error=exc,
+                )
 
     def _extract_payload(self, symbol: str, ticker: any) -> Optional[Dict[str, float]]:
         try:
@@ -287,7 +297,11 @@ class IBQuoteFeed(QuoteFeed):
                 "ts_ns": ts_ns,
             }
         except Exception as exc:  # pragma: no cover - defensive guard
-            logger.debug("Failed to extract ticker payload for %s: %s", symbol, exc)
+            logger.debug(
+                "Failed to extract ticker payload",
+                symbol=symbol,
+                error=exc,
+            )
             return None
 
     def _build_contract(self, symbol: str, options: Dict[str, any]):
@@ -308,7 +322,10 @@ class IBQuoteFeed(QuoteFeed):
             try:
                 return get_client_sync("secondary")
             except Exception as exc:
-                logger.error("Failed to resolve shared IBKR client: %s", exc)
+                logger.error(
+                    "Failed to resolve shared IBKR client",
+                    error=exc,
+                )
 
         try:
             import core  # type: ignore
@@ -347,6 +364,266 @@ class IBQuoteFeed(QuoteFeed):
         return self.__data_source_error_cls
 
 
+@dataclass(slots=True)
+class _RedisQuoteStream:
+    callbacks: List[Callback]
+    thread: threading.Thread
+    stop_event: threading.Event
+    client: "redis.Redis"
+    channel: str
+
+
+class RedisQuoteFeed(QuoteFeed):
+    """Quote feed backed by Redis pub/sub snapshots produced by ib-feed."""
+
+    _CHANNEL_TEMPLATE = os.getenv("IB_FEED_PRICE_CHANNEL", "pubsub:ib:price:{symbol}")
+    _SNAPSHOT_TEMPLATE = os.getenv("IB_FEED_SNAPSHOT_KEY", "hash:market:snapshot:{symbol}")
+
+    def __init__(self, redis_url: str | None = None) -> None:
+        try:  # lazy import to keep redis optional for some tests
+            import redis  # type: ignore
+        except Exception as exc:  # pragma: no cover - redis dependency missing
+            raise RuntimeError("redis package is required for RedisQuoteFeed") from exc
+
+        self._redis_mod = redis
+        self._redis_url = redis_url or (
+            os.getenv("DATA_LAYER_REDIS_URL")
+            or os.getenv("IB_FEED_REDIS_URL")
+            or os.getenv("IBBOT_REDIS_URL")
+            or "redis://localhost:6379/0"
+        )
+        self._streams: Dict[str, _RedisQuoteStream] = {}
+        self._lock = threading.Lock()
+        logger.debug(
+            "RedisQuoteFeed initialised",
+            redis_url=self._redis_url,
+            channel_template=self._CHANNEL_TEMPLATE,
+        )
+
+    async def subscribe(
+        self,
+        symbol: str,
+        callback: Callback,
+        *,
+        options: Optional[Dict] = None,
+    ) -> Callable[[], Optional[Awaitable[None]]]:
+        symbol_key = (symbol or "").strip().upper()
+        if not symbol_key:
+            raise ValueError("Symbol is required for Redis quote subscription")
+
+        with self._lock:
+            existing = self._streams.get(symbol_key)
+            if existing:
+                if callback not in existing.callbacks:
+                    existing.callbacks.append(callback)
+                    logger.debug(
+                        "Attached additional callback to Redis quote stream",
+                        symbol=symbol_key,
+                        callback_count=len(existing.callbacks),
+                    )
+
+                async def _cancel_existing() -> None:
+                    self._remove_callback(symbol_key, callback)
+
+                await self._maybe_emit_snapshot(symbol_key, callback)
+                return _cancel_existing
+
+            client = self._redis_mod.Redis.from_url(self._redis_url, decode_responses=True)
+            stop_event = threading.Event()
+            handle = _RedisQuoteStream(
+                callbacks=[callback],
+                thread=threading.Thread(
+                    target=self._listen,
+                    name=f"redis-quote-{symbol_key}",
+                    args=(symbol_key, client, stop_event),
+                    daemon=True,
+                ),
+                stop_event=stop_event,
+                client=client,
+                channel=self._CHANNEL_TEMPLATE.format(symbol=symbol_key),
+            )
+            self._streams[symbol_key] = handle
+            handle.thread.start()
+
+        await self._maybe_emit_snapshot(symbol_key, callback)
+
+        async def _cancel() -> None:
+            should_stop = self._remove_callback(symbol_key, callback)
+            if should_stop:
+                self._stop_stream(symbol_key, handle)
+
+        return _cancel
+
+    async def publish_tick(self, symbol: str, payload: Dict[str, float]) -> None:  # pragma: no cover - interface parity
+        raise NotImplementedError("RedisQuoteFeed publishes updates via Redis pubsub")
+
+    # ------------------------------------------------------------------
+    async def _maybe_emit_snapshot(
+        self,
+        symbol: str,
+        callback: Callback,
+    ) -> None:
+        await asyncio.to_thread(self._emit_snapshot, symbol, callback)
+
+    def _emit_snapshot(self, symbol: str, callback: Callback) -> None:
+        client = None
+        try:
+            client = self._redis_mod.Redis.from_url(self._redis_url, decode_responses=True)
+            snapshot = client.hgetall(self._SNAPSHOT_TEMPLATE.format(symbol=symbol))
+        except Exception as exc:  # pragma: no cover - redis failure
+            logger.debug("Failed to read Redis quote snapshot", symbol=symbol, error=str(exc))
+            return
+        finally:
+            if client is not None:
+                try:
+                    client.close()
+                except Exception:
+                    pass
+
+        if not snapshot:
+            return
+        payload = self._normalise_snapshot(snapshot)
+        if not payload:
+            return
+        logger.debug("Emitting cached Redis quote snapshot", symbol=symbol)
+        try:
+            callback(payload)
+        except Exception as exc:  # pragma: no cover - callback safety
+            logger.warning("Quote snapshot callback raised", symbol=symbol, error=str(exc))
+
+    # ------------------------------------------------------------------
+    def _listen(
+        self,
+        symbol: str,
+        client: "redis.Redis",
+        stop_event: threading.Event,
+    ) -> None:
+        channel = self._CHANNEL_TEMPLATE.format(symbol=symbol)
+        logger.debug("Redis quote listener starting", symbol=symbol, channel=channel)
+        try:
+            pubsub = client.pubsub(ignore_subscribe_messages=True)
+            pubsub.subscribe(channel)
+        except Exception as exc:  # pragma: no cover - connection failures
+            logger.error("Redis quote subscribe failed", symbol=symbol, error=str(exc))
+            return
+
+        try:
+            for message in pubsub.listen():
+                if stop_event.is_set():
+                    break
+                if not message or message.get("type") != "message":
+                    continue
+                data = message.get("data")
+                if not data:
+                    continue
+                try:
+                    payload = json.loads(data)
+                except Exception as exc:  # pragma: no cover - malformed payload
+                    logger.debug("Failed to decode Redis quote payload", symbol=symbol, error=str(exc))
+                    continue
+                normalized = self._normalise_payload(symbol, payload)
+                if not normalized:
+                    continue
+                logger.debug(
+                    "Received Redis quote update",
+                    symbol=symbol,
+                    bid=normalized.get("bid"),
+                    ask=normalized.get("ask"),
+                    last=normalized.get("last"),
+                )
+                callbacks = self._callbacks_for(symbol)
+                for cb in callbacks:
+                    try:
+                        cb(dict(normalized))
+                    except Exception as exc:  # pragma: no cover - callback safety
+                        logger.warning("Quote callback raised", symbol=symbol, error=str(exc))
+        finally:
+            try:
+                pubsub.close()
+            except Exception:
+                pass
+            try:
+                client.close()
+            except Exception:
+                pass
+            logger.debug("Redis quote listener stopped", symbol=symbol)
+
+    # ------------------------------------------------------------------
+    def _remove_callback(self, symbol: str, callback: Callback) -> bool:
+        with self._lock:
+            handle = self._streams.get(symbol)
+            if not handle:
+                return False
+            try:
+                handle.callbacks.remove(callback)
+            except ValueError:
+                pass
+            if handle.callbacks:
+                return False
+            self._streams.pop(symbol, None)
+        return True
+
+    def _stop_stream(self, symbol: str, handle: _RedisQuoteStream) -> None:
+        try:
+            handle.stop_event.set()
+            if handle.thread.is_alive():
+                handle.thread.join(timeout=2.0)
+        finally:
+            try:
+                handle.client.close()
+            except Exception:
+                pass
+
+    def _callbacks_for(self, symbol: str) -> List[Callback]:
+        with self._lock:
+            handle = self._streams.get(symbol)
+            if not handle:
+                return []
+            return list(handle.callbacks)
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _normalise_payload(symbol: str, payload: Dict[str, Any]) -> Dict[str, float]:
+        try:
+            ts_raw = payload.get("timestamp")
+            if isinstance(ts_raw, str):
+                dt = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
+            else:
+                dt = datetime.now()
+        except Exception:
+            dt = datetime.now()
+        ts_ns = int(dt.timestamp() * 1_000_000_000)
+        result = {
+            "symbol": symbol,
+            "bid": float(payload.get("bid", 0.0) or 0.0),
+            "ask": float(payload.get("ask", 0.0) or 0.0),
+            "last": float(payload.get("last", 0.0) or 0.0),
+            "volume": float(payload.get("volume", 0.0) or 0.0),
+            "ts_ns": ts_ns,
+        }
+        return result
+
+    def _normalise_snapshot(self, snapshot: Dict[str, Any]) -> Dict[str, float]:
+        try:
+            timestamp = snapshot.get("timestamp")
+            if isinstance(timestamp, str):
+                dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            else:
+                dt = datetime.now()
+        except Exception:
+            dt = datetime.now()
+        ts_ns = int(dt.timestamp() * 1_000_000_000)
+        result = {
+            "symbol": snapshot.get("symbol"),
+            "bid": float(snapshot.get("bid", 0.0) or 0.0),
+            "ask": float(snapshot.get("ask", 0.0) or 0.0),
+            "last": float(snapshot.get("last", 0.0) or 0.0),
+            "volume": float(snapshot.get("volume", 0.0) or 0.0),
+            "ts_ns": ts_ns,
+        }
+        return result
+
+
 def resolve_default_quote_feed() -> QuoteFeed:
     """Return the default quote feed based on runtime environment."""
 
@@ -354,8 +631,21 @@ def resolve_default_quote_feed() -> QuoteFeed:
         logger.debug("Using in-memory quote feed for tests")
         return InMemoryQuoteFeed()
 
+    remote_flag = os.getenv("MARKET_DATA_REMOTE_FEED")
+    use_remote = False
+    if remote_flag is None:
+        use_remote = bool(os.getenv("IB_FEED_REDIS_URL") or os.getenv("DATA_LAYER_REDIS_URL"))
+    else:
+        use_remote = remote_flag.strip().lower() in {"1", "true", "yes", "on"}
+
+    if use_remote:
+        try:
+            return RedisQuoteFeed()
+        except Exception as exc:
+            logger.warning("Failed to initialise Redis quote feed", error=exc)
+
     try:
         return IBQuoteFeed()
     except Exception as exc:  # pragma: no cover - defensive fallback
-        logger.warning("Falling back to in-memory quote feed: %s", exc)
+        logger.warning("Falling back to in-memory quote feed", error=exc)
         return InMemoryQuoteFeed()

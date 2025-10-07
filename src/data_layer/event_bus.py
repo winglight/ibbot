@@ -73,7 +73,11 @@ class EventBus:
         token = BusSubscriptionToken(token=str(uuid.uuid4()), topic_pattern=topic_pattern)
         with self._lock:
             self._subscribers[token.token] = (topic_pattern, handler)
-        logger.debug("EventBus subscribed token=%s pattern=%s", token.token, topic_pattern)
+        logger.debug(
+            "EventBus subscribed",
+            token=token.token,
+            pattern=topic_pattern,
+        )
         return token
 
     def unsubscribe(self, token: BusSubscriptionToken) -> None:
@@ -82,7 +86,11 @@ class EventBus:
         with self._lock:
             removed = self._subscribers.pop(token.token, None)
         if removed:
-            logger.debug("EventBus unsubscribed token=%s pattern=%s", token.token, token.topic_pattern)
+            logger.debug(
+                "EventBus unsubscribed",
+                token=token.token,
+                pattern=token.topic_pattern,
+            )
 
     async def publish(self, event: EventEnvelope) -> None:
         """Publish *event* to all matching subscribers."""
@@ -97,7 +105,12 @@ class EventBus:
                 if inspect.isawaitable(result):
                     await result
             except Exception as exc:  # pragma: no cover - defensive guard
-                logger.exception("EventBus handler failed: %s", exc)
+                logger.exception(
+                    "EventBus handler failed",
+                    error=exc,
+                    event_type=event.event_type,
+                    topic=event.topic,
+                )
 
     def publish_nowait(self, event: EventEnvelope) -> None:
         """Fire-and-forget variant of :meth:`publish`."""

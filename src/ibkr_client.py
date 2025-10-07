@@ -11,11 +11,12 @@ import subprocess
 import sys
 import threading
 import time
+from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 try:  # pragma: no cover - fallback used when ib_insync is unavailable
     from ib_insync import Contract, Future, IB, LimitOrder, MarketOrder, Order, Stock
@@ -172,6 +173,20 @@ def _front_quarter_contract(now: datetime) -> Tuple[int, int]:
     # next year, but keep a defensive default.
     return year + 1, _QUARTERLY_CONTRACT_MONTHS[0]
 
+@dataclass(slots=True)
+class _MarketDataSubscription:
+    """Track live market data subscriptions for remote services."""
+
+    symbol: str
+    contract: Any
+    price_ticker: Any
+    dom_ticker: Any | None
+    price_handler: Callable[..., None]
+    dom_handler: Callable[..., None] | None
+    options: Dict[str, Any]
+    dom_rows: int
+
+
 class IBKRClient:
     @staticmethod
     def _parse_env_float(key: str, default: float) -> float:
@@ -297,6 +312,14 @@ class IBKRClient:
         self._data_farm_wakeup_symbol = os.getenv('IBKR_DATA_FARM_WAKEUP_SYMBOL', 'SPY')
 
         self._setup_async_components()
+
+        # ---- Real-time market data streaming state (ib-feed integration) ----
+        self._market_data_lock = threading.Lock()
+        self._market_data_streams: Dict[str, _MarketDataSubscription] = {}
+        self._price_listeners: List[Callable[[str, Mapping[str, Any]], None]] = []
+        self._dom_listeners: List[Callable[[str, Sequence[Mapping[str, Any]]], None]] = []
+        self._disconnect_listeners: List[Callable[[], None]] = []
+        self._default_dom_rows = int(self._parse_env_float('IBKR_DOM_ROWS', 10) or 10)
     
     def _sanitize_float(self, value):
         """清理无效的浮点数值，将NaN和Infinity转换为None"""
@@ -334,6 +357,7 @@ class IBKRClient:
     def disconnect(self):
         """断开连接"""
         self._schedule_market_data_cleanup()
+        self._clear_market_data_streams()
         self.connection_manager.disconnect()
 
     def is_connected(self) -> bool:
@@ -345,6 +369,33 @@ class IBKRClient:
         """Return the underlying connection manager instance."""
 
         return self.connection_manager
+
+    def add_price_listener(self, callback: Callable[[str, Mapping[str, Any]], None]) -> None:
+        """Register a listener for consolidated price updates."""
+
+        if not callable(callback):
+            raise TypeError("callback must be callable")
+        with self._market_data_lock:
+            if callback not in self._price_listeners:
+                self._price_listeners.append(callback)
+
+    def add_dom_listener(self, callback: Callable[[str, Sequence[Mapping[str, Any]]], None]) -> None:
+        """Register a listener for DOM depth updates."""
+
+        if not callable(callback):
+            raise TypeError("callback must be callable")
+        with self._market_data_lock:
+            if callback not in self._dom_listeners:
+                self._dom_listeners.append(callback)
+
+    def add_disconnect_listener(self, callback: Callable[[], None]) -> None:
+        """Register a listener invoked when the IB connection drops."""
+
+        if not callable(callback):
+            raise TypeError("callback must be callable")
+        with self._market_data_lock:
+            if callback not in self._disconnect_listeners:
+                self._disconnect_listeners.append(callback)
 
     async def ensure_connection(self, *, reason: str = "ensure") -> None:
         """Ensure the IB connection is active before performing IB calls."""
@@ -696,6 +747,8 @@ class IBKRClient:
 
         if signal_monitor:
             self._signal_monitor_wakeup()
+        self._notify_disconnect_listeners()
+        self._clear_market_data_streams()
 
     def _handle_connection_restored(self, *, initial: bool = False, signal_monitor: bool = True) -> None:
         if self._disconnect_time is not None and not initial:
@@ -1277,6 +1330,75 @@ class IBKRClient:
             return int(magnitude * 86400)
         return None
 
+    @staticmethod
+    def _coerce_ib_datetime(value: datetime | str | None) -> datetime | None:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            dt = value
+        else:
+            text = str(value).strip()
+            if not text:
+                return None
+
+            tzinfo: ZoneInfo | None = None
+            base_text = text
+            parts = text.split()
+            if len(parts) > 2:
+                tz_candidate = parts[-1]
+                try:
+                    tzinfo = ZoneInfo(tz_candidate)
+                except Exception:
+                    tzinfo = None
+                else:
+                    base_text = " ".join(parts[:-1])
+
+            dt: datetime | None = None
+            iso_candidate = base_text
+            if iso_candidate.endswith('Z'):
+                iso_candidate = iso_candidate[:-1] + '+00:00'
+            try:
+                dt = datetime.fromisoformat(iso_candidate)
+            except ValueError:
+                dt = None
+
+            if dt is None:
+                patterns = (
+                    "%Y%m%d %H:%M:%S",
+                    "%Y%m%d-%H:%M:%S",
+                    "%Y-%m-%d %H:%M:%S",
+                    "%Y-%m-%dT%H:%M:%S",
+                    "%Y-%m-%dT%H:%M:%S.%f",
+                )
+                for pattern in patterns:
+                    try:
+                        dt = datetime.strptime(base_text, pattern)
+                    except ValueError:
+                        continue
+                    else:
+                        break
+
+            if dt is None:
+                return None
+
+            if tzinfo is not None:
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=tzinfo)
+                else:
+                    dt = dt.astimezone(tzinfo)
+            elif dt.tzinfo is None:
+                dt = dt.replace(tzinfo=NY_TZ)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=NY_TZ)
+        return dt
+
+    def _format_ib_end_datetime(self, value: datetime | str) -> str:
+        coerced = self._coerce_ib_datetime(value)
+        if coerced is None:
+            return ""
+        utc_value = coerced.astimezone(timezone.utc)
+        return utc_value.strftime("%Y%m%d-%H:%M:%S")
+
     async def get_historical_data(
         self,
         symbol: str,
@@ -1308,10 +1430,7 @@ class IBKRClient:
             qc = qualified[0]
             end_value = ''
             if end_datetime is not None:
-                if isinstance(end_datetime, datetime):
-                    end_value = end_datetime.astimezone(NY_TZ).strftime("%Y%m%d %H:%M:%S")
-                else:
-                    end_value = str(end_datetime)
+                end_value = self._format_ib_end_datetime(end_datetime)
 
             duration_str = (duration or '') if duration is not None else ''
             if bars is not None:
@@ -1904,6 +2023,149 @@ class IBKRClient:
                 return
             if loop.is_running():
                 loop.create_task(_cleanup())
+
+    # ------------------------------------------------------------------
+    async def subscribe_market_data(
+        self,
+        symbol: str,
+        *,
+        options: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Subscribe to IBKR market data and forward updates to listeners."""
+
+        symbol_key = (symbol or "").strip().upper()
+        if not symbol_key:
+            raise ValueError("Symbol is required for market data subscription")
+
+        await self.ensure_connection(reason=f"market-data:{symbol_key}")
+
+        options = dict(options or {})
+        dom_rows = options.pop("dom_rows", self._default_dom_rows)
+        try:
+            dom_rows = int(dom_rows)
+        except (TypeError, ValueError):
+            dom_rows = self._default_dom_rows
+        dom_rows = max(0, min(dom_rows, 40))
+
+        with self._market_data_lock:
+            existing = self._market_data_streams.get(symbol_key)
+            if existing is not None:
+                return
+
+        timeout = float(options.pop("timeout", 15.0) or 15.0)
+
+        def _start_subscription():
+            cm = self.connection_manager
+            ib = cm.get_ib_instance()
+            if not ib:
+                raise RuntimeError("IBKR connection unavailable when subscribing market data")
+            contract = self._resolve_market_data_contract(symbol_key, options)
+            price_ticker = ib.reqMktData(contract, "", False, False)
+            dom_ticker = None
+            if dom_rows > 0:
+                dom_ticker = ib.reqMktDepth(contract, numRows=dom_rows, isSmartDepth=False)
+            return contract, price_ticker, dom_ticker
+
+        result = await asyncio.to_thread(
+            self.connection_manager.run_in_connection_thread,
+            _start_subscription,
+            timeout=timeout,
+        )
+
+        if not result:
+            raise RuntimeError(f"Failed to subscribe market data for {symbol_key}")
+
+        contract, price_ticker, dom_ticker = result
+
+        def _on_price_update(*_args, sym: str = symbol_key, ticker=price_ticker) -> None:
+            payload = self._build_price_payload(sym, ticker)
+            if payload is None:
+                return
+            self._notify_price_listeners(sym, payload)
+
+        def _on_dom_update(*_args, sym: str = symbol_key, ticker=dom_ticker) -> None:
+            if ticker is None:
+                return
+            levels = self._build_dom_levels(sym, ticker)
+            if not levels:
+                return
+            self._notify_dom_listeners(sym, levels)
+
+        try:
+            price_ticker.updateEvent += _on_price_update
+        except Exception as exc:
+            raise RuntimeError(f"Failed to attach price listener for {symbol_key}: {exc}") from exc
+
+        if dom_ticker is not None:
+            try:
+                dom_ticker.updateEvent += _on_dom_update
+            except Exception as exc:
+                try:
+                    price_ticker.updateEvent -= _on_price_update
+                except Exception:
+                    pass
+                raise RuntimeError(f"Failed to attach DOM listener for {symbol_key}: {exc}") from exc
+
+        subscription = _MarketDataSubscription(
+            symbol=symbol_key,
+            contract=contract,
+            price_ticker=price_ticker,
+            dom_ticker=dom_ticker,
+            price_handler=_on_price_update,
+            dom_handler=_on_dom_update if dom_ticker is not None else None,
+            options=options,
+            dom_rows=dom_rows,
+        )
+
+        with self._market_data_lock:
+            self._market_data_streams[symbol_key] = subscription
+
+        # Emit an initial snapshot if data already populated on the ticker.
+        initial_payload = self._build_price_payload(symbol_key, price_ticker)
+        if initial_payload is not None:
+            self._notify_price_listeners(symbol_key, initial_payload)
+        if dom_ticker is not None:
+            initial_levels = self._build_dom_levels(symbol_key, dom_ticker)
+            if initial_levels:
+                self._notify_dom_listeners(symbol_key, initial_levels)
+
+    async def unsubscribe_market_data(self, symbol: str) -> None:
+        """Cancel a live market data subscription."""
+
+        symbol_key = (symbol or "").strip().upper()
+        if not symbol_key:
+            return
+
+        with self._market_data_lock:
+            subscription = self._market_data_streams.pop(symbol_key, None)
+
+        if subscription is None:
+            return
+
+        self._detach_subscription_handlers(subscription)
+
+        def _cancel_subscription(sub: _MarketDataSubscription) -> None:
+            cm = self.connection_manager
+            ib = cm.get_ib_instance()
+            if not ib:
+                return
+            try:
+                ib.cancelMktData(sub.contract)
+            except Exception:
+                pass
+            if sub.dom_ticker is not None:
+                try:
+                    ib.cancelMktDepth(sub.contract)
+                except Exception:
+                    pass
+
+        await asyncio.to_thread(
+            self.connection_manager.run_in_connection_thread,
+            _cancel_subscription,
+            subscription,
+            timeout=5.0,
+        )
+
 
     async def place_market_order(
         self,
@@ -2968,6 +3230,147 @@ class IBKRClient:
         except Exception as e:
             connection_logger.error(f"Backfill commissions wrapper error: {e}")
             return 0
+
+    # ------------------------------------------------------------------
+    def _resolve_market_data_contract(self, symbol: str, options: Dict[str, Any]):
+        exchange = (options.get("exchange") or "SMART").upper()
+        sec_type = (options.get("sec_type") or "").upper()
+        if sec_type == "FUT" or symbol.upper() in INDEX_FUTURE_SYMBOLS:
+            return self.get_future_contract(symbol, exchange)
+        return self.get_stock_contract(symbol, exchange)
+
+    def _build_price_payload(self, symbol: str, ticker: Any) -> Optional[Dict[str, Any]]:
+        try:
+            bid = self._coerce_float(getattr(ticker, "bid", 0.0))
+            ask = self._coerce_float(getattr(ticker, "ask", 0.0))
+            last = self._coerce_float(getattr(ticker, "last", 0.0))
+            volume = self._coerce_float(getattr(ticker, "volume", 0.0))
+            bid_size = self._coerce_float(getattr(ticker, "bidSize", getattr(ticker, "bid_size", 0.0)))
+            ask_size = self._coerce_float(getattr(ticker, "askSize", getattr(ticker, "ask_size", 0.0)))
+            market_state = getattr(ticker, "marketState", None)
+            timestamp = getattr(ticker, "time", None)
+        except Exception as exc:  # pragma: no cover - defensive guard
+            ibkr_logger.debug("Failed to read price ticker fields", symbol=symbol, error=str(exc))
+            return None
+
+        if (bid or ask or last) is None:
+            return None
+
+        if timestamp is None:
+            timestamp = datetime.now(timezone.utc)
+        elif isinstance(timestamp, datetime) and timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+
+        payload: Dict[str, Any] = {
+            "symbol": symbol,
+            "bid": bid or 0.0,
+            "ask": ask or 0.0,
+            "last": last or 0.0,
+            "bid_size": bid_size or 0.0,
+            "ask_size": ask_size or 0.0,
+            "volume": volume or 0.0,
+            "market_state": market_state or "unknown",
+            "timestamp": timestamp,
+        }
+        return payload
+
+    def _build_dom_levels(self, symbol: str, ticker: Any) -> List[Dict[str, Any]]:
+        levels: List[Dict[str, Any]] = []
+        try:
+            bids = list(getattr(ticker, "domBids", []) or [])
+            asks = list(getattr(ticker, "domAsks", []) or [])
+        except Exception as exc:  # pragma: no cover - defensive guard
+            ibkr_logger.debug("Failed to fetch DOM levels", symbol=symbol, error=str(exc))
+            return levels
+
+        def _process(entries: Sequence[Any], side: str) -> None:
+            for idx, entry in enumerate(entries):
+                try:
+                    price = self._coerce_float(getattr(entry, "price", 0.0)) or 0.0
+                    size = self._coerce_float(getattr(entry, "size", 0.0)) or 0.0
+                    level = getattr(entry, "position", idx)
+                    try:
+                        level = int(level)
+                    except Exception:
+                        level = idx
+                except Exception as exc:  # pragma: no cover - defensive guard
+                    ibkr_logger.debug("Invalid DOM entry", symbol=symbol, side=side, error=str(exc))
+                    continue
+                levels.append(
+                    {
+                        "symbol": symbol,
+                        "side": side,
+                        "level": level,
+                        "price": price,
+                        "size": size,
+                        "timestamp": datetime.now(timezone.utc),
+                    }
+                )
+
+        _process(bids, "bid")
+        _process(asks, "ask")
+
+        return levels
+
+    def _coerce_float(self, value: Any) -> float:
+        try:
+            return float(value or 0.0)
+        except Exception:
+            return 0.0
+
+    def _notify_price_listeners(self, symbol: str, payload: Mapping[str, Any]) -> None:
+        listeners: List[Callable[[str, Mapping[str, Any]], None]]
+        with self._market_data_lock:
+            listeners = list(self._price_listeners)
+        for callback in listeners:
+            try:
+                callback(symbol, payload)
+            except Exception as exc:  # pragma: no cover - defensive guard
+                ibkr_logger.debug("Price listener error", symbol=symbol, error=str(exc))
+
+    def _notify_dom_listeners(self, symbol: str, levels: Sequence[Mapping[str, Any]]) -> None:
+        listeners: List[Callable[[str, Sequence[Mapping[str, Any]]], None]]
+        with self._market_data_lock:
+            listeners = list(self._dom_listeners)
+        for callback in listeners:
+            try:
+                callback(symbol, levels)
+            except Exception as exc:  # pragma: no cover - defensive guard
+                ibkr_logger.debug("DOM listener error", symbol=symbol, error=str(exc))
+
+    def _notify_disconnect_listeners(self) -> None:
+        listeners: List[Callable[[], None]]
+        with self._market_data_lock:
+            listeners = list(self._disconnect_listeners)
+        for callback in listeners:
+            try:
+                callback()
+            except Exception as exc:  # pragma: no cover - defensive guard
+                ibkr_logger.debug("Disconnect listener error", error=str(exc))
+
+    def _detach_subscription_handlers(self, subscription: _MarketDataSubscription) -> None:
+        try:
+            subscription.price_ticker.updateEvent -= subscription.price_handler
+        except Exception:
+            try:
+                subscription.price_ticker.updateEvent.clear()
+            except Exception:
+                pass
+        if subscription.dom_ticker is not None and subscription.dom_handler is not None:
+            try:
+                subscription.dom_ticker.updateEvent -= subscription.dom_handler
+            except Exception:
+                try:
+                    subscription.dom_ticker.updateEvent.clear()
+                except Exception:
+                    pass
+
+    def _clear_market_data_streams(self) -> None:
+        with self._market_data_lock:
+            streams = list(self._market_data_streams.values())
+            self._market_data_streams.clear()
+        for subscription in streams:
+            self._detach_subscription_handlers(subscription)
 
 if __name__ == "__main__":
     """主函数，用于调试下单方法"""

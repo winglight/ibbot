@@ -9,6 +9,48 @@ from fastapi.testclient import TestClient
 
 from src.account_service_readiness import AccountServiceReadiness
 from src.routes import websocket as websocket_module
+
+
+class DummyDomClient:
+    async def get_stats(
+        self,
+        symbol: str,
+        *,
+        lookback_seconds: int | None = None,
+        start: str | None = None,
+        end: str | None = None,
+        max_points: int | None = None,
+    ) -> Dict[str, Any]:
+        return {"success": True, "symbol": symbol, "stats": {}}
+
+    async def get_history(
+        self,
+        symbol: str,
+        *,
+        limit: int | None = None,
+        start: str | None = None,
+        end: str | None = None,
+        include_snapshots: bool | None = None,
+    ) -> Dict[str, Any]:
+        return {"success": True, "symbol": symbol, "history": []}
+
+    async def get_data(self, symbol: str | None = None) -> Dict[str, Any]:
+        return {"success": True, "metrics": {}, "depth": {}}
+
+    async def get_alerts(self) -> Dict[str, Any]:
+        return {"success": True, "alerts": []}
+
+    async def acknowledge_alert(self, alert_id: int) -> Dict[str, Any]:
+        return {"success": True}
+
+    async def start_dom(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return {"success": True}
+
+    async def stop_dom(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return {"success": True}
+
+    async def update_config(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return {"success": True}
 import src.service_status as service_status_module
 
 
@@ -69,7 +111,7 @@ async def test_websocket_service_statuses_include_account_metrics(
     monkeypatch.setattr(websocket_module, "_fetch_account_info", empty_snapshot)
     monkeypatch.setattr(websocket_module, "_fetch_positions", empty_snapshot)
     monkeypatch.setattr(websocket_module, "_fetch_orders", noop_fetch_orders)
-    monkeypatch.setattr(websocket_module, "get_dom_service", lambda: None)
+    monkeypatch.setattr(websocket_module, "get_dom_service_client", lambda: DummyDomClient())
 
     now = datetime.now(timezone.utc).isoformat()
     redis_data: Dict[str, Dict[str, str] | None] = {

@@ -14,7 +14,6 @@ from zoneinfo import ZoneInfo
 
 from loguru import logger
 
-from src.connection_manager import connection_manager
 from src.data_layer import (
     DataSubscriptionRequest,
     DataSubscriptionToken,
@@ -716,18 +715,7 @@ class DOMService:
             self._last_start_error_status = 400
             return False
 
-        if not connection_manager.is_connected():
-            reason = "IBKR connection not active"
-            try:
-                last_error = connection_manager.get_last_connect_error()
-                if last_error:
-                    reason = f"{reason}: {last_error}"
-            except Exception:
-                pass
-            self._last_start_error = reason
-            self._last_start_error_status = 400
-            logger.warning("Unified DOM depth stream start rejected", symbol=symbol_key)
-            return False
+        logger.debug("Preparing to start DOM depth stream", symbol=symbol_key, num_rows=num_rows)
 
         manager = self._ensure_data_layer_manager()
         if manager is None:
@@ -952,24 +940,29 @@ class DOMService:
                 if self._shutdown_event.is_set():
                     return
                 attempts += 1
+                logger.debug(
+                    "Auto-start worker iteration",
+                    symbol=symbol,
+                    attempt=attempts,
+                    max_attempts=max_attempts,
+                )
                 if self.is_stream_active(symbol) or self.is_start_in_progress(symbol):
                     return
-                if connection_manager.is_connected():
-                    try:
-                        if self.start(symbol, num_rows=self._auto_start_num_rows):
-                            logger.info("Auto-started DOM depth stream", symbol=symbol)
-                            return
-                    except Exception as exc:
-                        if self._shutdown_event.is_set():
-                            return
-                        message = str(exc)
-                        if isinstance(exc, RuntimeError) and "interpreter shutdown" in message.lower():
-                            return
-                        logger.warning(
-                            "Auto-start DOM stream attempt failed",
-                            symbol=symbol,
-                            error=message,
-                        )
+                try:
+                    if self.start(symbol, num_rows=self._auto_start_num_rows):
+                        logger.info("Auto-started DOM depth stream", symbol=symbol)
+                        return
+                except Exception as exc:
+                    if self._shutdown_event.is_set():
+                        return
+                    message = str(exc)
+                    if isinstance(exc, RuntimeError) and "interpreter shutdown" in message.lower():
+                        return
+                    logger.warning(
+                        "Auto-start DOM stream attempt failed",
+                        symbol=symbol,
+                        error=message,
+                    )
                 if self._shutdown_event.wait(3.0):
                     return
 
