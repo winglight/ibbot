@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from services.market_data import main as market_data_main
+from src.ibkr_client import IBKRConnectionError
 
 
 class _StubDataFrame:
@@ -111,3 +112,51 @@ async def test_fetch_candles_from_ib_splits_large_gap(monkeypatch: pytest.Monkey
 
     debug_messages = [record.message for record in caplog.records if record.levelno == logging.DEBUG]
     assert any("IB fallback gap" in message for message in debug_messages)
+
+
+class _FailingClient:
+    connected = True
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def get_historical_data(self, *args: Any, **kwargs: Any) -> None:
+        self.calls += 1
+        raise IBKRConnectionError("connection lost")
+
+
+@pytest.mark.asyncio
+async def test_fetch_candles_from_ib_aborts_on_connection_loss(monkeypatch: pytest.MonkeyPatch) -> None:
+    failing_client = _FailingClient()
+
+    async def fake_ensure_ib_client(logger: Any) -> _FailingClient:  # pragma: no cover - patched
+        return failing_client
+
+    monkeypatch.setattr(market_data_main, "_ensure_ib_client", fake_ensure_ib_client)
+    monkeypatch.setattr(market_data_main, "IB_FALLBACK_ENABLED", True)
+
+    async def fake_persist(_: list[dict[str, Any]]) -> None:
+        raise AssertionError("persist should not be called")
+
+    query = market_data_main.ChartDataQuery(
+        symbol="ES",
+        duration="1 D",
+        bar_size="1 min",
+        exchange="SMART",
+    )
+
+    missing_segments = [
+        (0, 60 * 1_000_000_000),
+        (60 * 1_000_000_000, 120 * 1_000_000_000),
+    ]
+
+    result = await market_data_main._fetch_candles_from_ib(
+        query,
+        interval="1m",
+        persist=fake_persist,
+        logger=logging.getLogger("test_connection_loss_abort"),
+        missing_segments=missing_segments,
+    )
+
+    assert result == []
+    assert failing_client.calls == 1
