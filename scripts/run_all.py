@@ -13,7 +13,7 @@ import sys
 from contextlib import closing
 from pathlib import Path
 from typing import Iterable, Sequence
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit, urlunsplit
 
 from dotenv import load_dotenv
 
@@ -195,6 +195,60 @@ def _build_service_command(service: str) -> tuple[list[str], str]:
     return cmd, shlex.join(cmd)
 
 
+def _redact_url_secret(value: str) -> str:
+    """Return *value* with credentials removed for logging."""
+
+    if "://" not in value:
+        return value
+
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return value
+
+    username = parsed.username or ""
+    hostname = parsed.hostname or ""
+    port = f":{parsed.port}" if parsed.port else ""
+    auth = f"{username}@" if username else ""
+    redacted_netloc = f"{auth}{hostname}{port}"
+
+    return urlunsplit(
+        (
+            parsed.scheme,
+            redacted_netloc,
+            parsed.path,
+            parsed.query,
+            parsed.fragment,
+        )
+    )
+
+
+def _log_environment_summary(env_source: Path | None) -> None:
+    if env_source is None:
+        print("[INFO] 未找到 .env.local/.env，沿用当前进程环境变量。")
+        return
+
+    try:
+        relative_path = env_source.relative_to(PROJECT_ROOT)
+    except ValueError:
+        relative_path = env_source
+
+    print(f"[INFO] 从 {relative_path} 加载了环境变量。")
+
+    watched_keys = (
+        DEFAULT_REDIS_URL_ENV,
+        "ORDERS_REDIS_URL",
+        "IBBOT_DB_URL",
+        "DATA_LAYER_DB_URL",
+    )
+
+    for key in watched_keys:
+        value = os.getenv(key)
+        if not value:
+            continue
+        print(f"        {key} = {_redact_url_secret(value)}")
+
+
 def _load_env() -> Path | None:
     for candidate in (".env.local", ".env"):
         env_file = PROJECT_ROOT / candidate
@@ -273,6 +327,7 @@ def run_services(
     skip_redis_check: bool = False,
 ) -> int:
     env_source = _load_env()
+    _log_environment_summary(env_source)
 
     missing = _check_service_imports(services)
     if missing:
