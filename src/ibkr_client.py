@@ -1330,6 +1330,75 @@ class IBKRClient:
             return int(magnitude * 86400)
         return None
 
+    @staticmethod
+    def _coerce_ib_datetime(value: datetime | str | None) -> datetime | None:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            dt = value
+        else:
+            text = str(value).strip()
+            if not text:
+                return None
+
+            tzinfo: ZoneInfo | None = None
+            base_text = text
+            parts = text.split()
+            if len(parts) > 2:
+                tz_candidate = parts[-1]
+                try:
+                    tzinfo = ZoneInfo(tz_candidate)
+                except Exception:
+                    tzinfo = None
+                else:
+                    base_text = " ".join(parts[:-1])
+
+            dt: datetime | None = None
+            iso_candidate = base_text
+            if iso_candidate.endswith('Z'):
+                iso_candidate = iso_candidate[:-1] + '+00:00'
+            try:
+                dt = datetime.fromisoformat(iso_candidate)
+            except ValueError:
+                dt = None
+
+            if dt is None:
+                patterns = (
+                    "%Y%m%d %H:%M:%S",
+                    "%Y%m%d-%H:%M:%S",
+                    "%Y-%m-%d %H:%M:%S",
+                    "%Y-%m-%dT%H:%M:%S",
+                    "%Y-%m-%dT%H:%M:%S.%f",
+                )
+                for pattern in patterns:
+                    try:
+                        dt = datetime.strptime(base_text, pattern)
+                    except ValueError:
+                        continue
+                    else:
+                        break
+
+            if dt is None:
+                return None
+
+            if tzinfo is not None:
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=tzinfo)
+                else:
+                    dt = dt.astimezone(tzinfo)
+            elif dt.tzinfo is None:
+                dt = dt.replace(tzinfo=NY_TZ)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=NY_TZ)
+        return dt
+
+    def _format_ib_end_datetime(self, value: datetime | str) -> str:
+        coerced = self._coerce_ib_datetime(value)
+        if coerced is None:
+            return ""
+        utc_value = coerced.astimezone(timezone.utc)
+        return utc_value.strftime("%Y%m%d-%H:%M:%S")
+
     async def get_historical_data(
         self,
         symbol: str,
@@ -1361,10 +1430,7 @@ class IBKRClient:
             qc = qualified[0]
             end_value = ''
             if end_datetime is not None:
-                if isinstance(end_datetime, datetime):
-                    end_value = end_datetime.astimezone(NY_TZ).strftime("%Y%m%d %H:%M:%S")
-                else:
-                    end_value = str(end_datetime)
+                end_value = self._format_ib_end_datetime(end_datetime)
 
             duration_str = (duration or '') if duration is not None else ''
             if bars is not None:
