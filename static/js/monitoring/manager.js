@@ -1844,6 +1844,34 @@
             return !!(this.monitorRealtimeShouldResume && this.monitorRealtimeResumeSymbol === target);
         }
 
+        _sendMonitorRealtimeMessage(type, symbol) {
+            if (!type || !symbol) return 'failed';
+            const payload = { type, symbol };
+            const key = `monitor_realtime:${type}:${symbol}`;
+            const sendOptions = { force: true, minInterval: 0 };
+
+            try {
+                if (this.app?.sendThrottledWebSocketMessage) {
+                    const result = this.app.sendThrottledWebSocketMessage(key, payload, sendOptions);
+                    if (result && result !== 'failed') {
+                        return result;
+                    }
+                }
+                if (this.app?.sendWebSocketMessage) {
+                    const sent = this.app.sendWebSocketMessage(payload);
+                    if (sent) {
+                        return 'sent';
+                    }
+                }
+                const ws = this.app?.ibkrManager?.ws;
+                ws?.send?.(JSON.stringify(payload));
+                return 'sent';
+            } catch (err) {
+                console.error(`[monitor] ${type} failed`, { symbol, error: err });
+                return 'failed';
+            }
+        }
+
         async subscribeMonitorRealtime(symbol, options = {}) {
             const { skipReload = false, reason = 'manual' } = options || {};
             if (typeof symbol !== 'string') return false;
@@ -1872,8 +1900,10 @@
 
             try {
                 console.log('[monitor] subscribe realtime', { symbol: target, reason });
-                const ws = this.app?.ibkrManager?.ws;
-                ws?.send?.(JSON.stringify({ type: 'subscribe_realtime', symbol: target }));
+                const sendResult = this._sendMonitorRealtimeMessage('subscribe_realtime', target);
+                if (sendResult === 'failed') {
+                    throw new Error('send subscribe_realtime failed');
+                }
                 this.monitorRealtimeSymbol = target;
                 this.monitorRealtimeShouldResume = true;
                 this.monitorRealtimeResumeSymbol = target;
@@ -1896,8 +1926,10 @@
             if (activeSymbol) {
                 try {
                     console.log('[monitor] unsubscribe realtime', activeSymbol, reason);
-                    const ws = this.app?.ibkrManager?.ws;
-                    ws?.send?.(JSON.stringify({ type: 'unsubscribe_realtime', symbol: activeSymbol }));
+                    const sendResult = this._sendMonitorRealtimeMessage('unsubscribe_realtime', activeSymbol);
+                    if (sendResult === 'failed') {
+                        throw new Error('send unsubscribe_realtime failed');
+                    }
                 } catch (err) {
                     console.warn('unsubscribe realtime failed', err);
                 }
