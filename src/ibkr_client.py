@@ -1414,8 +1414,9 @@ class IBKRClient:
             # 获取IB实例
             ib = self.ib
             if not ib or not ib.isConnected():
-                ibkr_logger.error(f"IBKR connection lost for historical data: {symbol}")
-                return pd.DataFrame()
+                message = f"IBKR connection lost for historical data: {symbol}"
+                ibkr_logger.error(message)
+                raise IBKRConnectionError(message)
 
             # MNQ是期货合约
             if symbol.upper() in INDEX_FUTURE_SYMBOLS:
