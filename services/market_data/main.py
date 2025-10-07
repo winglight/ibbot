@@ -881,36 +881,36 @@ async def _request_ib_historical_records(
     except IBCommandTimeout as exc:
         if logger:
             logger.warning(
-                "IB fallback command timed out",
-                symbol=symbol,
-                duration=duration,
-                bar_size=bar_size,
-                exchange=exchange,
-                end=end_value,
-                error=str(exc),
+                "IB fallback command timed out for %s (duration=%s, bar_size=%s, exchange=%s, end=%s): %s",
+                symbol,
+                duration,
+                bar_size,
+                exchange,
+                end_value or "<unspecified>",
+                str(exc),
             )
         return None
     except IBCommandExecutionError as exc:
         if logger:
             logger.warning(
-                "IB fallback command failed",
-                symbol=symbol,
-                duration=duration,
-                bar_size=bar_size,
-                exchange=exchange,
-                end=end_value,
-                error=str(exc),
+                "IB fallback command failed for %s (duration=%s, bar_size=%s, exchange=%s, end=%s): %s",
+                symbol,
+                duration,
+                bar_size,
+                exchange,
+                end_value or "<unspecified>",
+                str(exc),
             )
         return None
     except Exception:
         if logger:
             logger.warning(
-                "Unexpected error while requesting IB fallback data",
-                symbol=symbol,
-                duration=duration,
-                bar_size=bar_size,
-                exchange=exchange,
-                end=end_value,
+                "Unexpected error while requesting IB fallback data for %s (duration=%s, bar_size=%s, exchange=%s, end=%s)",
+                symbol,
+                duration,
+                bar_size,
+                exchange,
+                end_value or "<unspecified>",
                 exc_info=True,
             )
         return None
