@@ -34,6 +34,7 @@ __all__ = [
     "MarketDataServiceClient",
     "NotificationServiceClient",
     "ConnectionControlClient",
+    "IBFeedServiceClient",
 ]
 
 
@@ -956,3 +957,47 @@ class ConnectionControlClient(ServiceClient):
 
     async def disconnect(self) -> Any:
         return await self.request("POST", "/connection/disconnect")
+
+
+class IBFeedServiceClient(ServiceClient):
+    """Client for IB Feed service - handles real-time data and DOM subscriptions."""
+    
+    service_name = "ib_feed"
+    env_prefix = "IB_FEED"
+    default_base_url = "http://localhost:8057"
+
+    async def subscribe_market_data(self, payload: Mapping[str, Any]) -> Any:
+        """Subscribe to real-time market data for a symbol."""
+        return await self.request("POST", "/market_data/subscribe", json=dict(payload))
+
+    async def unsubscribe_market_data(self, payload: Mapping[str, Any]) -> Any:
+        """Unsubscribe from real-time market data for a symbol."""
+        return await self.request("POST", "/market_data/unsubscribe", json=dict(payload))
+
+    async def subscribe_dom(self, payload: Mapping[str, Any]) -> Any:
+        """Subscribe to DOM (Depth of Market) data for a symbol."""
+        return await self.request("POST", "/dom/subscribe", json=dict(payload))
+
+    async def unsubscribe_dom(self, payload: Mapping[str, Any]) -> Any:
+        """Unsubscribe from DOM data for a symbol."""
+        return await self.request("POST", "/dom/unsubscribe", json=dict(payload))
+
+    async def get_connection_status(self) -> Any:
+        """Get IB connection status from feed service."""
+        return await self.request("GET", "/connection/status")
+
+    async def connect_ib(self, payload: Mapping[str, Any]) -> Any:
+        """Connect to IB through feed service."""
+        return await self.request("POST", "/connection/connect", json=dict(payload))
+
+    async def disconnect_ib(self) -> Any:
+        """Disconnect from IB through feed service."""
+        return await self.request("POST", "/connection/disconnect")
+
+    async def get_subscriptions(self) -> Any:
+        """Get current active subscriptions."""
+        return await self.request("GET", "/subscriptions")
+
+    async def health_check(self) -> Any:
+        """Check if IB Feed service is healthy."""
+        return await self.request("GET", "/health")

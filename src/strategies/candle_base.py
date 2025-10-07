@@ -20,7 +20,7 @@ from src.data_layer import (
     get_data_source_manager,
     is_unified_mode,
 )
-from src.connection_manager import connection_manager
+from src.routes.service_clients import IBFeedServiceClient
 
 from .base import BaseStrategy
 
@@ -206,7 +206,9 @@ class CandleSubscriptionStrategy(BaseStrategy):
             if not self.active or not self.enabled:
                 break
 
-            if connection_manager.is_connected():
+            # Note: Connection checking is now handled by the new service architecture
+            # For candle subscriptions, we rely on the data layer's error handling
+            if True:  # Always attempt subscription - let data layer handle connection errors
                 try:
                     self._ensure_subscription()
                     try:

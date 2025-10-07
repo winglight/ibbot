@@ -21,6 +21,7 @@ from src.models import (
 from src.utils import now_local
 from src.routes.service_clients import (
     MarketDataServiceClient,
+    IBFeedServiceClient,
     ServiceClientError,
     ServiceResponseError,
     ServiceUnavailableError,
@@ -35,6 +36,7 @@ historical_data_cache: Dict[str, Dict[str, Any]] = {}
 CACHE_DURATION_MINUTES = 1  # 缓存1分钟
 
 _MARKET_DATA_SERVICE_CLIENT = MarketDataServiceClient()
+_IB_FEED_CLIENT = IBFeedServiceClient()
 
 
 class MarketBackfillRequest(BaseModel):
@@ -49,6 +51,10 @@ class MarketBackfillRequest(BaseModel):
 
 def _get_market_data_service_client() -> MarketDataServiceClient:
     return _MARKET_DATA_SERVICE_CLIENT
+
+
+def _get_ib_feed_client() -> IBFeedServiceClient:
+    return _IB_FEED_CLIENT
 
 
 def _market_service_base_url(client: Optional[MarketDataServiceClient] = None) -> str:
@@ -359,19 +365,47 @@ async def get_realtime_data(
     client: MarketDataServiceClient = Depends(_get_market_data_service_client),
 ):
     """获取实时数据"""
+    ib_feed_client = _get_ib_feed_client()
+    
+    # 首先尝试通过IB Feed服务获取实时数据
     try:
+        logger.debug(f"[REALTIME_DATA] 尝试通过IB Feed服务获取 {symbol} 的实时数据")
+        # 先确保订阅了该股票的市场数据
+        await ib_feed_client.subscribe_market_data(symbol, exchange)
+        logger.debug(f"[REALTIME_DATA] 成功订阅 {symbol} 的市场数据")
+        
+        # 获取实时数据（这里假设IB Feed服务有相应的端点）
+        # 注意：这里可能需要根据实际的IB Feed服务API调整
+        result = await ib_feed_client.request("GET", f"/realtime/{symbol}")
+        logger.info(f"[REALTIME_DATA] 成功通过IB Feed服务获取 {symbol} 的实时数据")
+        
+        if isinstance(result, Mapping):
+            return {"success": True, "data": dict(result), "source": "ib_feed"}
+        else:
+            return {"success": True, "data": result, "source": "ib_feed"}
+            
+    except Exception as exc:
+        logger.warning(f"[REALTIME_DATA] IB Feed服务获取 {symbol} 实时数据失败: {exc}, 回退到Market Data服务")
+    
+    # 回退到原有的Market Data服务
+    try:
+        logger.debug(f"[REALTIME_DATA] 通过Market Data服务获取 {symbol} 的实时数据")
         try:
             result = await _market_service_get(f"/market/{symbol}", client=client)
         except TypeError as exc:
             if "client" not in str(exc):
                 raise
             result = await _market_service_get(f"/market/{symbol}")
+        logger.info(f"[REALTIME_DATA] 成功通过Market Data服务获取 {symbol} 的实时数据")
     except ServiceUnavailableError:
+        logger.error(f"[REALTIME_DATA] Market Data服务不可用，无法获取 {symbol} 的实时数据")
         raise HTTPException(status_code=503, detail="Market data service unavailable")
     except ServiceResponseError as exc:
         if exc.status_code == 404:
+            logger.error(f"[REALTIME_DATA] 未找到 {symbol} 的数据")
             raise HTTPException(status_code=404, detail="No data available")
         if 500 <= exc.status_code < 600:
+            logger.error(f"[REALTIME_DATA] Market Data服务错误: {exc}")
             raise HTTPException(status_code=502, detail="Market data service error")
         raise HTTPException(
             status_code=exc.status_code,
@@ -394,7 +428,7 @@ async def get_realtime_data(
     if not isinstance(payload, Mapping):
         raise HTTPException(status_code=502, detail="Unexpected market data format")
 
-    return {"success": True, "data": dict(payload)}
+    return {"success": True, "data": dict(payload), "source": "market_data"}
 
 
 @router.post("/api/current_price")
@@ -413,12 +447,51 @@ async def get_current_price(
             "error": "Cache-only mode not supported without market data service",
         }
 
+    ib_feed_client = _get_ib_feed_client()
+    
+    # 首先尝试通过IB Feed服务获取当前价格
     try:
+        logger.debug(f"[CURRENT_PRICE] 尝试通过IB Feed服务获取 {request.symbol} 的当前价格")
+        # 先确保订阅了该股票的市场数据
+        await ib_feed_client.subscribe_market_data(request.symbol, "SMART")
+        logger.debug(f"[CURRENT_PRICE] 成功订阅 {request.symbol} 的市场数据")
+        
+        # 获取当前价格（这里假设IB Feed服务有相应的端点）
+        result = await ib_feed_client.request("GET", f"/current_price/{request.symbol}")
+        logger.info(f"[CURRENT_PRICE] 成功通过IB Feed服务获取 {request.symbol} 的当前价格")
+        
+        if isinstance(result, Mapping):
+            response = dict(result)
+        else:
+            response = {"price": result}
+            
+        response.setdefault("symbol", request.symbol)
+        response.setdefault("timestamp", now_local().isoformat())
+        response.setdefault("source", "ib_feed")
+        
+        price = response.get("price")
+        if price is None:
+            response.setdefault("success", False)
+            response.setdefault("error", "Unable to get current price")
+        else:
+            response.setdefault("success", True)
+            
+        return response
+        
+    except Exception as exc:
+        logger.warning(f"[CURRENT_PRICE] IB Feed服务获取 {request.symbol} 当前价格失败: {exc}, 回退到Market Data服务")
+
+    # 回退到原有的Market Data服务
+    try:
+        logger.debug(f"[CURRENT_PRICE] 通过Market Data服务获取 {request.symbol} 的当前价格")
         payload = await client.fetch_current_price(request.symbol)
+        logger.info(f"[CURRENT_PRICE] 成功通过Market Data服务获取 {request.symbol} 的当前价格")
     except ServiceUnavailableError as exc:
+        logger.error(f"[CURRENT_PRICE] Market Data服务不可用，无法获取 {request.symbol} 的当前价格")
         raise HTTPException(status_code=503, detail="Market data service unavailable") from exc
     except ServiceResponseError as exc:
         if 500 <= exc.status_code < 600:
+            logger.error(f"[CURRENT_PRICE] Market Data服务错误: {exc}")
             raise HTTPException(status_code=502, detail="Market data service error") from exc
         raise HTTPException(
             status_code=exc.status_code,

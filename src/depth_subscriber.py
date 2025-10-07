@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 from loguru import logger
 
-from .ibkr_client import INDEX_FUTURE_SYMBOLS
+from .ibkr_constants import INDEX_FUTURE_SYMBOLS
 from .utils import now_local
 
 if TYPE_CHECKING:  # pragma: no cover - import only for type checking
@@ -329,11 +329,9 @@ class DepthSubscriber:
 
         client_cls = getattr(core, "IBKRClient", None)
         if client_cls is None:  # pragma: no cover - compatibility fallback
-            try:
-                from src.ibkr_client import IBKRClient as client_cls
-            except Exception as exc:
-                _depth_logger.error(f"Unable to import IBKRClient class: {exc}")
-                return None
+            # IBKRClient has been replaced by IB Feed service architecture
+            _depth_logger.warning("IBKRClient has been replaced by IB Feed service. Use IB Feed service for market data.")
+            return None
 
         try:
             client = client_cls()

@@ -19,6 +19,7 @@ from .auth import get_current_user
 from src.dom_dependencies import dom_config
 from src.routes.service_clients import (
     MarketDataServiceClient,
+    IBFeedServiceClient,
     ServiceClientError,
     ServiceResponseError,
     ServiceUnavailableError,
@@ -50,17 +51,34 @@ async def dom_start(
     if not symbol:
         raise HTTPException(status_code=400, detail="Symbol is required")
 
-    client = get_dom_service_client()
+    payload = {
+        "symbol": symbol,
+        "num_rows": req.num_rows,
+        "force_restart": bool(req.force_restart),
+    }
+    
+    logger.debug(f"[DOM] Starting DOM subscription for {symbol} with payload: {payload}")
+    
+    # Try IB Feed service first for DOM subscription
+    ib_feed_client = IBFeedServiceClient()
     try:
-        return await client.start_dom(
-            {
-                "symbol": symbol,
-                "num_rows": req.num_rows,
-                "force_restart": bool(req.force_restart),
-            }
-        )
-    except ServiceClientError as exc:
-        raise _translate_service_error(exc)
+        logger.debug(f"[DOM] Attempting DOM subscription via IB Feed service for {symbol}")
+        result = await ib_feed_client.subscribe_dom(payload)
+        logger.info(f"[DOM] Successfully subscribed to DOM via IB Feed service for {symbol}: {result}")
+        return result
+    except ServiceClientError as ib_feed_exc:
+        logger.warning(f"[DOM] IB Feed service unavailable for DOM subscription, trying fallback: {ib_feed_exc}")
+        
+        # Fallback to existing market data service
+        client = get_dom_service_client()
+        try:
+            logger.debug(f"[DOM] Attempting DOM start via Market Data service (fallback) for {symbol}")
+            result = await client.start_dom(payload)
+            logger.info(f"[DOM] Successfully started DOM via Market Data service for {symbol}: {result}")
+            return result
+        except ServiceClientError as exc:
+            logger.error(f"[DOM] Both services failed for DOM start on {symbol}. IB Feed: {ib_feed_exc}, Market Data: {exc}")
+            raise _translate_service_error(exc)
 
 
 class StopRequest(BaseModel):
@@ -77,11 +95,30 @@ async def dom_stop(
     symbol = (req.symbol or "").strip()
     if not symbol:
         raise HTTPException(status_code=400, detail="Symbol is required")
-    client = get_dom_service_client()
+    
+    payload = {"symbol": symbol}
+    logger.debug(f"[DOM] Stopping DOM subscription for {symbol}")
+    
+    # Try IB Feed service first for DOM unsubscription
+    ib_feed_client = IBFeedServiceClient()
     try:
-        return await client.stop_dom({"symbol": symbol})
-    except ServiceClientError as exc:
-        raise _translate_service_error(exc)
+        logger.debug(f"[DOM] Attempting DOM unsubscription via IB Feed service for {symbol}")
+        result = await ib_feed_client.unsubscribe_dom(payload)
+        logger.info(f"[DOM] Successfully unsubscribed from DOM via IB Feed service for {symbol}: {result}")
+        return result
+    except ServiceClientError as ib_feed_exc:
+        logger.warning(f"[DOM] IB Feed service unavailable for DOM unsubscription, trying fallback: {ib_feed_exc}")
+        
+        # Fallback to existing market data service
+        client = get_dom_service_client()
+        try:
+            logger.debug(f"[DOM] Attempting DOM stop via Market Data service (fallback) for {symbol}")
+            result = await client.stop_dom(payload)
+            logger.info(f"[DOM] Successfully stopped DOM via Market Data service for {symbol}: {result}")
+            return result
+        except ServiceClientError as exc:
+            logger.error(f"[DOM] Both services failed for DOM stop on {symbol}. IB Feed: {ib_feed_exc}, Market Data: {exc}")
+            raise _translate_service_error(exc)
 
 
 class DOMConfigModel(BaseModel):

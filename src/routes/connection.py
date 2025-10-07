@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from loguru import logger
 
 import core
-from src.connection_manager import ConnectionConfig
+from src.connection_config import ConnectionConfig
 from src.ibbot.redis import DEFAULT_COMMAND_QUEUE, enqueue_ib_command
 from src.ib_command_health import (
     IB_COMMAND_HEALTH_KEY,
@@ -14,13 +14,14 @@ from src.ib_command_health import (
     build_ib_connection_health_payload,
     resolve_ib_account_type,
 )
-from .service_clients import ConnectionControlClient, ServiceClientError
+from .service_clients import ConnectionControlClient, IBFeedServiceClient, ServiceClientError
 from .auth import audit_log_failure, audit_log_success, get_current_user, require_roles
 
 router = APIRouter()
 
 
 _CONNECTION_CONTROL_CLIENT = ConnectionControlClient()
+_IB_FEED_CLIENT = IBFeedServiceClient()
 _COMMAND_QUEUE_OVERRIDE = os.getenv("IB_COMMAND_QUEUE_KEY", "").strip() or None
 _CONNECTION_CONFIG_MODULE = "ib-connection"
 
@@ -107,6 +108,10 @@ async def _load_ib_command_health() -> Dict[str, Any] | None:
 
 def _get_connection_control_client() -> ConnectionControlClient:
     return _CONNECTION_CONTROL_CLIENT
+
+
+def _get_ib_feed_client() -> IBFeedServiceClient:
+    return _IB_FEED_CLIENT
 
 
 def _get_config_provider():
@@ -271,60 +276,100 @@ async def connect_ibkr(
         "paper_trading": config.paper_trading,
     }
 
-    client = _get_connection_control_client()
-
+    logger.debug(f"[CONNECTION] Starting connection request with payload: {payload}")
+    
+    # Try IB Feed service first (primary)
+    ib_feed_client = _get_ib_feed_client()
+    
     try:
-        result = await client.connect(payload)
-    except ServiceClientError as exc:
-        logger.error("Failed to dispatch connect command via service: %s", exc)
-        await audit_log_failure(
-            request,
-            detail="failed to dispatch connect command via service",
-            extra={"service": "connection_control", "fallback": "redis"},
-        )
-
-        command_id, command = _build_connect_command(payload, user)
-        try:
-            await _enqueue_command(command)
-        except Exception as queue_exc:
-            logger.error("Failed to enqueue connect command via fallback: %s", queue_exc)
-            raise HTTPException(status_code=503, detail="Failed to enqueue connect command") from queue_exc
-
+        logger.debug("[CONNECTION] Attempting connection via IB Feed service")
+        result = await ib_feed_client.connect_ib(payload)
+        
+        logger.info(f"[CONNECTION] Successfully connected via IB Feed service: {result}")
         await audit_log_success(
             request,
-            detail="connect command enqueued via fallback",
+            detail="connect command dispatched via ib_feed service",
             extra={
                 "paper_trading": bool(config.paper_trading),
-                "service": "redis",
-                "command_id": command_id,
+                "service": "ib_feed",
             },
         )
 
-        return {
+        response: Dict[str, Any] = {
             "success": True,
-            "status": "queued",
-            "service": "redis",
-            "command_id": command_id,
-            "fallback": True,
+            "status": "dispatched",
+            "service": "ib_feed",
         }
+        if result is not None:
+            response["result"] = result
+        return response
+        
+    except ServiceClientError as ib_feed_exc:
+        logger.warning(f"[CONNECTION] IB Feed service unavailable, trying fallback: {ib_feed_exc}")
+        
+        # Fallback to Connection Control service
+        connection_client = _get_connection_control_client()
+        
+        try:
+            logger.debug("[CONNECTION] Attempting connection via Connection Control service (fallback)")
+            result = await connection_client.connect(payload)
+            
+            logger.info(f"[CONNECTION] Successfully connected via Connection Control service: {result}")
+            await audit_log_success(
+                request,
+                detail="connect command dispatched via connection_control service (fallback)",
+                extra={
+                    "paper_trading": bool(config.paper_trading),
+                    "service": "connection_control",
+                    "fallback_from": "ib_feed",
+                },
+            )
 
-    await audit_log_success(
-        request,
-        detail="connect command dispatched via service",
-        extra={
-            "paper_trading": bool(config.paper_trading),
-            "service": "connection_control",
-        },
-    )
+            response: Dict[str, Any] = {
+                "success": True,
+                "status": "dispatched",
+                "service": "connection_control",
+                "fallback": True,
+            }
+            if result is not None:
+                response["result"] = result
+            return response
+            
+        except ServiceClientError as connection_exc:
+            logger.error(f"[CONNECTION] Both services failed, using Redis fallback. IB Feed: {ib_feed_exc}, Connection Control: {connection_exc}")
+            await audit_log_failure(
+                request,
+                detail="failed to dispatch connect command via both services",
+                extra={"ib_feed_error": str(ib_feed_exc), "connection_control_error": str(connection_exc), "fallback": "redis"},
+            )
 
-    response: Dict[str, Any] = {
-        "success": True,
-        "status": "dispatched",
-        "service": "connection_control",
-    }
-    if result is not None:
-        response["result"] = result
-    return response
+            # Final fallback to Redis queue
+            command_id, command = _build_connect_command(payload, user)
+            try:
+                logger.debug(f"[CONNECTION] Enqueueing connect command to Redis: {command_id}")
+                await _enqueue_command(command)
+                
+                logger.info(f"[CONNECTION] Successfully enqueued connect command to Redis: {command_id}")
+                await audit_log_success(
+                    request,
+                    detail="connect command enqueued via redis fallback",
+                    extra={
+                        "paper_trading": bool(config.paper_trading),
+                        "service": "redis",
+                        "command_id": command_id,
+                    },
+                )
+
+                return {
+                    "success": True,
+                    "status": "queued",
+                    "service": "redis",
+                    "command_id": command_id,
+                    "fallback": True,
+                }
+            except Exception as queue_exc:
+                logger.error(f"[CONNECTION] All connection methods failed. Redis error: {queue_exc}")
+                raise HTTPException(status_code=503, detail="Failed to enqueue connect command") from queue_exc
 
 
 @router.post("/api/disconnect")
@@ -332,65 +377,124 @@ async def disconnect_ibkr(
     request: Request,
     user: Optional[str] = Depends(require_roles("admin", "operator", action="connection.disconnect")),
 ):
-    client = _get_connection_control_client()
-
+    logger.debug("[CONNECTION] Starting disconnect request")
+    
+    # Try IB Feed service first (primary)
+    ib_feed_client = _get_ib_feed_client()
+    
     try:
-        result = await client.disconnect()
-    except ServiceClientError as exc:
-        logger.error("Failed to dispatch disconnect command via service: %s", exc)
-        await audit_log_failure(
-            request,
-            detail="failed to dispatch disconnect command via service",
-            extra={"service": "connection_control", "fallback": "redis"},
-        )
-
-        command_id, command = _build_disconnect_command(user)
-        try:
-            await _enqueue_command(command)
-        except Exception as queue_exc:
-            logger.error("Failed to enqueue disconnect command: %s", queue_exc)
-            await audit_log_failure(request, detail="failed to enqueue disconnect command")
-            raise HTTPException(status_code=503, detail="Failed to enqueue disconnect command") from queue_exc
-
+        logger.debug("[CONNECTION] Attempting disconnect via IB Feed service")
+        result = await ib_feed_client.disconnect_ib()
+        
+        logger.info(f"[CONNECTION] Successfully disconnected via IB Feed service: {result}")
         await audit_log_success(
             request,
-            detail="disconnect command enqueued via fallback",
-            extra={"command_id": command_id, "service": "redis"},
+            detail="disconnect command dispatched via ib_feed service",
+            extra={"service": "ib_feed", "result": result},
         )
 
-        return {
+        response: Dict[str, Any] = {
             "success": True,
-            "status": "queued",
-            "service": "redis",
-            "command_id": command_id,
-            "fallback": True,
+            "status": "dispatched",
+            "service": "ib_feed",
         }
+        if result is not None:
+            response["result"] = result
+        return response
+        
+    except ServiceClientError as ib_feed_exc:
+        logger.warning(f"[CONNECTION] IB Feed service unavailable, trying fallback: {ib_feed_exc}")
+        
+        # Fallback to Connection Control service
+        connection_client = _get_connection_control_client()
+        
+        try:
+            logger.debug("[CONNECTION] Attempting disconnect via Connection Control service (fallback)")
+            result = await connection_client.disconnect()
+            
+            logger.info(f"[CONNECTION] Successfully disconnected via Connection Control service: {result}")
+            await audit_log_success(
+                request,
+                detail="disconnect command dispatched via connection_control service (fallback)",
+                extra={"service": "connection_control", "result": result, "fallback_from": "ib_feed"},
+            )
 
-    await audit_log_success(
-        request,
-        detail="disconnect command dispatched via service",
-        extra={"service": "connection_control", "result": result},
-    )
+            response: Dict[str, Any] = {
+                "success": True,
+                "status": "dispatched",
+                "service": "connection_control",
+                "fallback": True,
+            }
+            if result is not None:
+                response["result"] = result
+            return response
+            
+        except ServiceClientError as connection_exc:
+            logger.error(f"[CONNECTION] Both services failed, using Redis fallback. IB Feed: {ib_feed_exc}, Connection Control: {connection_exc}")
+            await audit_log_failure(
+                request,
+                detail="failed to dispatch disconnect command via both services",
+                extra={"ib_feed_error": str(ib_feed_exc), "connection_control_error": str(connection_exc), "fallback": "redis"},
+            )
 
-    response: Dict[str, Any] = {
-        "success": True,
-        "status": "dispatched",
-        "service": "connection_control",
-    }
-    if result is not None:
-        response["result"] = result
-    return response
+            # Final fallback to Redis queue
+            command_id, command = _build_disconnect_command(user)
+            try:
+                logger.debug(f"[CONNECTION] Enqueueing disconnect command to Redis: {command_id}")
+                await _enqueue_command(command)
+                
+                logger.info(f"[CONNECTION] Successfully enqueued disconnect command to Redis: {command_id}")
+                await audit_log_success(
+                    request,
+                    detail="disconnect command enqueued via redis fallback",
+                    extra={"command_id": command_id, "service": "redis"},
+                )
+
+                return {
+                    "success": True,
+                    "status": "queued",
+                    "service": "redis",
+                    "command_id": command_id,
+                    "fallback": True,
+                }
+            except Exception as queue_exc:
+                logger.error(f"[CONNECTION] All disconnect methods failed. Redis error: {queue_exc}")
+                await audit_log_failure(request, detail="failed to enqueue disconnect command")
+                raise HTTPException(status_code=503, detail="Failed to enqueue disconnect command") from queue_exc
 
 
 @router.get("/api/connection_status")
 async def get_connection_status(user: Optional[str] = Depends(get_current_user)):
-    """Return the current IBKR connection status based on ib-command health."""
+    """Return the current IBKR connection status from IB Feed service or fallback sources."""
 
+    logger.debug("[CONNECTION] Getting connection status")
+    
+    # Try IB Feed service first
+    ib_feed_client = _get_ib_feed_client()
+    
     try:
+        logger.debug("[CONNECTION] Attempting to get status from IB Feed service")
+        status = await ib_feed_client.get_connection_status()
+        
+        if status:
+            logger.debug(f"[CONNECTION] Got status from IB Feed service: {status}")
+            # Add source information
+            if isinstance(status, dict):
+                status["source"] = "ib_feed"
+            return status
+            
+    except ServiceClientError as exc:
+        logger.warning(f"[CONNECTION] IB Feed service unavailable for status check: {exc}")
+
+    # Fallback to Redis health check
+    try:
+        logger.debug("[CONNECTION] Falling back to Redis health check")
         redis_health = await _load_ib_command_health()
         if redis_health:
+            logger.debug(f"[CONNECTION] Got status from Redis health: {redis_health}")
             return redis_health
 
+        logger.debug("[CONNECTION] No Redis health data available, returning default status")
         return {
             "connected": False,
             "account_type": resolve_ib_account_type(),
@@ -402,5 +506,5 @@ async def get_connection_status(user: Optional[str] = Depends(get_current_user))
             "source": "http",
         }
     except Exception as exc:
-        logger.error("Failed to get connection status: %s", exc)
+        logger.error(f"[CONNECTION] Failed to get connection status from all sources: {exc}")
         raise HTTPException(status_code=500, detail="Failed to get connection status") from exc

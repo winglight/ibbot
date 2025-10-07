@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional, Tuple
 
 import pytz
 
-from src.ibkr_client import INDEX_FUTURE_DETAILS
+from src.ibkr_constants import INDEX_FUTURE_DETAILS
 
 from .candle_base import CandleSubscriptionStrategy
 

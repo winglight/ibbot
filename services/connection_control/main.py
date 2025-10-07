@@ -11,7 +11,7 @@ from typing import Any, Mapping
 from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel, Field
 
-from src.connection_manager import ConnectionConfig
+from src.connection_config import ConnectionConfig
 from src.ibbot import update_service_health
 from src.ibbot.config import ConfigProvider
 from src.ibbot.logging import get_logger

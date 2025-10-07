@@ -10,7 +10,7 @@ from typing import Any, Awaitable, Dict, Optional, Sequence, Tuple
 
 from loguru import logger
 
-from src.ibkr_client import INDEX_FUTURE_DETAILS
+from src.ibkr_constants import INDEX_FUTURE_DETAILS
 from .base import BaseStrategy
 
 

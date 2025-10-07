@@ -159,8 +159,8 @@ class IBQuoteFeed(QuoteFeed):
 
     # ------------------------------------------------------------------
     def _ensure_connection_ready(self) -> None:
-        if not self._connection_manager.is_connected():
-            raise self._data_source_error_cls("IBKR connection is not active")
+        # Note: IBQuoteFeed is deprecated in favor of the new IB Feed service
+        raise self._data_source_error_cls("IBQuoteFeed has been replaced by the new IB Feed service architecture")
 
     def _start_subscription(
         self,
@@ -168,70 +168,13 @@ class IBQuoteFeed(QuoteFeed):
         callback: Callback,
         options: Dict[str, Any],
     ) -> Optional[_Subscription]:
-        cm = self._connection_manager
-
-        def _subscribe():
-            ib = cm.get_ib_instance()
-            if not ib:
-                return None
-            contract = self._build_contract(symbol, options)
-            ticker = ib.reqMktData(contract, "", False, False)
-            return ticker, contract
-
-        result = cm.run_in_connection_thread(
-            _subscribe,
-            timeout=15.0,
-        )
-        if not result:
-            raise RuntimeError(f"reqMktData failed for {symbol}")
-        ticker, contract = result
-
-        def _on_update(*_args, sym: str = symbol, tick=ticker) -> None:
-            payload = self._extract_payload(sym, tick)
-            if payload is None:
-                return
-            loop = self._loop
-            if loop and loop.is_running():
-                loop.call_soon_threadsafe(self._notify_callbacks, sym, payload)
-            else:
-                self._notify_callbacks(sym, payload)
-
-        try:
-            ticker.updateEvent += _on_update
-        except Exception as exc:  # pragma: no cover - defensive guard
-            logger.error("Failed to attach update handler for %s: %s", symbol, exc)
-            connection_manager.run_in_connection_thread(
-                lambda: connection_manager.get_ib_instance().cancelMktData(contract)
-            )
-            return None
-
-        return _Subscription(callbacks=[callback], ticker=ticker, contract=contract, handler=_on_update)
+        # Note: IBQuoteFeed is deprecated in favor of the new IB Feed service
+        logger.warning("IBQuoteFeed._start_subscription called but this class has been replaced by the new IB Feed service")
+        return None
 
     def _stop_subscription(self, subscription: _Subscription) -> None:
-        ticker = subscription.ticker
-        contract = subscription.contract
-
-        cm = self._connection_manager
-
-        def _cancel():
-            ib = cm.get_ib_instance()
-            if ib:
-                try:
-                    ib.cancelMktData(contract)
-                except Exception as exc:
-                    logger.warning("Failed to cancel market data for %s", contract)
-            try:
-                ticker.updateEvent -= subscription.handler
-            except Exception:
-                try:
-                    ticker.updateEvent.clear()
-                except Exception:
-                    pass
-
-        cm.run_in_connection_thread(
-            _cancel,
-            timeout=5.0,
-        )
+        # Note: IBQuoteFeed is deprecated in favor of the new IB Feed service
+        logger.warning("IBQuoteFeed._stop_subscription called but this class has been replaced by the new IB Feed service")
 
     def _remove_callback(self, symbol: str, callback: Callback) -> None:
         subscription: Optional[_Subscription]
@@ -321,7 +264,7 @@ class IBQuoteFeed(QuoteFeed):
 
         factory = getattr(core, "IBKRClient", None)
         if factory is None:
-            raise RuntimeError("IBKRClient factory not available on core module")
+            raise RuntimeError("IBKRClient has been replaced by IB Feed service. Use IB Feed service for market data.")
 
         client = factory()
         core.ibkr_client = client
@@ -329,14 +272,13 @@ class IBQuoteFeed(QuoteFeed):
 
     @property
     def _connection_manager(self):
-        if not hasattr(self, "__connection_manager"):
-            self.__connection_manager = import_module("src.connection_manager").connection_manager
-        return self.__connection_manager
+        # Note: IBQuoteFeed is deprecated in favor of the new IB Feed service
+        raise RuntimeError("IBQuoteFeed has been replaced by the new IB Feed service architecture")
 
     @property
     def _index_future_symbols(self):
         if not hasattr(self, "__index_future_symbols"):
-            self.__index_future_symbols = import_module("src.ibkr_client").INDEX_FUTURE_SYMBOLS
+            self.__index_future_symbols = import_module("src.ibkr_constants").INDEX_FUTURE_SYMBOLS
         return self.__index_future_symbols
 
     @property

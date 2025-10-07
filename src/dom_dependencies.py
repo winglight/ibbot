@@ -12,8 +12,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import List
 
-from src.connection_manager import connection_manager
-from src.depth_subscriber import DepthSubscriber
+# Note: connection_manager has been replaced by the new service architecture
+# Note: DepthSubscriber import removed - deprecated in favor of new service architecture
 from src.dom_processor import DOMProcessor
 
 
@@ -32,7 +32,8 @@ dom_config = DOMConfig()
 
 # Shared instances that other modules rely on
 dom_processor = DOMProcessor(window=dom_config.window, max_levels=dom_config.max_levels)
-depth_subscriber = DepthSubscriber(connection_manager)
+# Note: depth_subscriber is deprecated in favor of the new data layer architecture
+depth_subscriber = None  # Will be lazily initialized if needed for backward compatibility
 
 
 def get_dom_processor() -> DOMProcessor:

@@ -43,8 +43,15 @@ def get_data_source_manager() -> DataSourceManager:
         return _manager
 
     manager = DataSourceManager()
-    dom_adapter = DomDepthAdapter(depth_subscriber, manager.event_bus)
-    manager.register_source(dom_adapter)
+    
+    # Only create DOM adapter if depth_subscriber is available
+    # Note: depth_subscriber is deprecated in favor of new service architecture
+    if depth_subscriber is not None:
+        dom_adapter = DomDepthAdapter(depth_subscriber, manager.event_bus)
+        manager.register_source(dom_adapter)
+        logger.info("DOM adapter registered with data source manager")
+    else:
+        logger.info("DOM adapter skipped - depth_subscriber not available (using new service architecture)")
 
     intervals, history_limit = get_candle_intervals()
     quote_adapter = MarketQuoteAdapter(
@@ -57,7 +64,12 @@ def get_data_source_manager() -> DataSourceManager:
     )
     manager.register_source(quote_adapter)
     _manager = manager
-    logger.info("Data source manager initialised with DOM and market quote adapters")
+    
+    # Log appropriate message based on what adapters were registered
+    if depth_subscriber is not None:
+        logger.info("Data source manager initialised with DOM and market quote adapters")
+    else:
+        logger.info("Data source manager initialised with market quote adapter (DOM adapter skipped)")
     return manager
 
 
