@@ -37,6 +37,12 @@ ACCOUNT_SERVICE_TIMEOUT = float(os.getenv("ACCOUNT_SERVICE_TIMEOUT", "10.0"))
 
 _ACCOUNT_SERVICE_CLIENT = AccountServiceClient()
 
+
+def get_account_service_client() -> AccountServiceClient:
+    """Expose the shared account service client for test monkeypatching."""
+
+    return _ACCOUNT_SERVICE_CLIENT
+
 _COMMAND_QUEUE_OVERRIDE = os.getenv("IB_COMMAND_QUEUE_KEY", "").strip() or None
 
 
@@ -164,7 +170,7 @@ def _extract_snapshot_metadata(
 
 
 def _get_account_service_client() -> AccountServiceClient:
-    return _ACCOUNT_SERVICE_CLIENT
+    return get_account_service_client()
 
 
 def _extract_connection_flag(payload: Any) -> Optional[bool]:

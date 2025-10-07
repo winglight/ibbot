@@ -24,6 +24,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+# Import from run_service after adding PROJECT_ROOT to sys.path
+sys.path.insert(0, str(Path(__file__).parent))
+from run_service import SERVICE_ALIASES, _resolve_module
+
 from src.utils.dataclass_compat import enable_slots_compat
 
 enable_slots_compat()
@@ -34,8 +38,7 @@ DEFAULT_SERVICES: tuple[str, ...] = (
     "connection_control",
     "account",
     "orders",
-    "ib_command",
-    "ib_feed",
+    "ib_gateway",
     "strategy",
     "risk",
     "notification",
@@ -48,8 +51,7 @@ DEFAULT_SERVICES: tuple[str, ...] = (
 # If a service is not listed here it falls back to ``IBBOT_REDIS_URL``.
 _SERVICE_REDIS_ENV: dict[str, str] = {
     "connection_control": "CONNECTION_CONTROL_REDIS_URL",
-    "ib_command": "IB_COMMAND_REDIS_URL",
-    "ib_feed": "IB_FEED_REDIS_URL",
+    "ib_gateway": "IB_GATEWAY_REDIS_URL",
     "strategy": "STRATEGY_REDIS_URL",
     "risk": "RISK_REDIS_URL",
     "notification": "NOTIFICATION_REDIS_URL",
@@ -58,13 +60,18 @@ _SERVICE_REDIS_ENV: dict[str, str] = {
     "optimizer": "OPTIMIZER_REDIS_URL",
 }
 
+_SERVICE_REDIS_FALLBACK: dict[str, tuple[str, ...]] = {
+    "ib_gateway": ("IB_COMMAND_REDIS_URL", "IB_FEED_REDIS_URL"),
+}
+
 
 def _build_service_command(service: str) -> tuple[list[str], str]:
     """Return the command used to start *service* and a descriptive label."""
 
+    canonical = SERVICE_ALIASES.get(service, service)
     host = os.getenv("SERVICE_HOST", "0.0.0.0")
 
-    if service == "account":
+    if canonical == "account":
         port = os.getenv("ACCOUNT_SERVICE_PORT", "8020")
         cmd = [
             sys.executable,
@@ -76,7 +83,7 @@ def _build_service_command(service: str) -> tuple[list[str], str]:
             "--port",
             str(port),
         ]
-    elif service == "orders":
+    elif canonical == "orders":
         port = os.getenv("ORDERS_SERVICE_PORT", "8050")
         cmd = [
             sys.executable,
@@ -88,7 +95,7 @@ def _build_service_command(service: str) -> tuple[list[str], str]:
             "--port",
             str(port),
         ]
-    elif service == "risk":
+    elif canonical == "risk":
         port = os.getenv("RISK_SERVICE_PORT", "8030")
         app_path = os.getenv("RISK_SERVICE_APP", "services.risk.http:app")
         cmd = [
@@ -101,7 +108,7 @@ def _build_service_command(service: str) -> tuple[list[str], str]:
             "--port",
             str(port),
         ]
-    elif service == "strategy":
+    elif canonical == "strategy":
         port = os.getenv("STRATEGY_SERVICE_PORT", "8045")
         app_path = os.getenv("STRATEGY_SERVICE_APP", "services.strategy.http:app")
         cmd = [
@@ -114,7 +121,7 @@ def _build_service_command(service: str) -> tuple[list[str], str]:
             "--port",
             str(port),
         ]
-    elif service == "connection_control":
+    elif canonical == "connection_control":
         port = os.getenv("CONNECTION_CONTROL_PORT", "8056")
         app_path = "services.connection_control.main:create_app"
         cmd = [
@@ -128,7 +135,7 @@ def _build_service_command(service: str) -> tuple[list[str], str]:
             "--port",
             str(port),
         ]
-    elif service == "market_data":
+    elif canonical == "market_data":
         port = os.getenv("MARKET_DATA_PORT", "8010")
         app_path = "services.market_data.main:create_app"
         cmd = [
@@ -142,7 +149,7 @@ def _build_service_command(service: str) -> tuple[list[str], str]:
             "--port",
             str(port),
         ]
-    elif service == "queue_monitor":
+    elif canonical == "queue_monitor":
         port = os.getenv("QUEUE_MONITOR_PORT", "8011")
         app_path = "services.queue_monitor.main:create_app"
         cmd = [
@@ -156,7 +163,7 @@ def _build_service_command(service: str) -> tuple[list[str], str]:
             "--port",
             str(port),
         ]
-    elif service == "notification":
+    elif canonical == "notification":
         port = os.getenv("NOTIFICATION_SERVICE_PORT", "8055")
         app_path = "services.notification.main:app"
         cmd = [
@@ -169,7 +176,7 @@ def _build_service_command(service: str) -> tuple[list[str], str]:
             "--port",
             str(port),
         ]
-    elif service == "optimizer":
+    elif canonical == "optimizer":
         port = os.getenv("OPTIMIZER_PORT", "8001")
         app_path = "services.optimizer.main:create_app"
         cmd = [
@@ -183,11 +190,8 @@ def _build_service_command(service: str) -> tuple[list[str], str]:
             "--port",
             str(port),
         ]
-    elif service == "ib_command":
-        module = "services.ib_command.main"
-        cmd = [sys.executable, "-m", module]
-    elif service == "ib_feed":
-        module = "services.ib_feed.main"
+    elif canonical == "ib_gateway":
+        module = "services.ib_gateway.main"
         cmd = [sys.executable, "-m", module]
     else:
         raise ValueError(f"Unknown service: {service}")
@@ -292,15 +296,16 @@ def _load_env() -> tuple[Path | None, tuple[str, ...], tuple[str, ...]]:
 
 
 def _resolve_import_module(service: str) -> str:
+    canonical = SERVICE_ALIASES.get(service, service)
     if service == "risk":
         app_path = os.getenv("RISK_SERVICE_APP", "services.risk.http:app")
         return app_path.split(":", 1)[0]
     if service == "strategy":
         app_path = os.getenv("STRATEGY_SERVICE_APP", "services.strategy.http:app")
         return app_path.split(":", 1)[0]
-    if service in {"account", "orders"}:
-        return f"services.{service}.main"
-    return f"services.{service}.main"
+    if canonical in {"account", "orders"}:
+        return f"services.{canonical}.main"
+    return f"services.{canonical}.main"
 
 
 def _check_service_imports(services: Iterable[str]) -> list[str]:
@@ -320,8 +325,14 @@ def _iter_redis_urls(services: Sequence[str]) -> set[str]:
     urls: set[str] = set()
     default_url = os.getenv(DEFAULT_REDIS_URL_ENV, DEFAULT_REDIS_URL)
     for service in services:
-        env_key = _SERVICE_REDIS_ENV.get(service)
+        canonical = SERVICE_ALIASES.get(service, service)
+        env_key = _SERVICE_REDIS_ENV.get(canonical)
         url = os.getenv(env_key) if env_key else None
+        if not url:
+            for fallback in _SERVICE_REDIS_FALLBACK.get(canonical, ()):  # pragma: no cover - legacy env
+                url = os.getenv(fallback)
+                if url:
+                    break
         urls.add(url or default_url)
     return urls
 
@@ -359,6 +370,16 @@ def run_services(
     *,
     skip_redis_check: bool = False,
 ) -> int:
+    deduped: list[str] = []
+    seen_canonical: set[str] = set()
+    for service in services:
+        canonical = SERVICE_ALIASES.get(service, service)
+        if canonical in seen_canonical:
+            continue
+        seen_canonical.add(canonical)
+        deduped.append(service)
+    services = tuple(deduped)
+
     env_source, overridden, newly_added = _load_env()
     _log_environment_summary(env_source, overridden=overridden, newly_added=newly_added)
 

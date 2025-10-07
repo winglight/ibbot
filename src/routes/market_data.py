@@ -37,6 +37,18 @@ CACHE_DURATION_MINUTES = 1  # 缓存1分钟
 _MARKET_DATA_SERVICE_CLIENT = MarketDataServiceClient()
 
 
+def get_market_data_service_client() -> MarketDataServiceClient:
+    """Return the shared market data service client instance.
+
+    The legacy ``tests/routes`` suites monkeypatch this helper to inject
+    lightweight doubles.  Routing dependencies continue to use
+    :func:`_get_market_data_service_client`, which now delegates through the
+    public accessor so that those monkeypatches take effect.
+    """
+
+    return _MARKET_DATA_SERVICE_CLIENT
+
+
 class MarketBackfillRequest(BaseModel):
     symbol: str
     duration: str
@@ -48,7 +60,7 @@ class MarketBackfillRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="ignore")
 
 def _get_market_data_service_client() -> MarketDataServiceClient:
-    return _MARKET_DATA_SERVICE_CLIENT
+    return get_market_data_service_client()
 
 
 def _market_service_base_url(client: Optional[MarketDataServiceClient] = None) -> str:
@@ -283,11 +295,7 @@ async def get_chart_data_legacy(
     return await _fetch_chart_data_payload(request)
 
 
-@router.post("/market/backfill")
-async def run_market_backfill(
-    request: MarketBackfillRequest,
-    user: Optional[str] = Depends(get_current_user),
-) -> Dict[str, Any]:
+async def _execute_market_backfill(request: MarketBackfillRequest) -> Dict[str, Any]:
     client = _get_market_data_service_client()
     service_payload = request.model_dump(by_alias=True, exclude_none=True)
 
@@ -313,6 +321,30 @@ async def run_market_backfill(
     payload.setdefault("symbol", request.symbol)
     payload.setdefault("interval", payload.get("interval") or request.bar_size)
     return payload
+
+
+@router.post("/market/backfill")
+async def run_market_backfill(
+    request: MarketBackfillRequest,
+    user: Optional[str] = Depends(get_current_user),
+) -> Dict[str, Any]:
+    return await _execute_market_backfill(request)
+
+
+@router.post("/api/market/backfill")
+async def run_market_backfill_api(
+    request: MarketBackfillRequest,
+    user: Optional[str] = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """API-prefixed alias for :func:`run_market_backfill`.
+
+    The frontend consistently calls ``/api``-prefixed endpoints via
+    :meth:`static/js/app.js:IBApp.apiCall`, so exposing this alias
+    prevents 404 responses when the configuration sidebar triggers a
+    backfill.
+    """
+
+    return await _execute_market_backfill(request)
 
 
 @router.get("/market/storage")

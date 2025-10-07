@@ -121,7 +121,24 @@ def _get_orders_service_client() -> OrdersServiceClient:
 NY_TZ = ZoneInfo("America/New_York")
 
 
-INDEX_FUTURE_DETAILS: Dict[str, Dict[str, str]] = {
+_CONTRACT_MONTH_CODE_MAP = {
+    "F": 1,
+    "G": 2,
+    "H": 3,
+    "J": 4,
+    "K": 5,
+    "M": 6,
+    "N": 7,
+    "Q": 8,
+    "U": 9,
+    "V": 10,
+    "X": 11,
+    "Z": 12,
+}
+
+_ALL_CONTRACT_MONTHS: Tuple[int, ...] = tuple(range(1, 13))
+
+INDEX_FUTURE_DETAILS: Dict[str, Dict[str, Any]] = {
     "ES": {"exchange": "CME", "multiplier": "50", "tradingClass": "ES"},
     "MES": {"exchange": "CME", "multiplier": "5", "tradingClass": "MES"},
     "NQ": {"exchange": "CME", "multiplier": "20", "tradingClass": "NQ"},
@@ -129,7 +146,12 @@ INDEX_FUTURE_DETAILS: Dict[str, Dict[str, str]] = {
     "YM": {"exchange": "ECBOT", "multiplier": "5", "tradingClass": "YM"},
     "MYM": {"exchange": "ECBOT", "multiplier": "0.5", "tradingClass": "MYM"},
     "RTY": {"exchange": "CME", "multiplier": "50", "tradingClass": "RTY"},
-    "M2K": {"exchange": "CME", "multiplier": "5", "tradingClass": "M2K"},
+    "M2K": {
+        "exchange": "CME",
+        "multiplier": "5",
+        "tradingClass": "M2K",
+        "contract_months": _ALL_CONTRACT_MONTHS,
+    },
     "VX": {"exchange": "CFE", "multiplier": "1000", "tradingClass": "VX"},
 }
 
@@ -148,20 +170,63 @@ def _third_friday_datetime(year: int, month: int) -> datetime:
     return datetime(year, month, third_friday_day, 9, 30, tzinfo=NY_TZ)
 
 
-def _front_quarter_contract(now: datetime) -> Tuple[int, int]:
-    """Determine the nearest active quarterly contract (year, month)."""
+def _coerce_contract_months(value: Any) -> Tuple[int, ...]:
+    """Normalise a contract-month definition into a tuple of integers."""
+
+    if value is None:
+        return _QUARTERLY_CONTRACT_MONTHS
+
+    months: set[int] = set()
+
+    if isinstance(value, (list, tuple, set, frozenset)):
+        items = value
+    else:
+        items = (value,)
+
+    for item in items:
+        if item is None:
+            continue
+
+        if isinstance(item, int):
+            candidate = item
+            if 1 <= candidate <= 12:
+                months.add(candidate)
+            continue
+
+        text = str(item).strip()
+        if not text:
+            continue
+
+        if text.isdigit():
+            candidate = int(text)
+            if 1 <= candidate <= 12:
+                months.add(candidate)
+            continue
+
+        for char in text:
+            upper = char.upper()
+            candidate = _CONTRACT_MONTH_CODE_MAP.get(upper)
+            if candidate:
+                months.add(candidate)
+
+    if not months:
+        return _QUARTERLY_CONTRACT_MONTHS
+
+    return tuple(sorted(months))
+
+
+def _front_contract(now: datetime, contract_months: Sequence[int] | None) -> Tuple[int, int]:
+    """Determine the nearest active contract (year, month) for the given cycle."""
+
+    months = _coerce_contract_months(contract_months)
 
     ny_now = now.astimezone(NY_TZ)
     year = ny_now.year
     month = ny_now.month
 
-    # Evaluate the remaining quarterly contracts for the current year first,
-    # then fall back to the next year's cycle.  This avoids skipping the
-    # current-year contracts when ``month`` is greater than the candidate
-    # (e.g. October should still select December, not next March).
-    for year_offset in (0, 1):
+    for year_offset in range(0, 3):
         candidate_year = year + year_offset
-        for candidate_month in _QUARTERLY_CONTRACT_MONTHS:
+        for candidate_month in months:
             if year_offset == 0 and candidate_month < month:
                 continue
 
@@ -169,9 +234,14 @@ def _front_quarter_contract(now: datetime) -> Tuple[int, int]:
             if ny_now < expiry:
                 return candidate_year, candidate_month
 
-    # Fallback – should not be hit because the loop above covers current and
-    # next year, but keep a defensive default.
-    return year + 1, _QUARTERLY_CONTRACT_MONTHS[0]
+    # Fallback: if everything else failed, return the first month of the next cycle.
+    return year + 1, months[0]
+
+
+def _front_quarter_contract(now: datetime) -> Tuple[int, int]:
+    """Determine the nearest active quarterly contract (year, month)."""
+
+    return _front_contract(now, _QUARTERLY_CONTRACT_MONTHS)
 
 @dataclass(slots=True)
 class _MarketDataSubscription:
@@ -320,6 +390,9 @@ class IBKRClient:
         self._dom_listeners: List[Callable[[str, Sequence[Mapping[str, Any]]], None]] = []
         self._disconnect_listeners: List[Callable[[], None]] = []
         self._default_dom_rows = int(self._parse_env_float('IBKR_DOM_ROWS', 10) or 10)
+
+        # Track the last time we surfaced a historical-data connection loss per symbol
+        self._historical_connection_loss_log: Dict[str, float] = {}
     
     def _sanitize_float(self, value):
         """清理无效的浮点数值，将NaN和Infinity转换为None"""
@@ -331,7 +404,23 @@ class IBKRClient:
             return float(value)
         except (TypeError, ValueError):
             return None
-    
+
+    def _should_log_historical_connection_loss(self, symbol: str, *, window: float = 60.0) -> bool:
+        """Rate-limit repeated connection loss logs for the same symbol."""
+
+        now = time.monotonic()
+        last = self._historical_connection_loss_log.get(symbol)
+        if last is not None and now - last < window:
+            return False
+        self._historical_connection_loss_log[symbol] = now
+        return True
+
+    def _clear_historical_connection_loss(self, symbol: str) -> None:
+        """Reset the connection loss throttling for ``symbol``."""
+
+        if symbol in self._historical_connection_loss_log:
+            del self._historical_connection_loss_log[symbol]
+
     @property
     def connected(self) -> bool:
         """检查连接状态 - 为兼容性提供connected属性"""
@@ -618,17 +707,13 @@ class IBKRClient:
         contract = self.get_stock_contract(symbol, 'SMART')
         qualified_contract = contract
 
-        try:
-            qualified = await ib.qualifyContractsAsync(contract)
-            if qualified:
-                qualified_contract = qualified[0]
-        except Exception as exc:
-            ibkr_logger.debug(
-                "Data farm wake-up contract qualification failed",
-                code=code,
-                symbol=symbol,
-                error=str(exc),
-            )
+        qualified_contract = await self._qualify_contract(
+            contract,
+            symbol=symbol,
+            exchange=getattr(contract, "exchange", "SMART") or "SMART",
+            currency=getattr(contract, "currency", "USD") or "USD",
+            ib_instance=ib,
+        ) or contract
 
         try:
             await ib.reqHistoricalDataAsync(
@@ -982,12 +1067,16 @@ class IBKRClient:
                         contract = self.get_stock_contract(symbol, exchange)
 
                     # 使用异步方式确认合约，避免在运行中事件循环上使用同步阻塞方法
-                    qualified_contracts = await ib_instance.qualifyContractsAsync(contract)
-                    if not qualified_contracts:
+                    qualified_contract = await self._qualify_contract(
+                        contract,
+                        symbol=symbol,
+                        exchange=getattr(contract, "exchange", exchange) or exchange,
+                        currency=getattr(contract, "currency", "USD") or "USD",
+                        ib_instance=ib_instance,
+                    )
+                    if not qualified_contract:
                         ibkr_logger.error(f"Failed to qualify contract for {symbol}")
                         return None
-
-                    qualified_contract = qualified_contracts[0]
 
                     # 创建订单
                     if order_type == 'MARKET':
@@ -1228,16 +1317,138 @@ class IBKRClient:
                     pass
             return contract
 
+    def _future_contract_candidates(
+        self,
+        symbol: str,
+        exchange: str,
+        currency: str,
+    ) -> List[Future]:
+        """Generate a set of plausible future contracts for qualification.
+
+        Some index futures (notably the Russell micro contract ``M2K``) have a
+        richer month cycle than the standard quarterly series.  When we guess an
+        expiry that is not yet listed at IBKR the resulting qualification call
+        fails with ``200 / No security definition``.  To make the system more
+        resilient we build a list of alternative contracts that cover the
+        current and next year's available months (with and without optional
+        attributes like ``tradingClass``), plus a last-resort variant without an
+        explicit expiry.
+        """
+
+        symbol_upper = symbol.upper()
+        details = INDEX_FUTURE_DETAILS.get(symbol_upper, {})
+        exchange_to_use = details.get("exchange", exchange)
+        months = _coerce_contract_months(details.get("contract_months"))
+        current_now = now_local()
+        ny_now = current_now.astimezone(NY_TZ)
+        base_year = ny_now.year
+        base_month = ny_now.month
+
+        candidates: List[Future] = []
+        seen: set[Tuple[str, str, str, str, Optional[str], Optional[str]]] = set()
+
+        def _append_candidate(contract: Future) -> None:
+            signature = (
+                getattr(contract, "symbol", ""),
+                getattr(contract, "exchange", ""),
+                getattr(contract, "currency", ""),
+                getattr(contract, "lastTradeDateOrContractMonth", ""),
+                getattr(contract, "tradingClass", None),
+                getattr(contract, "multiplier", None),
+            )
+            if signature in seen:
+                return
+            seen.add(signature)
+            candidates.append(contract)
+
+        def _build_contract(expiry: Optional[str], *, with_details: bool) -> Future:
+            contract = self._create_future_contract(symbol_upper, exchange_to_use, currency)
+            if expiry:
+                contract.lastTradeDateOrContractMonth = expiry
+            if with_details:
+                for attr in ("multiplier", "tradingClass"):
+                    value = details.get(attr)
+                    if value:
+                        setattr(contract, attr, value)
+            return contract
+
+        # Default guess based on the configured contract cycle
+        front_year, front_month = _front_contract(current_now, months)
+        default_expiry = f"{front_year}{front_month:02d}"
+        _append_candidate(_build_contract(default_expiry, with_details=True))
+
+        # Iterate through the remaining months of this year and the next two
+        # years to cover serial-month products (e.g. M2K).
+        for year_offset in range(0, 3):
+            candidate_year = base_year + year_offset
+            for candidate_month in months:
+                if year_offset == 0 and candidate_month < base_month:
+                    continue
+                expiry = f"{candidate_year}{candidate_month:02d}"
+                _append_candidate(_build_contract(expiry, with_details=True))
+                _append_candidate(_build_contract(expiry, with_details=False))
+
+        # Fallbacks without an explicit expiry allow IBKR to pick the front
+        # contract automatically.
+        _append_candidate(_build_contract(None, with_details=True))
+        _append_candidate(_build_contract(None, with_details=False))
+
+        return candidates
+
+    async def _qualify_contract(
+        self,
+        contract: Contract,
+        *,
+        symbol: str,
+        exchange: str,
+        currency: str,
+        ib_instance: IB | None = None,
+    ) -> Contract | None:
+        """Qualify a contract, retrying with sensible fallbacks for futures."""
+
+        ib = ib_instance or self.ib
+        if ib is None or not ib.isConnected():
+            return None
+
+        symbol_upper = symbol.upper()
+        candidates: Sequence[Contract]
+        if isinstance(contract, Future):
+            candidates = self._future_contract_candidates(symbol_upper, exchange, currency)
+        else:
+            candidates = (contract,)
+
+        last_exception: Exception | None = None
+        for candidate in candidates:
+            try:
+                qualified = await ib.qualifyContractsAsync(candidate)
+            except Exception as exc:  # pragma: no cover - defensive logging
+                last_exception = exc
+                continue
+
+            if qualified:
+                return qualified[0]
+
+        if last_exception is not None:
+            ibkr_logger.debug(
+                "Contract qualification failed after attempting fallbacks",
+                symbol=symbol_upper,
+                exchange=exchange,
+                error=str(last_exception),
+            )
+
+        return None
+
     def get_future_contract(self, symbol: str, exchange: str = 'SMART', currency: str = 'USD'):
         """获取期货合约"""
 
         symbol_upper = symbol.upper()
         if symbol_upper in INDEX_FUTURE_SYMBOLS:
             now = now_local()
-            contract_year, contract_month = _front_quarter_contract(now)
+            details = INDEX_FUTURE_DETAILS[symbol_upper]
+            months = _coerce_contract_months(details.get("contract_months"))
+            contract_year, contract_month = _front_contract(now, months)
             expiry = f"{contract_year}{contract_month:02d}"
 
-            details = INDEX_FUTURE_DETAILS[symbol_upper]
             exchange_to_use = details.get("exchange", exchange)
 
             contract = self._create_future_contract(symbol_upper, exchange_to_use, currency)
@@ -1330,6 +1541,75 @@ class IBKRClient:
             return int(magnitude * 86400)
         return None
 
+    @staticmethod
+    def _coerce_ib_datetime(value: datetime | str | None) -> datetime | None:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            dt = value
+        else:
+            text = str(value).strip()
+            if not text:
+                return None
+
+            tzinfo: ZoneInfo | None = None
+            base_text = text
+            parts = text.split()
+            if len(parts) > 2:
+                tz_candidate = parts[-1]
+                try:
+                    tzinfo = ZoneInfo(tz_candidate)
+                except Exception:
+                    tzinfo = None
+                else:
+                    base_text = " ".join(parts[:-1])
+
+            dt: datetime | None = None
+            iso_candidate = base_text
+            if iso_candidate.endswith('Z'):
+                iso_candidate = iso_candidate[:-1] + '+00:00'
+            try:
+                dt = datetime.fromisoformat(iso_candidate)
+            except ValueError:
+                dt = None
+
+            if dt is None:
+                patterns = (
+                    "%Y%m%d %H:%M:%S",
+                    "%Y%m%d-%H:%M:%S",
+                    "%Y-%m-%d %H:%M:%S",
+                    "%Y-%m-%dT%H:%M:%S",
+                    "%Y-%m-%dT%H:%M:%S.%f",
+                )
+                for pattern in patterns:
+                    try:
+                        dt = datetime.strptime(base_text, pattern)
+                    except ValueError:
+                        continue
+                    else:
+                        break
+
+            if dt is None:
+                return None
+
+            if tzinfo is not None:
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=tzinfo)
+                else:
+                    dt = dt.astimezone(tzinfo)
+            elif dt.tzinfo is None:
+                dt = dt.replace(tzinfo=NY_TZ)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=NY_TZ)
+        return dt
+
+    def _format_ib_end_datetime(self, value: datetime | str) -> str:
+        coerced = self._coerce_ib_datetime(value)
+        if coerced is None:
+            return ""
+        utc_value = coerced.astimezone(timezone.utc)
+        return utc_value.strftime("%Y%m%d-%H:%M:%S")
+
     async def get_historical_data(
         self,
         symbol: str,
@@ -1345,8 +1625,7 @@ class IBKRClient:
             # 获取IB实例
             ib = self.ib
             if not ib or not ib.isConnected():
-                ibkr_logger.error(f"IBKR connection lost for historical data: {symbol}")
-                return pd.DataFrame()
+                raise IBKRConnectionError(f"IBKR connection lost for historical data: {symbol}")
 
             # MNQ是期货合约
             if symbol.upper() in INDEX_FUTURE_SYMBOLS:
@@ -1354,17 +1633,23 @@ class IBKRClient:
             else:
                 contract = self.get_stock_contract(symbol, exchange)
 
-            qualified = await ib.qualifyContractsAsync(contract)
-            if not qualified:
+            # Connection recovered – reset throttling for this symbol
+            self._clear_historical_connection_loss(symbol)
+
+            qualified_contract = await self._qualify_contract(
+                contract,
+                symbol=symbol,
+                exchange=getattr(contract, "exchange", exchange) or exchange,
+                currency=getattr(contract, "currency", "USD") or "USD",
+                ib_instance=ib,
+            )
+            if not qualified_contract:
                 ibkr_logger.error(f"Failed to qualify contract for {symbol}")
                 return None
-            qc = qualified[0]
+            qc = qualified_contract
             end_value = ''
             if end_datetime is not None:
-                if isinstance(end_datetime, datetime):
-                    end_value = end_datetime.astimezone(NY_TZ).strftime("%Y%m%d %H:%M:%S")
-                else:
-                    end_value = str(end_datetime)
+                end_value = self._format_ib_end_datetime(end_datetime)
 
             duration_str = (duration or '') if duration is not None else ''
             if bars is not None:
@@ -1412,6 +1697,10 @@ class IBKRClient:
             df = pd.DataFrame(data)
             ibkr_logger.info(f"Retrieved {len(df)} historical data points for {symbol}")
             return df
+        except IBKRConnectionError as exc:
+            if self._should_log_historical_connection_loss(symbol):
+                ibkr_logger.error(str(exc))
+            return pd.DataFrame()
         except Exception as e:
             ibkr_logger.error(f"Failed to get historical data for {symbol}: {e}")
             return pd.DataFrame()

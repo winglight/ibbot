@@ -231,6 +231,55 @@ def test_market_snapshot_available_via_rest() -> None:
         assert "price_updates" in health
 
 
+def test_market_snapshot_populated_from_cache_when_missing_runtime_state() -> None:
+    redis = FakeRedis()
+    repository = RecordingRepository()
+    runtime = _build_runtime(redis, repository, symbols=["M2K"])
+
+    timestamp = datetime.now(timezone.utc).replace(microsecond=0)
+    price_snapshot = {
+        "symbol": "M2K",
+        "bid": 198.5,
+        "ask": 199.1,
+        "last": 198.9,
+        "bid_size": 12,
+        "ask_size": 8,
+        "volume": 1234,
+        "mid": 198.8,
+        "timestamp": timestamp.isoformat(),
+    }
+    dom_snapshot = {
+        "symbol": "M2K",
+        "timestamp": timestamp.isoformat(),
+        "bids": [{"level": 0, "price": 197.5, "size": 3}],
+        "asks": [],
+    }
+    asyncio.run(
+        redis.hset(
+            "hash:market:snapshot:M2K",
+            mapping={
+                **price_snapshot,
+                "dom": json.dumps(dom_snapshot),
+                "dom_updated_at": timestamp.isoformat(),
+            },
+        )
+    )
+
+    with _start_client(runtime) as client:
+        response = client.get("/market/M2K")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["symbol"] == "M2K"
+    price = payload.get("price") or {}
+    assert price.get("bid") == pytest.approx(198.5)
+    assert price.get("ask") == pytest.approx(199.1)
+    dom = payload.get("dom") or {}
+    bids = dom.get("bids") or []
+    assert bids and bids[0]["price"] == pytest.approx(197.5)
+    assert payload.get("updated_at")
+
+
 def test_market_websocket_broadcasts_updates() -> None:
     redis = FakeRedis()
     repository = RecordingRepository()
