@@ -9,12 +9,17 @@
             "name": "Python Debugger: Current File",
             "type": "debugpy",
             "request": "launch",
-            "program": "${currentFile}",
+            "program": "${file}",
             "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "python": "${command:python.interpreterPath}",
+            "envFile": "${workspaceFolder}/.env.local",
             "env": {
                 "WEB_PORT": "8005",
-                "DEBUG": "true"
-            }
+                "DEBUG": "true",
+                "PYTHONPATH": "${workspaceFolder}"
+            },
+            "justMyCode": false
         },
         {
             "name": "Debug FastAPI (Uvicorn)",
@@ -22,13 +27,19 @@
             "request": "launch",
             "module": "uvicorn",
             "args": [
-                "services.market_data.main:app",  
-                "--port", "8020",
-                "--reload"                   
+                "services.orders.main:app",
+                "--port", "8050",
+                "--reload"
             ],
-            "jinja": true,                  
-            "console": "integratedTerminal" 
+            "cwd": "${workspaceFolder}",
+            "python": "${command:python.interpreterPath}",
+            "envFile": "${workspaceFolder}/.env.local",
+            "jinja": true,
+            "console": "integratedTerminal",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
             }
+        }
 
     ]
 }
