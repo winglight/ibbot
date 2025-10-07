@@ -10,13 +10,15 @@
             this.strategyDetailsState = this.createEmptyStrategyDetailsState();
             this.strategyDetailsTabListenerBound = false;
             this.currentStrategyDetails = null;
+            this.performanceViewState = this.createEmptyPerformanceViewState();
         }
 
         getManagedProperties() {
             return [
                 'strategyDetailsState',
                 'strategyDetailsTabListenerBound',
-                'currentStrategyDetails'
+                'currentStrategyDetails',
+                'performanceViewState',
             ];
         }
 
@@ -39,6 +41,17 @@
             };
         }
 
+        createEmptyPerformanceViewState() {
+            return {
+                selection: {
+                    range: '1d',
+                    start: null,
+                    end: null,
+                },
+                lastSnapshot: null,
+            };
+        }
+
         async openStrategyDetails(name) {
             try {
                 this.prepareStrategyDetailsModal(name);
@@ -56,6 +69,7 @@
         initializeStrategyDetailsState(name) {
             this.strategyDetailsState = this.createEmptyStrategyDetailsState();
             this.strategyDetailsState.name = name;
+            this.performanceViewState = this.createEmptyPerformanceViewState();
         }
 
         prepareStrategyDetailsModal(name) {
@@ -135,6 +149,8 @@
                 const el = document.getElementById(id);
                 if (el) el.textContent = '--';
             });
+            this.rememberPerformanceSelection('1d', null, null);
+            this.updatePerformanceMeta();
 
             const customSection = document.getElementById('customRangeSection');
             if (customSection) customSection.style.display = 'none';
@@ -900,6 +916,7 @@
                     end = null;
                 }
             }
+            this.rememberPerformanceSelection(range, start, end);
             await this.app?.loadStrategyPerformance?.(name, { range, start, end });
         }
 
@@ -947,6 +964,240 @@
             } else {
                 container.innerHTML = '<p class="text-muted">API examples are only available for external strategies.</p>';
             }
+        }
+
+        rememberPerformanceSelection(range, start, end) {
+            if (!this.performanceViewState) {
+                this.performanceViewState = this.createEmptyPerformanceViewState();
+            }
+            const selection = this.performanceViewState.selection || {};
+            selection.range = (range || '');
+            selection.start = start || null;
+            selection.end = end || null;
+            this.performanceViewState.selection = selection;
+        }
+
+        _normaliseRange(value) {
+            if (value === null || value === undefined) return '';
+            return String(value).trim().toLowerCase();
+        }
+
+        _normaliseDateValue(value) {
+            if (value === null || value === undefined) return null;
+            if (value instanceof Date) return value.getTime();
+            if (typeof value === 'number' && Number.isFinite(value)) {
+                return value > 1e12 ? value : value * 1000;
+            }
+            const text = String(value).trim();
+            if (!text) return null;
+            const parsed = new Date(text);
+            if (Number.isNaN(parsed.getTime())) return null;
+            return parsed.getTime();
+        }
+
+        _describePerformanceSource(source, cached) {
+            const value = typeof source === 'string' ? source.trim().toLowerCase() : '';
+            let label = '';
+            if (value === 'stream') label = 'Stream';
+            else if (value === 'service') label = 'Service';
+            else if (value === 'http') label = 'HTTP';
+            else if (value === 'cache') label = 'Cache';
+            else if (value === 'redis') label = 'Redis';
+            else if (value) label = value.toUpperCase();
+            if (cached) {
+                if (label && label.toLowerCase() !== 'cache') {
+                    return `${label} (cached)`;
+                }
+                return label || 'Cache';
+            }
+            return label;
+        }
+
+        _formatPerformanceTimestamp(value) {
+            if (value === null || value === undefined) return '--';
+            let date = null;
+            if (value instanceof Date) {
+                date = value;
+            } else if (typeof value === 'number' && Number.isFinite(value)) {
+                if (value > 1e12) {
+                    date = new Date(value);
+                } else if (value > 1e9) {
+                    date = new Date(value * 1000);
+                }
+            } else {
+                const text = String(value).trim();
+                if (!text) return '--';
+                const parsed = new Date(text);
+                if (!Number.isNaN(parsed.getTime())) {
+                    date = parsed;
+                } else {
+                    return text;
+                }
+            }
+            if (!date || Number.isNaN(date.getTime())) {
+                return String(value);
+            }
+            return date.toLocaleString();
+        }
+
+        _renderPerformanceMetrics(metrics) {
+            const ids = {
+                pnl: document.getElementById('kpiPnL'),
+                winRate: document.getElementById('kpiWinRate'),
+                maxDd: document.getElementById('kpiMaxDD'),
+                sharpe: document.getElementById('kpiSharpe'),
+                trades: document.getElementById('kpiTrades'),
+                avgDur: document.getElementById('kpiAvgDur'),
+            };
+
+            if (!metrics || typeof metrics !== 'object' || Array.isArray(metrics)) {
+                if (ids.pnl) ids.pnl.textContent = '--';
+                if (ids.winRate) ids.winRate.textContent = '--';
+                if (ids.maxDd) ids.maxDd.textContent = '--';
+                if (ids.sharpe) ids.sharpe.textContent = '--';
+                if (ids.trades) ids.trades.textContent = '--';
+                if (ids.avgDur) ids.avgDur.textContent = '--';
+                return;
+            }
+
+            const toFiniteNumber = (value, fallback = 0) => {
+                if (typeof value === 'number' && Number.isFinite(value)) return value;
+                const parsed = Number(value);
+                return Number.isFinite(parsed) ? parsed : fallback;
+            };
+
+            const totalPnl = toFiniteNumber(metrics.total_pnl);
+            const winRate = toFiniteNumber(metrics.win_rate);
+            const maxDrawdown = toFiniteNumber(metrics.max_drawdown);
+            const sharpe = toFiniteNumber(metrics.sharpe_ratio);
+            if (ids.pnl) ids.pnl.textContent = `$${totalPnl.toFixed(2)}`;
+            if (ids.winRate) ids.winRate.textContent = `${winRate.toFixed(2)}%`;
+            if (ids.maxDd) ids.maxDd.textContent = `$${maxDrawdown.toFixed(2)}`;
+            if (ids.sharpe) ids.sharpe.textContent = `${sharpe.toFixed(2)}`;
+
+            const totalExecutions = Number(metrics.total_executions ?? 0);
+            const totalCommission = Number(metrics.total_commission ?? 0);
+            const tradesDisplay = Number.isFinite(totalExecutions) ? totalExecutions : 0;
+            const commissionDisplay = Number.isFinite(totalCommission)
+                ? ` ($${totalCommission.toFixed(2)})`
+                : '';
+            if (ids.trades) ids.trades.textContent = `${tradesDisplay}${commissionDisplay}`;
+
+            const avgDurationRaw = metrics.avg_trade_duration;
+            if (ids.avgDur) {
+                ids.avgDur.textContent =
+                    typeof avgDurationRaw === 'string'
+                        ? avgDurationRaw
+                        : this.app?.formatDuration?.(avgDurationRaw ?? 0) ?? `${avgDurationRaw ?? 0}`;
+            }
+        }
+
+        _selectionMatchesPayload(payload, selection) {
+            if (!selection) return true;
+            const selectionRange = this._normaliseRange(selection.range);
+            const payloadRange = this._normaliseRange(payload?.range);
+
+            if (selectionRange && payloadRange && selectionRange !== 'custom' && payloadRange !== selectionRange) {
+                return false;
+            }
+
+            if (selectionRange === 'custom') {
+                const tolerance = 60 * 1000;
+                const selectionStart = this._normaliseDateValue(selection.start);
+                const selectionEnd = this._normaliseDateValue(selection.end);
+                const payloadStart = this._normaliseDateValue(payload?.start || payload?.start_date);
+                const payloadEnd = this._normaliseDateValue(payload?.end || payload?.end_date);
+                if (selectionStart !== null && payloadStart !== null && Math.abs(selectionStart - payloadStart) > tolerance) {
+                    return false;
+                }
+                if (selectionEnd !== null && payloadEnd !== null && Math.abs(selectionEnd - payloadEnd) > tolerance) {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        updatePerformanceMeta(meta = null) {
+            const sourceEl = document.getElementById('performanceMetaSource');
+            const timeEl = document.getElementById('performanceMetaTimestamp');
+            if (!sourceEl || !timeEl) return;
+
+            let highlight = false;
+            let sourceText = 'Source: --';
+            let timestampText = 'Updated: --';
+
+            if (meta) {
+                const label = this._describePerformanceSource(meta.source, meta.cached);
+                if (label) {
+                    sourceText = `Source: ${label}`;
+                }
+                if (meta.timestamp) {
+                    timestampText = `Updated: ${this._formatPerformanceTimestamp(meta.timestamp)}`;
+                } else if (meta.error) {
+                    timestampText = `Updated: ${meta.error}`;
+                }
+                highlight = !!(meta.cached || meta.stale);
+            }
+
+            sourceEl.textContent = sourceText;
+            timeEl.textContent = timestampText;
+            sourceEl.classList.toggle('text-warning', highlight);
+            timeEl.classList.toggle('text-warning', highlight);
+        }
+
+        applyPerformanceSnapshot(payload, options = {}) {
+            if (!payload || payload.type !== 'strategy_performance') {
+                return false;
+            }
+
+            const targetName = this.strategyDetailsState?.name || this.currentStrategyDetails;
+            const payloadName = (payload.name || '').trim();
+            if (payloadName && targetName && payloadName.toLowerCase() !== targetName.toLowerCase()) {
+                return false;
+            }
+
+            if (!this.performanceViewState) {
+                this.performanceViewState = this.createEmptyPerformanceViewState();
+            }
+
+            const selection = this.performanceViewState.selection || {};
+            const allowRangeMismatch = options?.allowRangeMismatch || false;
+
+            if (payload.success && !allowRangeMismatch && !this._selectionMatchesPayload(payload, selection)) {
+                return false;
+            }
+
+            if (!payload.success) {
+                this._renderPerformanceMetrics(null);
+            } else {
+                this._renderPerformanceMetrics(payload.metrics);
+            }
+
+            this.updatePerformanceMeta({
+                source: payload.source,
+                timestamp: payload.timestamp,
+                cached: payload.cached,
+                stale: payload.stale,
+                error: payload.success ? null : (payload.error || payload.detail || 'Unavailable'),
+            });
+
+            this.performanceViewState.lastSnapshot = payload;
+            if (allowRangeMismatch && payload.range) {
+                selection.range = payload.range;
+            }
+            if (allowRangeMismatch && (payload.start || payload.start_date)) {
+                selection.start = payload.start || payload.start_date;
+            }
+            if (allowRangeMismatch && (payload.end || payload.end_date)) {
+                selection.end = payload.end || payload.end_date;
+            }
+            this.performanceViewState.selection = selection;
+            return true;
+        }
+
+        applyPerformanceMessage(payload) {
+            return this.applyPerformanceSnapshot(payload, { allowRangeMismatch: false });
         }
     }
 

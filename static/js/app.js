@@ -788,10 +788,14 @@ class TradingApp {
     }
 
     handleStrategyPerformanceMessage(message) {
-        if (!this.strategiesManager || typeof this.strategiesManager.handleStrategyPerformanceMessage !== 'function') {
-            return false;
+        let handled = false;
+        if (this.strategiesManager && typeof this.strategiesManager.handleStrategyPerformanceMessage === 'function') {
+            handled = this.strategiesManager.handleStrategyPerformanceMessage(message) || handled;
         }
-        return this.strategiesManager.handleStrategyPerformanceMessage(message);
+        if (this.strategyDetailsController && typeof this.strategyDetailsController.applyPerformanceMessage === 'function') {
+            handled = this.strategyDetailsController.applyPerformanceMessage(message) || handled;
+        }
+        return handled;
     }
 
     handleRiskRulesMessage(payload) {
@@ -4514,36 +4518,88 @@ class TradingApp {
             if (start) params.set('start', start);
             if (end) params.set('end', end);
             const res = await this.apiCall(`/strategies/${encodeURIComponent(name)}/performance?${params.toString()}`);
-            if (!res.success) return;
-            const m = res.metrics || {};
-            const el = (id) => document.getElementById(id);
-            const toFiniteNumber = (value, fallback = 0) => {
-                if (typeof value === 'number' && Number.isFinite(value)) {
-                    return value;
-                }
-                const parsed = Number(value);
-                return Number.isFinite(parsed) ? parsed : fallback;
+
+            const payload = {
+                type: 'strategy_performance',
+                success: !!(res && res.success),
+                name,
+                range,
+                start,
+                end,
+                metrics: (res && (res.metrics || res.data)) || {},
+                stats: res && res.stats ? res.stats : null,
+                source: (res && res.source) || 'http',
+                timestamp: (res && (res.timestamp || res.generated_at || res.updated_at)) || null,
             };
-            const totalPnl = toFiniteNumber(m.total_pnl);
-            const winRate = toFiniteNumber(m.win_rate);
-            const maxDrawdown = toFiniteNumber(m.max_drawdown);
-            const sharpe = toFiniteNumber(m.sharpe_ratio);
-            el('kpiPnL').textContent = `$${totalPnl.toFixed(2)}`;
-            el('kpiWinRate').textContent = `${winRate.toFixed(2)}%`;
-            el('kpiMaxDD').textContent = `$${maxDrawdown.toFixed(2)}`;
-            el('kpiSharpe').textContent = `${sharpe.toFixed(2)}`;
-            const totalExecutions = Number(m.total_executions ?? 0);
-            const totalCommission = Number(m.total_commission ?? 0);
-            const tradesDisplay = Number.isFinite(totalExecutions) ? totalExecutions : 0;
-            const commissionDisplay = Number.isFinite(totalCommission)
-                ? ` ($${totalCommission.toFixed(2)})`
-                : '';
-            el('kpiTrades').textContent = `${tradesDisplay}${commissionDisplay}`;
-            const avgDurationRaw = m.avg_trade_duration;
-            el('kpiAvgDur').textContent =
-                typeof avgDurationRaw === 'string'
-                    ? avgDurationRaw
-                    : this.formatDuration(avgDurationRaw ?? 0);
+
+            let applied = false;
+            if (this.strategyDetailsController && typeof this.strategyDetailsController.applyPerformanceSnapshot === 'function') {
+                applied = this.strategyDetailsController.applyPerformanceSnapshot(payload, { allowRangeMismatch: true });
+            }
+
+            const updateCardsFallback = () => {
+                const metrics = payload.metrics && typeof payload.metrics === 'object' ? payload.metrics : {};
+                const el = (id) => document.getElementById(id);
+                const toFiniteNumber = (value, fallback = 0) => {
+                    if (typeof value === 'number' && Number.isFinite(value)) {
+                        return value;
+                    }
+                    const parsed = Number(value);
+                    return Number.isFinite(parsed) ? parsed : fallback;
+                };
+                const totalPnl = toFiniteNumber(metrics.total_pnl);
+                const winRate = toFiniteNumber(metrics.win_rate);
+                const maxDrawdown = toFiniteNumber(metrics.max_drawdown);
+                const sharpe = toFiniteNumber(metrics.sharpe_ratio);
+                const pnlEl = el('kpiPnL');
+                const winRateEl = el('kpiWinRate');
+                const maxDdEl = el('kpiMaxDD');
+                const sharpeEl = el('kpiSharpe');
+                if (!payload.success) {
+                    if (pnlEl) pnlEl.textContent = '--';
+                    if (winRateEl) winRateEl.textContent = '--';
+                    if (maxDdEl) maxDdEl.textContent = '--';
+                    if (sharpeEl) sharpeEl.textContent = '--';
+                } else {
+                    if (pnlEl) pnlEl.textContent = `$${totalPnl.toFixed(2)}`;
+                    if (winRateEl) winRateEl.textContent = `${winRate.toFixed(2)}%`;
+                    if (maxDdEl) maxDdEl.textContent = `$${maxDrawdown.toFixed(2)}`;
+                    if (sharpeEl) sharpeEl.textContent = `${sharpe.toFixed(2)}`;
+                }
+                const totalExecutions = Number(metrics.total_executions ?? 0);
+                const totalCommission = Number(metrics.total_commission ?? 0);
+                const tradesDisplay = Number.isFinite(totalExecutions) ? totalExecutions : 0;
+                const commissionDisplay = Number.isFinite(totalCommission)
+                    ? ` ($${totalCommission.toFixed(2)})`
+                    : '';
+                const tradesEl = el('kpiTrades');
+                if (tradesEl) {
+                    tradesEl.textContent = payload.success ? `${tradesDisplay}${commissionDisplay}` : '--';
+                }
+                const avgDurationRaw = metrics.avg_trade_duration;
+                const avgEl = el('kpiAvgDur');
+                if (avgEl) {
+                    if (!payload.success) {
+                        avgEl.textContent = '--';
+                    } else {
+                        avgEl.textContent =
+                            typeof avgDurationRaw === 'string'
+                                ? avgDurationRaw
+                                : this.formatDuration(avgDurationRaw ?? 0);
+                    }
+                }
+            };
+
+            if (!payload.success) {
+                if (!applied) {
+                    updateCardsFallback();
+                }
+                return;
+            }
+
+            if (!applied) {
+                updateCardsFallback();
+            }
 
             // Charts from executions over selected range
             const executionLimit = Math.max(this.strategyExecutionsDefaultLimit, this.executionsPagination.pageSize || 0);

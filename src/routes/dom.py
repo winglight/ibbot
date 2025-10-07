@@ -1,7 +1,9 @@
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
+
 import asyncio
-import inspect
 import json
+import time
+from datetime import datetime
 
 from fastapi import (
     APIRouter,
@@ -205,6 +207,73 @@ async def ack_alert(
 async def dom_ws(websocket: WebSocket, symbol: str):
     await websocket.accept()
 
+    loop = asyncio.get_running_loop()
+    symbol_arg = symbol
+    symbol_key = (symbol_arg or "").upper()
+    update_queue: asyncio.Queue[tuple[Optional[Dict[str, Any]], Any]] = asyncio.Queue(maxsize=1)
+
+    def _resolve_timestamp(metrics: Optional[Dict[str, Any]]) -> int:
+        now_ms = int(time.time() * 1000)
+        if not isinstance(metrics, dict):
+            return now_ms
+
+        def _coerce(value: Any) -> Optional[int]:
+            if isinstance(value, (int, float)):
+                if value > 1e15:
+                    return int(value / 1_000_000)
+                if value > 1e12:
+                    return int(value / 1_000)
+                if value > 1e10:
+                    return int(value)
+                return int(value * 1000)
+            if isinstance(value, str):
+                text = value.strip()
+                if not text:
+                    return None
+                try:
+                    numeric = float(text)
+                except ValueError:
+                    try:
+                        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+                    except ValueError:
+                        return None
+                    else:
+                        return int(parsed.timestamp() * 1000)
+                else:
+                    return _coerce(numeric)
+            return None
+
+        for key in ("timestamp_ms", "timestamp", "timestamp_ns", "ts_ns", "time"):
+            if key not in metrics:
+                continue
+            value = _coerce(metrics.get(key))
+            if value is not None:
+                return value
+
+        return now_ms
+
+    async def _send_update(
+        *, metrics: Optional[Dict[str, Any]], events: Any, error: Optional[str] = None
+    ) -> None:
+        timestamp_ms = _resolve_timestamp(metrics)
+        payload_body: Dict[str, Any] = {"metrics": metrics, "events": events}
+        if error is not None:
+            payload_body["error"] = error
+
+        payload_data = payload_body.copy()
+        payload_data["timestamp"] = timestamp_ms
+        payload_data["timestamp_ms"] = timestamp_ms
+        message: Dict[str, Any] = {
+            "type": "dom_update",
+            "symbol": symbol,
+            "timestamp": timestamp_ms,
+            "timestamp_ms": timestamp_ms,
+            **payload_body,
+        }
+        message["payload"] = payload_data
+
+        await websocket.send_json(message)
+
     def _make_signature(value: Any) -> Optional[str]:
         if value is None:
             return None
@@ -215,76 +284,98 @@ async def dom_ws(websocket: WebSocket, symbol: str):
         except (TypeError, ValueError):
             return repr(value)
 
-    last_metrics_signature: Optional[str] = None
-    last_events_signature: Optional[str] = None
-    last_error: Optional[str] = None
-    try:
+    def _get_events() -> Any:
+        provider = dom_service.get_events
+        try:
+            return provider(symbol_arg)
+        except TypeError:
+            return provider()
+
+    async def _enqueue_update(metrics: Optional[Dict[str, Any]], events: Any) -> None:
         while True:
-            metrics = dom_service.get_metrics(symbol)
-
-            events_provider = dom_service.get_events
-            events: Any
             try:
-                provider_signature = inspect.signature(events_provider)
-            except (TypeError, ValueError):
-                provider_signature = None
+                update_queue.get_nowait()
+                update_queue.task_done()
+            except asyncio.QueueEmpty:
+                break
+        await update_queue.put((metrics, events))
 
-            if provider_signature:
-                accepts_positional = any(
-                    param.kind in (
-                        inspect.Parameter.POSITIONAL_ONLY,
-                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                        inspect.Parameter.VAR_POSITIONAL,
-                    )
-                    for param in provider_signature.parameters.values()
-                )
-                if accepts_positional:
-                    events = events_provider(symbol)
-                else:
-                    events = events_provider()
+    def _listener(event_symbol: str, metrics: Dict[str, Any], _snapshot: Dict[str, Any]) -> None:
+        if symbol_key and event_symbol.upper() != symbol_key:
+            return
+
+        metrics_copy = dict(metrics) if metrics else None
+        events = _get_events()
+
+        try:
+            asyncio.run_coroutine_threadsafe(
+                _enqueue_update(metrics_copy, events),
+                loop,
+            )
+        except RuntimeError:
+            # Event loop likely closed; ignore and let websocket exit.
+            pass
+
+    listener_registered = False
+
+    try:
+        dom_service.add_listener(_listener)
+        listener_registered = True
+
+        last_metrics_signature: Optional[str] = None
+        last_events_signature: Optional[str] = None
+        last_error: Optional[str] = None
+
+        initial_metrics = dom_service.get_metrics(symbol_arg)
+        initial_events = _get_events()
+        await _enqueue_update(initial_metrics, initial_events)
+
+        while True:
+            try:
+                metrics, events = await asyncio.wait_for(update_queue.get(), timeout=1.0)
+            except asyncio.TimeoutError:
+                metrics = dom_service.get_metrics(symbol_arg)
+                events = _get_events()
             else:
-                try:
-                    events = events_provider(symbol)
-                except TypeError:
-                    events = events_provider()
+                update_queue.task_done()
 
             metrics_signature = _make_signature(metrics)
             events_signature = _make_signature(events)
 
             if metrics_signature and metrics_signature != last_metrics_signature:
-                await websocket.send_json(
-                    {
-                        "symbol": symbol,
-                        "metrics": metrics,
-                        "events": events,
-                    }
-                )
+                await _send_update(metrics=metrics, events=events)
                 last_metrics_signature = metrics_signature
                 last_events_signature = events_signature
                 last_error = None
-            else:
+                continue
+
+            if events_signature != last_events_signature:
+                await _send_update(
+                    metrics=metrics if metrics_signature else None,
+                    events=events,
+                )
+                last_events_signature = events_signature
                 if not metrics_signature:
-                    error_message = "DOM metrics unavailable"
-                else:
-                    error_message = "DOM metrics stale: no new data received"
+                    last_metrics_signature = None
+                last_error = None
+                continue
 
-                if last_error != error_message or events_signature != last_events_signature:
-                    await websocket.send_json(
-                        {
-                            "symbol": symbol,
-                            "metrics": None,
-                            "events": events,
-                            "error": error_message,
-                        }
-                    )
-                    last_error = error_message
-                    last_events_signature = events_signature
-                    if not metrics_signature:
-                        last_metrics_signature = None
+            if not metrics_signature:
+                error_message = "DOM metrics unavailable"
+            else:
+                error_message = "DOM metrics stale: no new data received"
 
-            await asyncio.sleep(1.0)
+            if last_error != error_message:
+                await _send_update(metrics=None, events=events, error=error_message)
+                last_error = error_message
+                last_events_signature = events_signature
+                if not metrics_signature:
+                    last_metrics_signature = None
     except WebSocketDisconnect:
         return
+    finally:
+        if listener_registered:
+            dom_service.remove_listener(_listener)
 
 
 @router.get("/api/dom/history/{symbol}")

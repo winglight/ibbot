@@ -10,6 +10,9 @@
             this.refreshIntervalMs = 15000;
             this.strategyPerformanceCells = new Map();
             this.strategyPerformanceCache = new Map();
+            this.strategyPerformanceTableRange = '1m';
+            this.strategyRowElements = new Map();
+            this.strategyStatusCache = new Map();
             this.strategyReceptionSwitchSeq = 0;
             this.strategyDataPushBusy = new Set();
             this.strategyToggleBusy = new Set();
@@ -50,6 +53,8 @@
             return [
                 'strategyPerformanceCells',
                 'strategyPerformanceCache',
+                'strategyRowElements',
+                'strategyStatusCache',
                 'strategyReceptionSwitchSeq',
                 'strategyDataPushBusy',
                 'strategyToggleBusy',
@@ -138,6 +143,170 @@
                 ...strategy,
                 strategy_type: type,
             };
+        }
+
+        normalizeStrategyName(name) {
+            if (typeof name !== 'string') {
+                return '';
+            }
+            return name.trim();
+        }
+
+        copyObject(value) {
+            if (!value || typeof value !== 'object') {
+                return {};
+            }
+            if (Array.isArray(value)) {
+                return value.slice();
+            }
+            return { ...value };
+        }
+
+        findStrategyEntry(name) {
+            if (!Array.isArray(this.strategies) || !name) {
+                return null;
+            }
+            const target = this.normalizeStrategyName(name);
+            for (let i = 0; i < this.strategies.length; i += 1) {
+                const candidate = this.strategies[i];
+                if (candidate && this.normalizeStrategyName(candidate.name) === target) {
+                    return candidate;
+                }
+            }
+            return null;
+        }
+
+        mergeStrategyStatus(strategy, status, payload = {}) {
+            if (!strategy || typeof strategy !== 'object') return;
+            if (!status || typeof status !== 'object') return;
+
+            strategy.status = this.copyObject(status);
+
+            if (typeof status.enabled === 'boolean') {
+                strategy.enabled = !!status.enabled;
+            }
+
+            if (typeof status.symbol === 'string' && status.symbol.trim()) {
+                strategy.symbol = status.symbol;
+            }
+
+            const dataPush = (status.data_push && typeof status.data_push === 'object')
+                ? this.copyObject(status.data_push)
+                : null;
+
+            if (dataPush) {
+                strategy.data_push_state = {
+                    ...(strategy.data_push_state && typeof strategy.data_push_state === 'object'
+                        ? strategy.data_push_state
+                        : {}),
+                    ...dataPush,
+                };
+            }
+
+            const existingReception = (strategy.data_reception && typeof strategy.data_reception === 'object')
+                ? { ...strategy.data_reception }
+                : {};
+
+            const dataPushReason = typeof status.data_push_reason === 'string'
+                ? status.data_push_reason
+                : (dataPush && typeof dataPush.status_reason === 'string'
+                    ? dataPush.status_reason
+                    : (typeof strategy.data_push_reason === 'string' ? strategy.data_push_reason : ''));
+
+            if (dataPushReason || dataPushReason === '') {
+                strategy.data_push_reason = dataPushReason;
+            }
+
+            if (dataPush) {
+                if (typeof dataPush.active !== 'undefined') {
+                    existingReception.active = !!dataPush.active;
+                }
+                if (typeof dataPush.awaiting_data !== 'undefined') {
+                    existingReception.awaiting_data = !!dataPush.awaiting_data;
+                }
+                if (typeof dataPush.status_reason === 'string') {
+                    existingReception.status_reason = dataPush.status_reason;
+                } else if (dataPushReason) {
+                    existingReception.status_reason = dataPushReason;
+                }
+                if (dataPush.subscription !== undefined) {
+                    existingReception.subscription = dataPush.subscription;
+                }
+                if (dataPush.symbol !== undefined) {
+                    existingReception.symbol = dataPush.symbol;
+                }
+                if (dataPush.last_data_timestamp !== undefined) {
+                    existingReception.last_data_timestamp = dataPush.last_data_timestamp;
+                }
+            }
+
+            if (status.subscription !== undefined) {
+                existingReception.subscription = status.subscription;
+            }
+            if (status.symbol !== undefined) {
+                existingReception.symbol = status.symbol;
+            }
+            if (status.last_data_timestamp !== undefined) {
+                existingReception.last_data_timestamp = status.last_data_timestamp;
+            }
+
+            if (payload && payload.timestamp && !existingReception.last_data_timestamp) {
+                existingReception.last_data_timestamp = payload.timestamp;
+            }
+
+            strategy.data_reception = existingReception;
+
+            if (typeof status.is_receiving_data !== 'undefined') {
+                strategy.is_receiving_data = !!status.is_receiving_data;
+            } else if (dataPush) {
+                if (dataPush.active && !dataPush.awaiting_data) {
+                    strategy.is_receiving_data = true;
+                } else if (!dataPush.active) {
+                    strategy.is_receiving_data = false;
+                }
+            }
+        }
+
+        refreshStrategyRow(strategy) {
+            if (!strategy || !strategy.name) return false;
+            const entry = this.strategyRowElements.get(strategy.name);
+            if (!entry) return false;
+
+            if (entry.statusInput) {
+                entry.statusInput.checked = !!strategy.enabled;
+            }
+
+            const resolvedSymbol = this.resolveStrategySymbol(strategy);
+            if (entry.symbolCell) {
+                entry.symbolCell.textContent = resolvedSymbol || '-';
+                if (resolvedSymbol) {
+                    entry.symbolCell.title = resolvedSymbol;
+                } else {
+                    entry.symbolCell.removeAttribute('title');
+                }
+            }
+
+            const receptionInfo = this.formatStrategyDataReception(strategy);
+            if (entry.receptionSwitch) {
+                entry.receptionSwitch.checked = !!receptionInfo.active;
+                entry.receptionSwitch.disabled = !!receptionInfo.toggleDisabled;
+                if (receptionInfo.toggleDisabled && receptionInfo.reason) {
+                    entry.receptionSwitch.title = receptionInfo.reason;
+                } else {
+                    entry.receptionSwitch.removeAttribute('title');
+                }
+            }
+            if (entry.receptionDetail) {
+                entry.receptionDetail.textContent = receptionInfo.text || '-';
+                if (receptionInfo.tooltip) {
+                    entry.receptionDetail.title = receptionInfo.tooltip;
+                } else {
+                    entry.receptionDetail.removeAttribute('title');
+                }
+            }
+
+            entry.strategy = strategy;
+            return true;
         }
 
         getStrategyExecutionsCacheKey(name, limit) {
@@ -238,33 +407,268 @@
         }
 
         handleStrategyPerformanceMessage(message) {
-            if (!message || !message.name) return false;
-            const entry = this.strategyPerformanceCells.get(message.name);
-            if (!entry) return false;
+            if (!message || typeof message !== 'object') return false;
+            const name = typeof message.name === 'string' ? message.name.trim() : '';
+            if (!name) return false;
 
-            const { pnlCell, tradesCell } = entry;
-            if (!pnlCell || !tradesCell) return true;
+            const range = this.normalizePerformanceRange(message.range);
+            const expectedRange = this.getStrategyPerformanceTableRange();
+            if (range && expectedRange && range !== expectedRange) {
+                return false;
+            }
+
+            const cells = this.strategyPerformanceCells.get(name);
+
             if (!message.success) {
-                const err = message?.error || '';
-                if (typeof err === 'string' && err.toLowerCase().includes('rate')) {
-                    return true;
-                }
-                if (!this.strategyPerformanceCache.has(message.name)) {
-                    pnlCell.textContent = '-';
-                    tradesCell.textContent = '-';
-                }
+                this.applyPerformanceErrorToCells(name, cells, message);
                 return true;
             }
 
-            const metrics = message.metrics || {};
-            const totalPnL = Number(metrics.total_pnl ?? 0);
-            const totalExec = Number(metrics.total_executions ?? 0);
-            const formattedPnL = `$${(Number.isFinite(totalPnL) ? totalPnL : 0).toFixed(2)}`;
-            const formattedTrades = `${Math.max(0, Math.floor((Number.isFinite(totalExec) ? totalExec : 0) / 2))}`;
-            pnlCell.textContent = formattedPnL;
-            tradesCell.textContent = formattedTrades;
-            this.strategyPerformanceCache.set(message.name, { pnl: formattedPnL, trades: formattedTrades });
+            const entry = this.buildStrategyPerformanceEntry(name, message, expectedRange || range || '');
+            if (!entry) {
+                return false;
+            }
+
+            this.strategyPerformanceCache.set(name, entry);
+            if (cells) {
+                this.applyPerformanceEntryToCells(cells, entry);
+            }
             return true;
+        }
+
+        getStrategyPerformanceTableRange() {
+            const value = this.strategyPerformanceTableRange;
+            if (typeof value !== 'string') {
+                return '';
+            }
+            const trimmed = value.trim().toLowerCase();
+            return trimmed || '';
+        }
+
+        normalizePerformanceRange(range) {
+            if (typeof range !== 'string') {
+                return '';
+            }
+            const trimmed = range.trim().toLowerCase();
+            return trimmed || '';
+        }
+
+        buildStrategyPerformanceEntry(name, message, expectedRange) {
+            if (!message || typeof message !== 'object') {
+                return null;
+            }
+
+            const metrics = (message.metrics && typeof message.metrics === 'object') ? message.metrics : {};
+            const totalPnLValue = Number(
+                metrics.total_pnl
+                ?? metrics.pnl
+                ?? metrics.totalPnL
+                ?? 0
+            );
+            const executionsValue = Number(
+                metrics.total_executions
+                ?? metrics.totalExecutions
+                ?? metrics.executions
+                ?? metrics.total_trades
+                ?? metrics.totalTrades
+                ?? metrics.trades
+                ?? metrics.count
+                ?? 0
+            );
+
+            const pnlNumber = Number.isFinite(totalPnLValue) ? totalPnLValue : 0;
+            const executionNumber = Number.isFinite(executionsValue) ? executionsValue : 0;
+            const tradeCount = Math.max(0, Math.floor(executionNumber / 2));
+            const formattedPnL = `$${pnlNumber.toFixed(2)}`;
+            const formattedTrades = `${tradeCount}`;
+
+            const meta = this.buildStrategyPerformanceMeta(message);
+            const rangeValue = this.normalizePerformanceRange(expectedRange || message.range);
+
+            const entry = {
+                name,
+                range: rangeValue,
+                pnl: formattedPnL,
+                trades: formattedTrades,
+                source: meta.source || '',
+                timestamp: meta.timestampIso || '',
+                metaText: meta.text || '--',
+                metaTooltip: meta.tooltip || '',
+                timestampRaw: meta.rawTimestamp ?? null,
+            };
+
+            if (message.stats && typeof message.stats === 'object') {
+                entry.stats = message.stats;
+            }
+
+            return entry;
+        }
+
+        buildStrategyPerformanceMeta(message) {
+            const sourceLabel = this.formatPerformanceSource(message?.source);
+            const timestampInfo = this.formatPerformanceTimestamp(message?.timestamp);
+
+            const parts = [];
+            if (sourceLabel) {
+                parts.push(sourceLabel);
+            }
+            if (timestampInfo.text && timestampInfo.text !== '--') {
+                parts.push(timestampInfo.text);
+            }
+            const text = parts.length > 0
+                ? parts.join(' · ')
+                : (sourceLabel || timestampInfo.text || '--');
+
+            const tooltipParts = [];
+            if (sourceLabel) {
+                tooltipParts.push(`Source: ${sourceLabel}`);
+            }
+            if (timestampInfo.tooltip) {
+                tooltipParts.push(`Updated: ${timestampInfo.tooltip}`);
+            }
+
+            return {
+                source: sourceLabel,
+                text: text || '--',
+                tooltip: tooltipParts.join('\n') || '',
+                timestampIso: timestampInfo.iso || '',
+                rawTimestamp: message?.timestamp ?? null,
+            };
+        }
+
+        formatPerformanceSource(source) {
+            if (typeof source !== 'string') {
+                return '';
+            }
+            const trimmed = source.trim();
+            if (!trimmed) {
+                return '';
+            }
+            const lower = trimmed.toLowerCase();
+            switch (lower) {
+                case 'stream':
+                    return 'Stream';
+                case 'cache':
+                    return 'Cache';
+                case 'service':
+                    return 'Service';
+                case 'snapshot':
+                    return 'Snapshot';
+                default:
+                    return trimmed.charAt(0).toUpperCase() + trimmed.slice(1);
+            }
+        }
+
+        formatPerformanceTimestamp(value) {
+            if (value === null || value === undefined || value === '') {
+                return { text: '--', tooltip: '', iso: '' };
+            }
+
+            let date;
+            if (value instanceof Date) {
+                date = value;
+            } else {
+                const parsed = new Date(value);
+                if (Number.isNaN(parsed.getTime())) {
+                    const textValue = String(value);
+                    return { text: textValue, tooltip: textValue, iso: '' };
+                }
+                date = parsed;
+            }
+
+            const iso = date.toISOString();
+            let displayText;
+            try {
+                const sameDay = typeof this.app?.isSameDay === 'function'
+                    ? this.app.isSameDay(date, new Date())
+                    : false;
+                displayText = sameDay
+                    ? date.toLocaleTimeString('zh-CN', { hour12: false })
+                    : date.toLocaleString('zh-CN', { hour12: false });
+            } catch (err) {
+                displayText = date.toLocaleString('zh-CN', { hour12: false });
+            }
+            const tooltip = date.toLocaleString('zh-CN', { hour12: false });
+            return { text: displayText, tooltip, iso };
+        }
+
+        applyPerformanceEntryToCells(cells, entry) {
+            if (!cells || !entry) {
+                return;
+            }
+            const { pnlCell, tradesCell, metaCell } = cells;
+            if (pnlCell) {
+                pnlCell.textContent = entry.pnl ?? '--';
+            }
+            if (tradesCell) {
+                tradesCell.textContent = entry.trades ?? '--';
+            }
+            if (metaCell) {
+                metaCell.textContent = entry.metaText || '--';
+                if (entry.metaTooltip) {
+                    metaCell.title = entry.metaTooltip;
+                } else {
+                    metaCell.removeAttribute('title');
+                }
+                if (entry.timestamp) {
+                    metaCell.dataset.timestamp = entry.timestamp;
+                } else {
+                    delete metaCell.dataset.timestamp;
+                }
+                if (entry.source) {
+                    metaCell.dataset.source = entry.source;
+                } else {
+                    delete metaCell.dataset.source;
+                }
+            }
+        }
+
+        applyPerformanceErrorToCells(name, cells, message) {
+            if (!cells) {
+                return;
+            }
+            if (this.strategyPerformanceCache.has(name)) {
+                return;
+            }
+            const { pnlCell, tradesCell, metaCell } = cells;
+            if (pnlCell) {
+                pnlCell.textContent = '-';
+            }
+            if (tradesCell) {
+                tradesCell.textContent = '-';
+            }
+            if (metaCell) {
+                metaCell.textContent = '--';
+                const err = message?.error ? String(message.error) : '';
+                if (err) {
+                    metaCell.title = err;
+                } else {
+                    metaCell.removeAttribute('title');
+                }
+                delete metaCell.dataset.timestamp;
+                delete metaCell.dataset.source;
+            }
+        }
+
+        populatePerformanceCellsFromCache(name, cells) {
+            const cache = this.strategyPerformanceCache.get(name);
+            const tableRange = this.getStrategyPerformanceTableRange();
+            if (!cache || (cache.range && tableRange && cache.range !== tableRange)) {
+                if (cells.pnlCell) {
+                    cells.pnlCell.textContent = '...';
+                }
+                if (cells.tradesCell) {
+                    cells.tradesCell.textContent = '...';
+                }
+                if (cells.metaCell) {
+                    cells.metaCell.textContent = '--';
+                    cells.metaCell.removeAttribute('title');
+                    delete cells.metaCell.dataset.timestamp;
+                    delete cells.metaCell.dataset.source;
+                }
+                return;
+            }
+            this.applyPerformanceEntryToCells(cells, cache);
         }
 
         handleStrategiesSnapshot(payload) {
@@ -394,7 +798,46 @@
         }
 
         handleStrategyStatusMessage(payload) {
-            return this.applyStrategyStatusPayload(payload);
+            let handled = false;
+            handled = this.applyStrategyStatusToList(payload) || handled;
+            handled = this.applyStrategyStatusPayload(payload) || handled;
+            return handled;
+        }
+
+        applyStrategyStatusToList(payload, options = {}) {
+            if (!payload || payload.type !== 'strategy_status') {
+                return false;
+            }
+
+            const name = this.normalizeStrategyName(payload.name);
+            if (!name) {
+                return false;
+            }
+
+            const updateCache = options.updateCache !== false;
+            if (updateCache && payload.success) {
+                this.strategyStatusCache.set(name, payload);
+            }
+
+            if (!payload.success) {
+                return false;
+            }
+
+            const status = payload.status && typeof payload.status === 'object'
+                ? payload.status
+                : null;
+            if (!status) {
+                return false;
+            }
+
+            const entry = this.findStrategyEntry(name);
+            if (!entry) {
+                return false;
+            }
+
+            this.mergeStrategyStatus(entry, status, payload);
+            this.refreshStrategyRow(entry);
+            return true;
         }
 
         applyStrategyStatusPayload(payload) {
@@ -1035,6 +1478,7 @@
             if (!tbody) return;
 
             tbody.innerHTML = '';
+            this.strategyRowElements.clear();
             this.strategyPerformanceCells.clear();
             const visibleStrategies = new Set();
             strategies.forEach(strategy => {
@@ -1119,18 +1563,12 @@
                 }
 
                 const pnlCell = document.createElement('td');
-                const cachedMetrics = this.strategyPerformanceCache.get(strategy.name);
-                if (cachedMetrics && typeof cachedMetrics === 'object') {
-                    pnlCell.textContent = cachedMetrics.pnl ?? '...';
-                } else {
-                    pnlCell.textContent = '...';
-                }
                 const tradesCell = document.createElement('td');
-                if (cachedMetrics && typeof cachedMetrics === 'object') {
-                    tradesCell.textContent = cachedMetrics.trades ?? '...';
-                } else {
-                    tradesCell.textContent = '...';
-                }
+                const metaCell = document.createElement('td');
+                metaCell.classList.add('small', 'text-muted');
+
+                const performanceCells = { pnlCell, tradesCell, metaCell };
+                this.populatePerformanceCellsFromCache(strategy.name, performanceCells);
 
                 row.appendChild(nameCell);
                 row.appendChild(symbolCell);
@@ -1138,13 +1576,27 @@
                 row.appendChild(receptionCell);
                 row.appendChild(pnlCell);
                 row.appendChild(tradesCell);
+                row.appendChild(metaCell);
 
                 tbody.appendChild(row);
 
-                this.strategyPerformanceCells.set(strategy.name, { pnlCell, tradesCell });
+                this.strategyRowElements.set(strategy.name, {
+                    row,
+                    statusInput,
+                    receptionSwitch,
+                    receptionDetail,
+                    symbolCell,
+                    strategy,
+                });
+                this.strategyPerformanceCells.set(strategy.name, performanceCells);
                 const ibkrManager = this.app?.ibkrManager;
                 if (ibkrManager && typeof ibkrManager.requestStrategyPerformance === 'function') {
-                    ibkrManager.requestStrategyPerformance({ name: strategy.name, range: '1m' });
+                    const payload = { name: strategy.name };
+                    const requestRange = this.getStrategyPerformanceTableRange();
+                    if (requestRange) {
+                        payload.range = requestRange;
+                    }
+                    ibkrManager.requestStrategyPerformance(payload);
                 }
             });
 
@@ -1152,6 +1604,12 @@
                 if (!visibleStrategies.has(name)) {
                     this.strategyPerformanceCache.delete(name);
                 }
+            }
+
+            if (this.strategyStatusCache && this.strategyStatusCache.size) {
+                this.strategyStatusCache.forEach((message) => {
+                    this.applyStrategyStatusToList(message, { updateCache: false });
+                });
             }
         }
 

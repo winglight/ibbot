@@ -20,17 +20,12 @@ from src.data_layer import (
     DataSubscriptionToken,
     DataSourceError,
     EventEnvelope,
-    get_data_layer_mode,
-    is_dual_mode,
-    is_legacy_mode,
-    is_unified_mode,
 )
 from src.data_layer.event_bus import BusSubscriptionToken
 from src.data_layer.bootstrap import get_data_source_manager
 from src.dom_cache import DomCacheManager
 from src.dom_dependencies import (
     dom_config,
-    depth_subscriber,
     get_dom_processor,
     set_dom_processor,
 )
@@ -653,15 +648,7 @@ class DOMService:
             return next(iter(self._processors.values()))
         return self.processor
 
-    def _is_data_layer_enabled(self) -> bool:
-        return not is_legacy_mode(get_data_layer_mode())
-
-    def _is_dual_mode_enabled(self) -> bool:
-        return is_dual_mode(get_data_layer_mode())
-
     def _ensure_data_layer_manager(self):
-        if not self._is_data_layer_enabled():
-            return None
         if self._data_layer_manager is None:
             try:
                 self._data_layer_manager = get_data_source_manager()
@@ -787,74 +774,6 @@ class DOMService:
         logger.info("Unified DOM depth stream started", symbol=symbol_key, num_rows=num_rows)
         return True
 
-    def _start_stream_blocking(
-        self, symbol: str, num_rows: int = 5, *, force_restart: bool = False
-    ) -> bool:
-        self._last_start_error = None
-        self._last_start_error_status = 200
-        symbol_key = (symbol or "").upper()
-        if not connection_manager.is_connected():
-            logger.warning(
-                "DOM depth stream start rejected - IBKR is not connected",
-                symbol=symbol_key,
-            )
-            logger.info(
-                "Connect to IBKR manually before starting DOM stream", symbol=symbol_key
-            )
-            reason = "IBKR connection not active"
-            try:
-                last_error = connection_manager.get_last_connect_error()
-                if last_error:
-                    reason = f"{reason}: {last_error}"
-            except Exception:
-                pass
-            self._last_start_error = reason
-            self._last_start_error_status = 400
-            return False
-        self._active_symbol = symbol_key or None
-        self._active_symbol_original = symbol
-        logger.info("Starting DOM depth stream", symbol=symbol_key, num_rows=num_rows)
-        callback = lambda data, sym=symbol: self._on_depth_update(sym, data)
-        start_kwargs: Dict[str, Any] = {"num_rows": num_rows}
-        try:
-            start_signature = inspect.signature(
-                getattr(depth_subscriber, "start_depth_stream")
-            )
-        except (TypeError, ValueError):
-            start_signature = None
-
-        if start_signature is None or "force_restart" in start_signature.parameters:
-            start_kwargs["force_restart"] = force_restart
-        elif force_restart:
-            logger.debug(
-                "Depth subscriber does not support force_restart; ignoring flag",
-                symbol=symbol_key,
-            )
-
-        result = depth_subscriber.start_depth_stream(
-            symbol,
-            callback,
-            **start_kwargs,
-        )
-        if result:
-            logger.info("DOM depth stream started", symbol=symbol_key)
-            self._last_start_error = None
-            self._last_start_error_status = 200
-            self._register_active_symbol(symbol_key, symbol)
-        else:
-            logger.warning("Failed to start DOM depth stream", symbol=symbol_key)
-            try:
-                last_error, status = depth_subscriber.get_last_error()
-            except Exception:
-                last_error, status = None, None
-            self._last_start_error = last_error or "Failed to start DOM depth stream"
-            if isinstance(status, int) and 100 <= status < 600:
-                self._last_start_error_status = status if status >= 400 else 500
-            else:
-                self._last_start_error_status = 500
-            self._unregister_active_symbol(symbol_key)
-        return result
-
     def ensure_stream_running(
         self,
         symbol: Optional[str],
@@ -898,19 +817,11 @@ class DOMService:
         loop = asyncio.get_running_loop()
         self._loop = loop
         self._ensure_cleanup_task(loop)
-        mode = get_data_layer_mode()
-        if not is_legacy_mode(mode):
-            result = await self._start_stream_unified(
-                symbol, num_rows, force_restart=force_restart
-            )
-            if result or not is_dual_mode(mode):
-                return result
-            logger.warning(
-                "Unified DOM stream failed in dual mode; falling back to legacy",
-                symbol=symbol,
-            )
-        return await asyncio.to_thread(
-            self._start_stream_blocking, symbol, num_rows, force_restart=force_restart
+        manager = self._ensure_data_layer_manager()
+        if manager is None:
+            return False
+        return await self._start_stream_unified(
+            symbol, num_rows, force_restart=force_restart
         )
 
     def request_stream_start(
@@ -950,12 +861,6 @@ class DOMService:
     def start(
         self, symbol: str, num_rows: int = 5, *, force_restart: bool = False
     ) -> bool:
-        if self._is_data_layer_enabled():
-            return self._run_sync_coroutine(
-                self._start_stream_unified(
-                    symbol, num_rows, force_restart=force_restart
-                )
-            )
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -963,21 +868,17 @@ class DOMService:
         else:
             self._loop = loop
         self._ensure_cleanup_task(loop)
-        return self._start_stream_blocking(symbol, num_rows, force_restart=force_restart)
+        manager = self._ensure_data_layer_manager()
+        if manager is None:
+            return False
+        return self._run_sync_coroutine(
+            self._start_stream_unified(
+                symbol, num_rows, force_restart=force_restart
+            )
+        )
 
     def get_last_start_error(self) -> tuple[Optional[str], int]:
         return self._last_start_error, self._last_start_error_status
-
-    def _stop_stream_blocking(self, symbol: str, symbol_key: Optional[str] = None) -> bool:
-        symbol_key = (symbol_key or symbol or "").upper()
-        target_symbol = symbol or self._active_symbols.get(symbol_key) or symbol_key
-        result = depth_subscriber.stop_depth_stream(target_symbol)
-        self._unregister_active_symbol(symbol_key)
-        if result:
-            logger.info("Stopped DOM depth stream", symbol=symbol_key)
-        else:
-            logger.warning("No active DOM depth stream to stop", symbol=symbol_key)
-        return result
 
     async def stop_stream(self, symbol: str) -> bool:
         symbol_key = (symbol or "").upper()
@@ -990,41 +891,25 @@ class DOMService:
             self._start_tasks.pop(symbol_key, None)
 
         removed_symbol = self._unregister_active_symbol(symbol_key)
-
-        if self._is_data_layer_enabled():
-            manager = self._ensure_data_layer_manager()
-            token = self._data_layer_tokens.pop(symbol_key, None)
-            if manager and token is not None:
-                try:
-                    await manager.unsubscribe(token)
-                except Exception as exc:  # pragma: no cover - defensive guard
-                    logger.debug(
-                        "Unified DOM unsubscribe failed", symbol=symbol_key, error=str(exc)
-                    )
-            if manager and not self._data_layer_tokens and self._data_layer_subscription:
-                manager.event_bus.unsubscribe(self._data_layer_subscription)
-                self._data_layer_subscription = None
-            return bool(token or had_pending)
-
-        if not self._loop or self._loop.is_closed():
+        manager = self._ensure_data_layer_manager()
+        token = self._data_layer_tokens.pop(symbol_key, None)
+        unsubscribed = False
+        if manager and token is not None:
             try:
-                self._loop = asyncio.get_running_loop()
-            except RuntimeError:
-                pass
-        target_symbol = removed_symbol or symbol
-        result = await asyncio.to_thread(
-            self._stop_stream_blocking,
-            target_symbol,
-            symbol_key,
-        )
-        return bool(result or had_pending)
+                await manager.unsubscribe(token)
+            except Exception as exc:  # pragma: no cover - defensive guard
+                logger.debug(
+                    "Unified DOM unsubscribe failed", symbol=symbol_key, error=str(exc)
+                )
+            else:
+                unsubscribed = True
+        if manager and not self._data_layer_tokens and self._data_layer_subscription:
+            manager.event_bus.unsubscribe(self._data_layer_subscription)
+            self._data_layer_subscription = None
+        return bool(unsubscribed or had_pending or removed_symbol)
 
     def stop(self, symbol: str) -> bool:
-        if self._is_data_layer_enabled():
-            return self._run_sync_coroutine(self.stop_stream(symbol))
-        symbol_key = (symbol or "").upper()
-        target_symbol = self._unregister_active_symbol(symbol_key) or symbol
-        return self._stop_stream_blocking(target_symbol, symbol_key)
+        return self._run_sync_coroutine(self.stop_stream(symbol))
 
     @property
     def auto_start_symbol(self) -> Optional[str]:
@@ -1120,15 +1005,14 @@ class DOMService:
             if not candidate or candidate in seen:
                 continue
             seen.add(candidate)
-            try:
-                if depth_subscriber.is_depth_stream_active(candidate):
-                    return True
-            except Exception:
-                continue
+            if candidate in self._data_layer_tokens:
+                return True
+            if candidate in self._active_symbols:
+                return True
 
         if symbol_key:
-            return symbol_key in self._active_symbols
-        return bool(self._active_symbols)
+            return symbol_key in self._data_layer_tokens or symbol_key in self._active_symbols
+        return bool(self._data_layer_tokens or self._active_symbols)
 
     def _on_start_task_done(self, symbol: str, fut: "asyncio.Future[bool]") -> None:
         with self._start_tasks_lock:

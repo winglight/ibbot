@@ -62,6 +62,10 @@
             this.toggleButton = null;
             this.active = false;
             this.shouldReconnect = false;
+            this.lastStreamSample = null;
+            this.pendingEventUpdates = null;
+            this.pendingEventOverwrite = false;
+            this.lastStreamError = null;
             this.trendThresholds = [...DEFAULT_TREND_THRESHOLDS];
             this.init();
         }
@@ -227,6 +231,313 @@
                 if (event.key.includes('sell')) return EVENT_SIDE_COLORS.sell;
             }
             return EVENT_SIDE_COLORS.neutral;
+        }
+
+        normalizeEventsList(rawEvents) {
+            if (!Array.isArray(rawEvents)) return [];
+            return rawEvents
+                .map((evt) => (evt && typeof evt === 'object' ? { ...evt } : null))
+                .filter(Boolean);
+        }
+
+        buildStreamSample({
+            sampleTime,
+            trendScore,
+            suggestion,
+            level,
+            price,
+            obi,
+            ofi,
+            thresholds,
+            events,
+            featureFlags,
+            fakeBreakoutProb,
+            windowMs = 60 * 1000,
+            metricsSource = {},
+            reason: reasonOverride = null,
+        }) {
+            const normalizedEvents = this.normalizeEventsList(events);
+            const normalizedFeatureFlags = featureFlags && typeof featureFlags === 'object'
+                ? { ...featureFlags }
+                : {};
+            const metricsSnapshot = metricsSource && typeof metricsSource === 'object'
+                ? { ...metricsSource }
+                : {};
+
+            metricsSnapshot.trend_score = trendScore;
+            if (obi !== null && obi !== undefined) metricsSnapshot.obi5 = obi;
+            if (ofi !== null && ofi !== undefined) metricsSnapshot.ofi = ofi;
+            if (fakeBreakoutProb !== null && fakeBreakoutProb !== undefined) {
+                metricsSnapshot.fake_breakout_prob = fakeBreakoutProb;
+            }
+            if (thresholds && typeof thresholds === 'object') {
+                metricsSnapshot.thresholds = { ...thresholds };
+            }
+            metricsSnapshot.events = normalizedEvents;
+            metricsSnapshot.feature_flags = normalizedFeatureFlags;
+            if (price !== null && price !== undefined) {
+                metricsSnapshot.mid_price = price;
+            }
+
+            const computedReason = typeof reasonOverride === 'string' && reasonOverride.trim()
+                ? reasonOverride
+                : this.buildTrendReason(
+                    {
+                        trend_score: trendScore,
+                        obi5: obi,
+                        ofi,
+                        zscore_obi5: this.toNumber(metricsSnapshot.zscore_obi5),
+                        zscore_ofi: this.toNumber(metricsSnapshot.zscore_ofi),
+                        fake_breakout_prob: fakeBreakoutProb,
+                        events: normalizedEvents,
+                    },
+                    suggestion,
+                    level,
+                );
+
+            const monitorOptions = {
+                reason: computedReason,
+                suggestion,
+                level,
+                price,
+                windowMs,
+                longBias: suggestion === 'buy',
+                shortBias: suggestion === 'sell',
+                maxPoints: 240,
+                threshold: 0.5,
+                obi,
+                ofi,
+                thresholds,
+                events: normalizedEvents,
+                featureFlags: normalizedFeatureFlags,
+                fakeBreakoutProb,
+            };
+
+            return {
+                time: sampleTime,
+                score: trendScore,
+                windowMs,
+                metrics: metricsSnapshot,
+                options: monitorOptions,
+            };
+        }
+
+        mergeEventLists(...lists) {
+            const merged = [];
+            const seen = new Set();
+            lists.forEach((list) => {
+                this.normalizeEventsList(list).forEach((evt) => {
+                    const code = typeof evt.code === 'string' ? evt.code.trim() : '';
+                    const key = `${evt.key || code}-${evt.side || ''}`;
+                    if (seen.has(key)) return;
+                    seen.add(key);
+                    merged.push({ ...evt });
+                });
+            });
+            return merged;
+        }
+
+        updateStreamError(message) {
+            const text = typeof message === 'string' ? message.trim() : '';
+            const normalized = text || null;
+            if (normalized === this.lastStreamError) return;
+            this.lastStreamError = normalized;
+            if (normalized) {
+                console.warn('[DOM Manager] Stream warning:', normalized);
+                if (this.app?.showAlert) {
+                    this.app.showAlert('warning', normalized);
+                }
+            }
+        }
+
+        syncTrendChartSample({
+            sampleTime,
+            trendScore,
+            events,
+            windowMs = 60 * 1000,
+            updateTrend = true,
+        }) {
+            if (!this.metricsChart || !Number.isFinite(sampleTime)) return;
+            const chart = this.metricsChart;
+            const datasets = Array.isArray(chart.data?.datasets) ? chart.data.datasets : [];
+            const trendDataset = datasets[0];
+            const eventDataset = datasets[1];
+            const minTime = sampleTime - windowMs;
+
+            if (trendDataset && Array.isArray(trendDataset.data)) {
+                const trendValue = Number.isFinite(trendScore) ? trendScore : null;
+                let replaced = false;
+                for (let i = 0; i < trendDataset.data.length; i += 1) {
+                    const point = trendDataset.data[i];
+                    if (point && point.x === sampleTime) {
+                        if (updateTrend) {
+                            trendDataset.data[i] = { x: sampleTime, y: trendValue };
+                        }
+                        replaced = true;
+                        break;
+                    }
+                }
+                if (updateTrend && !replaced) {
+                    trendDataset.data.push({ x: sampleTime, y: trendValue });
+                }
+                trendDataset.data = trendDataset.data.filter(
+                    (point) => point && typeof point.x === 'number' && point.x >= minTime,
+                );
+            }
+
+            if (eventDataset) {
+                const normalizedEvents = this.normalizeEventsList(events);
+                const scoreForEvents = Number.isFinite(trendScore) ? trendScore : 0;
+                const existing = Array.isArray(eventDataset.data) ? eventDataset.data : [];
+                const filtered = existing.filter(
+                    (point) => point && typeof point.x === 'number' && point.x >= minTime && point.x !== sampleTime,
+                );
+                normalizedEvents.forEach((evt) => {
+                    const baseCode = typeof evt.code === 'string' && evt.code.trim()
+                        ? evt.code.trim().slice(0, 2)
+                        : (evt.key ? String(evt.key).charAt(0).toUpperCase() : '?');
+                    const label = typeof evt.label === 'string' && evt.label.trim() ? evt.label.trim() : baseCode;
+                    filtered.push({
+                        x: sampleTime,
+                        y: scoreForEvents,
+                        code: baseCode,
+                        key: evt.key || null,
+                        label,
+                        side: evt.side || null,
+                        color: this.resolveEventColor(evt),
+                    });
+                });
+                filtered.sort((a, b) => a.x - b.x);
+                eventDataset.data = filtered;
+            }
+
+            const options = chart.options || (chart.options = {});
+            const scales = options.scales || (options.scales = {});
+            if (!scales.x) {
+                scales.x = {};
+            }
+            scales.x.min = minTime;
+            scales.x.max = sampleTime;
+            chart.update('none');
+        }
+
+        handleEventOnlyUpdate(events) {
+            const normalized = this.normalizeEventsList(events);
+            const combinedEvents = this.mergeEventLists(normalized);
+
+            if (!this.lastStreamSample) {
+                this.pendingEventUpdates = combinedEvents;
+                this.pendingEventOverwrite = true;
+                return;
+            }
+
+            this.pendingEventUpdates = combinedEvents;
+            this.pendingEventOverwrite = true;
+
+            this.lastStreamSample.metrics = {
+                ...(this.lastStreamSample.metrics || {}),
+                events: combinedEvents,
+            };
+            const updatedOptions = {
+                ...(this.lastStreamSample.options || {}),
+                events: combinedEvents,
+            };
+            this.lastStreamSample.options = updatedOptions;
+
+            this.syncTrendChartSample({
+                sampleTime: this.lastStreamSample.time,
+                trendScore: this.lastStreamSample.score,
+                events: combinedEvents,
+                windowMs: this.lastStreamSample.windowMs || 60 * 1000,
+                updateTrend: false,
+            });
+
+            if (Number.isFinite(this.lastStreamSample.score) && typeof this.app.addMonitorTrendPoint === 'function') {
+                this.app.addMonitorTrendPoint(
+                    this.lastStreamSample.time,
+                    this.lastStreamSample.score,
+                    updatedOptions,
+                );
+            }
+        }
+
+        handleStreamPayload(payload) {
+            if (!payload || typeof payload !== 'object') return;
+
+            let normalizedPayload = payload;
+            if (
+                payload.type === 'dom_update'
+                && payload.payload
+                && typeof payload.payload === 'object'
+            ) {
+                normalizedPayload = { ...payload.payload };
+                if (typeof normalizedPayload.symbol === 'undefined' && typeof payload.symbol === 'string') {
+                    normalizedPayload.symbol = payload.symbol;
+                }
+                if (typeof normalizedPayload.timestamp === 'undefined' && typeof payload.timestamp !== 'undefined') {
+                    normalizedPayload.timestamp = payload.timestamp;
+                }
+                if (typeof normalizedPayload.timestamp_ms === 'undefined'
+                    && typeof payload.timestamp_ms !== 'undefined') {
+                    normalizedPayload.timestamp_ms = payload.timestamp_ms;
+                }
+                if (typeof normalizedPayload.error === 'undefined' && typeof payload.error !== 'undefined') {
+                    normalizedPayload.error = payload.error;
+                }
+            }
+
+            const payloadSymbol = typeof normalizedPayload.symbol === 'string'
+                ? normalizedPayload.symbol.trim()
+                : '';
+            const activeSymbol = typeof this.symbol === 'string'
+                ? this.symbol.trim()
+                : '';
+
+            if (payloadSymbol && activeSymbol && payloadSymbol.toUpperCase() !== activeSymbol.toUpperCase()) {
+                if (typeof console !== 'undefined' && typeof console.debug === 'function') {
+                    console.debug('[DOM Manager] Ignoring stream payload for mismatched symbol', {
+                        payloadSymbol,
+                        activeSymbol,
+                    });
+                }
+                return;
+            }
+
+            if (payloadSymbol && !activeSymbol) {
+                if (typeof console !== 'undefined' && typeof console.debug === 'function') {
+                    console.debug('[DOM Manager] Ignoring payload because DOM stream is idle', {
+                        payloadSymbol,
+                    });
+                }
+                return;
+            }
+
+            const incomingEvents = this.normalizeEventsList(normalizedPayload.events);
+            const metrics = normalizedPayload.metrics && typeof normalizedPayload.metrics === 'object'
+                ? { ...normalizedPayload.metrics }
+                : null;
+            const hasMetrics = metrics && Object.keys(metrics).length > 0;
+
+            if (hasMetrics) {
+                const metricsEvents = this.normalizeEventsList(metrics.events);
+                let eventsToApply;
+                if (incomingEvents.length) {
+                    eventsToApply = this.mergeEventLists(incomingEvents, metricsEvents);
+                } else if (this.pendingEventOverwrite) {
+                    eventsToApply = this.mergeEventLists(this.pendingEventUpdates);
+                } else {
+                    eventsToApply = this.mergeEventLists(metricsEvents, this.pendingEventUpdates);
+                }
+
+                const metricsWithEvents = { ...metrics, events: eventsToApply };
+                this.pendingEventUpdates = null;
+                this.pendingEventOverwrite = false;
+                this.addMetricPoint(metricsWithEvents);
+            } else if (Object.prototype.hasOwnProperty.call(normalizedPayload, 'events')) {
+                this.handleEventOnlyUpdate(incomingEvents);
+            }
+
+            this.updateStreamError(normalizedPayload.error);
         }
 
         buildMonitorPointFromMetrics(entry) {
@@ -573,6 +884,10 @@
                         this.app.monitorTrendChart.update('none');
                     }
                 }
+                this.lastStreamSample = null;
+                this.pendingEventUpdates = null;
+                this.pendingEventOverwrite = false;
+                this.lastStreamError = null;
                 try {
                     await this.loadCachedData(this.symbol, { replaceExisting: true });
                 } catch (error) {
@@ -618,6 +933,10 @@
                 this.ws.close();
             }
             this.ws = null;
+            this.lastStreamSample = null;
+            this.pendingEventUpdates = null;
+            this.pendingEventOverwrite = false;
+            this.lastStreamError = null;
             this.app.domSignals = [];
             if (typeof this.app.updateDomSignalAnnotations === 'function') {
                 this.app.updateDomSignalAnnotations();
@@ -733,24 +1052,6 @@
 
                 const trendWindowMs = 60 * 1000;
                 const trendMaxPoints = 240;
-                const mergeEvents = (existingEvents, incomingEvents) => {
-                    const combined = [
-                        ...(Array.isArray(existingEvents) ? existingEvents : []),
-                        ...(Array.isArray(incomingEvents) ? incomingEvents : []),
-                    ];
-                    if (!combined.length) return [];
-                    const seen = new Set();
-                    const result = [];
-                    combined.forEach((evt) => {
-                        if (!evt || typeof evt !== 'object') return;
-                        const code = typeof evt.code === 'string' ? evt.code : '';
-                        const key = `${evt.key || code}-${evt.side || ''}`;
-                        if (seen.has(key)) return;
-                        seen.add(key);
-                        result.push({ ...evt });
-                    });
-                    return result;
-                };
 
                 const mergeFeatureFlags = (existingFlags, incomingFlags) => ({
                     ...(existingFlags && typeof existingFlags === 'object' ? existingFlags : {}),
@@ -779,7 +1080,7 @@
                             const idx = merged.findIndex(item => item && item.timestamp === point.timestamp);
                             if (idx >= 0) {
                                 const existing = merged[idx] || {};
-                                const combinedEvents = mergeEvents(existing.events, point.events);
+                                const combinedEvents = this.mergeEventLists(existing.events, point.events);
                                 const combinedFlags = mergeFeatureFlags(existing.featureFlags || existing.feature_flags, point.featureFlags || point.feature_flags);
                                 merged[idx] = {
                                     ...existing,
@@ -815,6 +1116,59 @@
                 } else if (replaceExisting && typeof this.app.resetMonitorTrendData === 'function') {
                     this.app.resetMonitorTrendData();
                 }
+
+                const latestEntry = metricsHistory[metricsHistory.length - 1];
+                if (latestEntry) {
+                    const sampleTime = this.extractTimestamp(latestEntry) ?? Date.now();
+                    const trendScore = this.toNumber(latestEntry.trend_score);
+                    const obi = this.toNumber(latestEntry.obi5 ?? latestEntry.obi);
+                    const ofi = this.toNumber(latestEntry.ofi);
+                    const thresholds = latestEntry.thresholds && typeof latestEntry.thresholds === 'object'
+                        ? { ...latestEntry.thresholds }
+                        : null;
+                    const { level: trendLevel, suggestion: trendSuggestion } = this.computeTrendSignal(trendScore);
+                    const { signal } = this.resolveSignalFromThresholds(obi, ofi, thresholds);
+                    let suggestion = trendSuggestion;
+                    if (signal > 0) suggestion = 'buy';
+                    else if (signal < 0) suggestion = 'sell';
+                    const fakeBreakoutProb = this.toNumber(
+                        latestEntry.fake_breakout_prob ?? latestEntry.fakeBreakoutProb,
+                    );
+                    const price = this.toNumber(
+                        latestEntry.mid_price ?? latestEntry.price ?? latestEntry.signal_price,
+                    );
+                    const featureFlags = (latestEntry.feature_flags && typeof latestEntry.feature_flags === 'object')
+                        ? { ...latestEntry.feature_flags }
+                        : (latestEntry.featureFlags && typeof latestEntry.featureFlags === 'object')
+                            ? { ...latestEntry.featureFlags }
+                            : {};
+                    const events = this.normalizeEventsList(latestEntry.events);
+
+                    const streamSample = this.buildStreamSample({
+                        sampleTime,
+                        trendScore,
+                        suggestion,
+                        level: trendLevel,
+                        price,
+                        obi,
+                        ofi,
+                        thresholds,
+                        events,
+                        featureFlags,
+                        fakeBreakoutProb,
+                        windowMs: metricWindowMs,
+                        metricsSource: latestEntry,
+                    });
+
+                    this.lastStreamSample = streamSample;
+                    this.lastTrendLevel = streamSample.options?.level || 0;
+                    const dir = Number.isFinite(trendScore)
+                        ? (trendScore > 0 ? 1 : trendScore < 0 ? -1 : 0)
+                        : 0;
+                    this.lastTrendDir = dir;
+                    this.pendingEventUpdates = null;
+                    this.pendingEventOverwrite = false;
+                }
             } catch (error) {
                 console.error('Failed to load cached DOM data:', error);
             }
@@ -831,10 +1185,7 @@
             this.ws.onmessage = (evt) => {
                 try {
                     const data = JSON.parse(evt.data);
-                    if (data.metrics && Object.keys(data.metrics).length > 0) {
-                        console.log('DOM metrics', data.metrics);
-                        this.addMetricPoint(data.metrics);
-                    }
+                    this.handleStreamPayload(data);
                 } catch (e) {
                     console.error('Invalid DOM WS message', e);
                 }
@@ -951,8 +1302,6 @@
             const fakeBreakoutProb = this.toNumber(m.fake_breakout_prob);
             const events = Array.isArray(m.events) ? m.events.map(evt => ({ ...evt })) : [];
 
-            console.log('[DOM Manager] addMetricPoint - trend_score:', trendScore, 'raw data:', m.trend_score, 'full metric:', m);
-
             const { level, suggestion } = this.computeTrendSignal(trendScore);
             const metricsPayload = {
                 trend_score: trendScore,
@@ -963,73 +1312,64 @@
                 fake_breakout_prob: fakeBreakoutProb,
                 events,
             };
+
             const reason = this.buildTrendReason(metricsPayload, suggestion, level);
 
-            if (this.metricsChart) {
-                const datasets = this.metricsChart.data.datasets || [];
-                const trendDataset = datasets[0];
-                const eventDataset = datasets[1];
-                if (trendDataset) {
-                    trendDataset.data.push({
-                        x: sampleTime,
-                        y: Number.isFinite(trendScore) ? trendScore : null,
-                    });
-                    trendDataset.data = trendDataset.data.filter((point) => point.x >= sampleTime - windowMs);
-                }
-                if (eventDataset) {
-                    events.forEach((evt) => {
-                        const baseCode = typeof evt.code === 'string' && evt.code.trim()
-                            ? evt.code.trim().slice(0, 2)
-                            : (evt.key ? String(evt.key).charAt(0).toUpperCase() : '?');
-                        eventDataset.data.push({
-                            x: sampleTime,
-                            y: Number.isFinite(trendScore) ? trendScore : 0,
-                            code: baseCode,
-                            key: evt.key || null,
-                            label: evt.label || baseCode,
-                            side: evt.side || null,
-                            color: this.resolveEventColor(evt),
-                        });
-                    });
-                    eventDataset.data = eventDataset.data.filter((point) => point.x >= sampleTime - windowMs);
-                }
-                this.metricsChart.options.scales.x.min = sampleTime - windowMs;
-                this.metricsChart.options.scales.x.max = sampleTime;
-                this.metricsChart.update('none');
-            }
+            this.syncTrendChartSample({
+                sampleTime,
+                trendScore,
+                events,
+                windowMs,
+                updateTrend: true,
+            });
 
             const price = this.toNumber(m.mid_price);
+            const featureFlags = m.feature_flags && typeof m.feature_flags === 'object'
+                ? { ...m.feature_flags }
+                : {};
+
+            const streamSample = this.buildStreamSample({
+                sampleTime,
+                trendScore,
+                suggestion,
+                level,
+                price,
+                obi,
+                ofi,
+                thresholds: m.thresholds,
+                events,
+                featureFlags,
+                fakeBreakoutProb,
+                windowMs,
+                metricsSource: m,
+                reason,
+            });
+
             if (trendScore !== null && Number.isFinite(trendScore)) {
                 const dir = trendScore > 0 ? 1 : trendScore < 0 ? -1 : 0;
-                if (level > 0 && (level !== this.lastTrendLevel || dir !== this.lastTrendDir)) {
-                    this.app.addDomSignal({ time: sampleTime, price, score: trendScore, level });
+                if (streamSample.options.level > 0 && (
+                    streamSample.options.level !== this.lastTrendLevel || dir !== this.lastTrendDir
+                )) {
+                    this.app.addDomSignal({
+                        time: sampleTime,
+                        price: streamSample.options.price,
+                        score: trendScore,
+                        level: streamSample.options.level,
+                    });
                 }
-                this.lastTrendLevel = level;
+                this.lastTrendLevel = streamSample.options.level || 0;
                 this.lastTrendDir = dir;
 
                 if (typeof this.app.addMonitorTrendPoint === 'function') {
-                    console.log('[DOM Manager] 调用addMonitorTrendPoint - trendScore:', trendScore, 'level:', level, 'suggestion:', suggestion);
-                    this.app.addMonitorTrendPoint(sampleTime, trendScore, {
-                        reason,
-                        suggestion,
-                        level,
-                        price,
-                        windowMs,
-                        longBias: suggestion === 'buy',
-                        shortBias: suggestion === 'sell',
-                        maxPoints: 240,
-                        threshold: 0.5,
-                        obi,
-                        ofi,
-                        thresholds: m.thresholds,
-                        events,
-                        featureFlags: m.feature_flags && typeof m.feature_flags === 'object' ? { ...m.feature_flags } : {},
-                        fakeBreakoutProb,
-                    });
+                    this.app.addMonitorTrendPoint(sampleTime, trendScore, streamSample.options);
                 } else {
                     console.warn('[DOM Manager] addMonitorTrendPoint方法不存在');
                 }
             }
+
+            this.lastStreamSample = streamSample;
+            this.pendingEventUpdates = null;
+            this.pendingEventOverwrite = false;
         }
     }
 
