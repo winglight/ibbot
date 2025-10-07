@@ -204,6 +204,11 @@ _REGISTRY.configure_slot(
     metadata={"name": "secondary", "purpose": "market-data"},
     connection_manager_factory=lambda: _build_connection_manager("IBKR_SECONDARY_CLIENT_ID", 2),
 )
+_REGISTRY.configure_slot(
+    "gateway",
+    metadata={"name": "gateway", "purpose": "unified"},
+    connection_manager_factory=lambda: _build_connection_manager("IBKR_GATEWAY_CLIENT_ID", 1),
+)
 
 
 async def get_client(

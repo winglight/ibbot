@@ -16,8 +16,8 @@ def test_run_service_dry_run(capsys) -> None:
 
     captured = capsys.readouterr()
     assert exit_code == 0
-    assert "ib_command" in captured.out
-    assert "python -m services.ib_command.main" in captured.out
+    assert "ib_gateway" in captured.out
+    assert "python -m services.ib_gateway.main" in captured.out
 
 
 def test_run_service_unknown_module(capsys) -> None:
@@ -37,8 +37,8 @@ def test_run_all_dry_run_subset(capsys) -> None:
 
     captured = capsys.readouterr()
     assert exit_code == 0
-    assert "ib_command" in captured.out
-    assert "ib_feed" in captured.out
+    assert "ib_gateway" in captured.out
+    assert "services.ib_gateway.main" in captured.out
 
 
 def test_run_all_reports_missing_service(capsys) -> None:

@@ -5,6 +5,13 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+try:  # pragma: no cover - pandas is optional at runtime
+    import pandas as _pd  # type: ignore
+except Exception:  # pragma: no cover - fallback when pandas unavailable
+    _PANDAS_TYPES: tuple[type[Any], ...] = ()
+else:  # pragma: no cover - heavy dependency import
+    _PANDAS_TYPES = (_pd.DataFrame, _pd.Series)
+
 
 def _safe_getattr(obj: Any, attr: str, default: Any = None) -> Any:
     try:
@@ -299,6 +306,15 @@ def trade_to_dict(trade: Any, *, defaults: Mapping[str, Any] | None = None) -> D
 
 
 def coerce_ibkr_value(value: Any) -> Any:
+    if _PANDAS_TYPES and isinstance(value, _PANDAS_TYPES):
+        to_dict = getattr(value, "to_dict", None)
+        if callable(to_dict):
+            try:
+                if hasattr(value, "columns"):
+                    return to_dict("records")
+                return to_dict()
+            except Exception:
+                return value
     if is_trade_like(value):
         return trade_to_dict(value)
     if is_fill_like(value):

@@ -24,7 +24,14 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from src.ibbot import update_service_health
 from src.ibbot.storage.parquet_writer import MarketDataParquetWriter
 from src.ibbot.logging import get_logger
-from src.ibbot.redis import PubSubListener, get_redis_client
+from src.ibbot.redis import (
+    DEFAULT_COMMAND_QUEUE,
+    IBCommandExecutionError,
+    IBCommandTimeout,
+    PubSubListener,
+    get_redis_client,
+    request_ib_command,
+)
 from src.dom_service import get_dom_service
 from src.dom_dependencies import dom_config
 from src.services.factories import (
@@ -123,10 +130,6 @@ def _env_float(name: str, default: float) -> float:
         return float(default)
 
 
-_IB_WAIT_FOR_EXISTING_CONNECT_SEC = max(0.0, _env_float("MARKET_DATA_IB_WAIT_FOR_CONNECT_SEC", 8.0))
-_IB_CONNECT_BACKOFF_SECONDS = max(0.0, _env_float("MARKET_DATA_IB_CONNECT_BACKOFF_SEC", 5.0))
-_IB_CONNECT_BACKOFF_UNTIL = 0.0
-
 MAX_RETURNED_CANDLES = 1000
 _MAX_SOURCE_FETCH = 120_000
 MAX_IB_DURATION_SECONDS = 86_400
@@ -157,11 +160,34 @@ def _env_flag(name: str, default: bool = True) -> bool:
 
 
 IB_FALLBACK_ENABLED = _env_flag("MARKET_DATA_ENABLE_IB_FALLBACK", True)
-_IB_CLIENT_LOCK = asyncio.Lock()
-_IB_CLIENT: Any | None = None
-_IB_CLIENT_UNAVAILABLE = object()
 _IB_FETCH_LOCKS: dict[tuple[str, str, str], asyncio.Lock] = {}
 _IB_FETCH_LOCK_GUARD = asyncio.Lock()
+
+_IB_COMMAND_QUEUE = (
+    os.getenv("MARKET_DATA_IB_COMMAND_QUEUE")
+    or os.getenv("IB_COMMAND_QUEUE")
+    or DEFAULT_COMMAND_QUEUE
+).strip()
+if not _IB_COMMAND_QUEUE:
+    _IB_COMMAND_QUEUE = DEFAULT_COMMAND_QUEUE
+
+_IB_COMMAND_RESULT_PREFIX = (
+    os.getenv("MARKET_DATA_IB_RESULT_PREFIX")
+    or os.getenv("IB_COMMAND_RESULT_PREFIX")
+    or "hash:ib:result"
+).strip()
+if not _IB_COMMAND_RESULT_PREFIX:
+    _IB_COMMAND_RESULT_PREFIX = "hash:ib:result"
+
+_IB_COMMAND_STREAM_KEY = (
+    os.getenv("MARKET_DATA_IB_RESULT_STREAM")
+    or os.getenv("IB_COMMAND_RESULT_STREAM")
+    or "stream:ib:results"
+).strip()
+if not _IB_COMMAND_STREAM_KEY:
+    _IB_COMMAND_STREAM_KEY = "stream:ib:results"
+
+_IB_COMMAND_TIMEOUT = max(0.0, _env_float("MARKET_DATA_IB_COMMAND_TIMEOUT", 30.0))
 
 
 class ChartDataQuery(BaseModel):
@@ -811,109 +837,109 @@ def _list_parquet_segments(
     return segments
 
 
-async def _ensure_ib_client(logger: Any) -> Any | None:
-    global _IB_CLIENT
-    if _IB_CLIENT is _IB_CLIENT_UNAVAILABLE:
+def _serialise_end_datetime(value: datetime | None) -> str | None:
+    if value is None:
         return None
-    if _IB_CLIENT is not None:
-        return _IB_CLIENT
-    async with _IB_CLIENT_LOCK:
-        if _IB_CLIENT is None:
-            try:
-                from src.ib_client_registry import get_client  # type: ignore
-            except Exception:
-                if logger:
-                    logger.warning(
-                        "IBKR client unavailable; disabling fallback",
-                        exc_info=True,
-                    )
-                _IB_CLIENT = _IB_CLIENT_UNAVAILABLE
-                return None
-            try:
-                _IB_CLIENT = await get_client("secondary")
-            except Exception:
-                if logger:
-                    logger.warning(
-                        "Failed to obtain shared IBKR client; disabling fallback",
-                        exc_info=True,
-                    )
-                _IB_CLIENT = _IB_CLIENT_UNAVAILABLE
-                return None
-    return None if _IB_CLIENT is _IB_CLIENT_UNAVAILABLE else _IB_CLIENT
-
-
-async def _ensure_ib_connected(client: Any, logger: Any) -> bool:
-    ensure_fn = getattr(client, "ensure_connection", None)
-    if callable(ensure_fn):
+    if isinstance(value, datetime):
         try:
-            await ensure_fn(reason="market-data-fallback")
-            return True
+            return value.isoformat()
         except Exception:
-            if logger:
-                logger.warning("IBKR ensure_connection failed", exc_info=True)
-            return False
+            return value.strftime("%Y-%m-%dT%H:%M:%S")
+    return str(value)
+
+
+async def _request_ib_historical_records(
+    *,
+    symbol: str,
+    duration: str,
+    bar_size: str,
+    exchange: str,
+    end_datetime: datetime | None,
+    redis_client: Any | None,
+    logger: Any,
+) -> list[Mapping[str, Any]] | None:
+    kwargs: dict[str, Any] = {
+        "duration": duration,
+        "bar_size": bar_size,
+        "exchange": exchange,
+    }
+    end_value = _serialise_end_datetime(end_datetime)
+    if end_value:
+        kwargs["end_datetime"] = end_value
 
     try:
-        if getattr(client, "connected", False):
-            return True
+        response = await request_ib_command(
+            "get_historical_data",
+            args=[symbol],
+            kwargs=kwargs,
+            timeout=_IB_COMMAND_TIMEOUT,
+            redis=redis_client,
+            queue_key=_IB_COMMAND_QUEUE,
+            result_prefix=_IB_COMMAND_RESULT_PREFIX,
+            stream_key=_IB_COMMAND_STREAM_KEY,
+        )
+    except IBCommandTimeout as exc:
+        if logger:
+            logger.warning(
+                "IB fallback command timed out",
+                symbol=symbol,
+                duration=duration,
+                bar_size=bar_size,
+                exchange=exchange,
+                end=end_value,
+                error=str(exc),
+            )
+        return None
+    except IBCommandExecutionError as exc:
+        if logger:
+            logger.warning(
+                "IB fallback command failed",
+                symbol=symbol,
+                duration=duration,
+                bar_size=bar_size,
+                exchange=exchange,
+                end=end_value,
+                error=str(exc),
+            )
+        return None
     except Exception:
-        pass
+        if logger:
+            logger.warning(
+                "Unexpected error while requesting IB fallback data",
+                symbol=symbol,
+                duration=duration,
+                bar_size=bar_size,
+                exchange=exchange,
+                end=end_value,
+                exc_info=True,
+            )
+        return None
 
-    manager = getattr(client, "connection_manager", None)
-    if manager is not None:
-        try:
-            if manager.is_connected():
-                return True
-        except Exception:
-            pass
+    raw_result = response.get("result")
+    if not raw_result:
+        return []
 
-        try:
-            if manager.is_connecting():
-                waited = await asyncio.to_thread(
-                    manager.wait_for_connection,
-                    _IB_WAIT_FOR_EXISTING_CONNECT_SEC,
-                )
-                if waited:
-                    return True
-        except Exception:
-            if logger:
-                logger.debug(
-                    "Failed while waiting for existing IBKR connection attempt",
-                    exc_info=True,
-                )
-
-    now = time.monotonic()
-    global _IB_CONNECT_BACKOFF_UNTIL
-    if now < _IB_CONNECT_BACKOFF_UNTIL:
+    if isinstance(raw_result, Mapping):
+        records: Sequence[Mapping[str, Any]] | None = None
+        candidate = raw_result.get("records")
+        if isinstance(candidate, Sequence):
+            records = [item for item in candidate if isinstance(item, Mapping)]
+        if records is None:
+            records = [dict(raw_result)]
+    elif isinstance(raw_result, Sequence):
+        records = [dict(item) for item in raw_result if isinstance(item, Mapping)]
+    else:
         if logger:
             logger.debug(
-                "Skipping IBKR fallback connect due to backoff",
-                remaining=round(_IB_CONNECT_BACKOFF_UNTIL - now, 2),
+                "IB fallback returned unsupported payload type",
+                payload_type=type(raw_result).__name__,
+                symbol=symbol,
+                duration=duration,
+                bar_size=bar_size,
             )
-        return False
+        return []
 
-    connect_fn = getattr(client, "connect", None)
-    if not callable(connect_fn):
-        if logger:
-            logger.warning("IBKR client missing connect() method; cannot establish connection")
-        return False
-
-    try:
-        result = await asyncio.to_thread(connect_fn)
-    except Exception:
-        if logger:
-            logger.warning("IBKR connect() call failed", exc_info=True)
-        _IB_CONNECT_BACKOFF_UNTIL = now + _IB_CONNECT_BACKOFF_SECONDS
-        return False
-
-    if not result:
-        if logger:
-            logger.warning("IBKR connect() returned False")
-        _IB_CONNECT_BACKOFF_UNTIL = now + _IB_CONNECT_BACKOFF_SECONDS
-        return False
-
-    _IB_CONNECT_BACKOFF_UNTIL = 0.0
-    return True
+    return list(records)
 
 
 @asynccontextmanager
@@ -938,6 +964,7 @@ async def _fetch_candles_from_ib(
     query: ChartDataQuery,
     *,
     interval: str,
+    redis_client: Any | None,
     persist: Callable[[Sequence[Mapping[str, Any]]], Awaitable[None]],
     logger: Any,
     missing_segments: Sequence[tuple[int, int]] | None = None,
@@ -945,35 +972,8 @@ async def _fetch_candles_from_ib(
     if not IB_FALLBACK_ENABLED:
         return []
 
-    client = await _ensure_ib_client(logger)
-    if client is None:
-        if logger:
-            logger.info(
-                "IB fallback disabled; IBKR client unavailable for %s interval=%s",
-                query.symbol,
-                interval,
-            )
-        return []
-
     lock_key = (query.symbol.upper(), interval, query.duration)
     async with _exclusive_ib_fetch(lock_key):
-        try:
-            if getattr(client, "connected", False):
-                connected = True
-            else:
-                connected = await _ensure_ib_connected(client, logger)
-        except Exception:
-            connected = await _ensure_ib_connected(client, logger)
-
-        if not connected:
-            if logger:
-                logger.warning(
-                    "IB fallback skipped; IBKR client not connected for %s interval=%s",
-                    query.symbol,
-                    interval,
-                )
-            return []
-
         bar_size = _resolve_ib_bar_size(query.bar_size, interval)
 
         interval_seconds = _INTERVAL_TO_SECONDS.get(interval, 0)
@@ -1031,38 +1031,17 @@ async def _fetch_candles_from_ib(
             duration_value = duration_override or query.duration
             if not duration_value:
                 duration_value = "1 D"
-            try:
-                data_frame = await client.get_historical_data(
-                    query.symbol,
-                    duration=duration_value,
-                    bar_size=bar_size,
-                    exchange=query.exchange,
-                    end_datetime=end_dt,
-                )
-            except Exception:
-                if logger:
-                    logger.warning(
-                        "IBKR historical request failed for %s interval=%s",
-                        query.symbol,
-                        interval,
-                        exc_info=True,
-                    )
+            records = await _request_ib_historical_records(
+                symbol=query.symbol,
+                duration=duration_value,
+                bar_size=bar_size,
+                exchange=query.exchange,
+                end_datetime=end_dt,
+                redis_client=redis_client,
+                logger=logger,
+            )
+            if records is None:
                 return []
-
-            if data_frame is None:
-                continue
-
-            try:
-                records = data_frame.to_dict("records")
-            except Exception:
-                if logger:
-                    logger.warning(
-                        "Failed to serialise IBKR historical data for %s",
-                        query.symbol,
-                        exc_info=True,
-                    )
-                return []
-
             if not records:
                 continue
 
@@ -1879,6 +1858,7 @@ def create_app(*, runtime: MarketDataRuntime | None = None) -> FastAPI:
                 ib_candles = await _fetch_candles_from_ib(
                     query,
                     interval=interval,
+                    redis_client=redis_client,
                     persist=_persist_ib_candles,
                     logger=logger,
                     missing_segments=missing_segments,
@@ -2084,6 +2064,7 @@ def create_app(*, runtime: MarketDataRuntime | None = None) -> FastAPI:
         candles = await _fetch_candles_from_ib(
             query,
             interval=interval,
+            redis_client=redis_client,
             persist=_persist_ib_candles,
             logger=logger,
         )
@@ -2207,6 +2188,7 @@ def create_app(*, runtime: MarketDataRuntime | None = None) -> FastAPI:
             ib_candles = await _fetch_candles_from_ib(
                 query,
                 interval=interval,
+                redis_client=redis_client,
                 persist=_persist_ib_candles,
                 logger=logger,
             )
