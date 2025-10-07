@@ -88,7 +88,7 @@ async def _load_ib_command_health() -> Dict[str, Any] | None:
     try:
         raw = await redis_client.hgetall(IB_COMMAND_HEALTH_KEY)
     except Exception as exc:  # pragma: no cover - redis access errors
-        logger.debug("Failed to load ib-command health from Redis: %s", exc)
+        logger.debug("Failed to load ib-command health from Redis: {}", exc)
         return None
 
     if not raw:
@@ -189,7 +189,7 @@ async def _load_config_from_provider() -> Dict[str, Any] | None:
     try:
         values = await provider.get_module(_CONNECTION_CONFIG_MODULE)
     except Exception as exc:  # pragma: no cover - defensive guard
-        logger.debug("Failed to load connection config from provider: %s", exc)
+        logger.debug("Failed to load connection config from provider: {}", exc)
         return None
 
     if not values:
@@ -198,7 +198,7 @@ async def _load_config_from_provider() -> Dict[str, Any] | None:
     try:
         return _normalise_connection_config(values)
     except Exception as exc:  # pragma: no cover - defensive guard
-        logger.debug("Invalid connection config payload from provider: %s", exc)
+        logger.debug("Invalid connection config payload from provider: {}", exc)
         return None
 
 
@@ -211,13 +211,13 @@ async def _load_connection_config() -> Dict[str, Any]:
     try:
         remote = await client.fetch_config()
     except ServiceClientError as exc:  # pragma: no cover - service failures are logged
-        logger.debug("Failed to load connection config via service: %s", exc)
+        logger.debug("Failed to load connection config via service: {}", exc)
     else:
         if isinstance(remote, Mapping):
             try:
                 return _normalise_connection_config(remote)
             except Exception as exc:  # pragma: no cover - defensive guard
-                logger.debug("Invalid connection config payload from service: %s", exc)
+                logger.debug("Invalid connection config payload from service: {}", exc)
 
     fallback = ConnectionConfig.from_env().to_dict()
     return _normalise_connection_config(fallback)
@@ -254,7 +254,7 @@ async def get_connection_config():
     try:
         return await _load_connection_config()
     except Exception as exc:
-        logger.error("Failed to load connection config: %s", exc)
+        logger.error("Failed to load connection config: {}", exc)
         raise HTTPException(status_code=500, detail="Failed to get connection config") from exc
 
 
@@ -276,7 +276,7 @@ async def connect_ibkr(
     try:
         result = await client.connect(payload)
     except ServiceClientError as exc:
-        logger.error("Failed to dispatch connect command via service: %s", exc)
+        logger.error("Failed to dispatch connect command via service: {}", exc)
         await audit_log_failure(
             request,
             detail="failed to dispatch connect command via service",
@@ -287,7 +287,7 @@ async def connect_ibkr(
         try:
             await _enqueue_command(command)
         except Exception as queue_exc:
-            logger.error("Failed to enqueue connect command via fallback: %s", queue_exc)
+            logger.error("Failed to enqueue connect command via fallback: {}", queue_exc)
             raise HTTPException(status_code=503, detail="Failed to enqueue connect command") from queue_exc
 
         await audit_log_success(
@@ -337,7 +337,7 @@ async def disconnect_ibkr(
     try:
         result = await client.disconnect()
     except ServiceClientError as exc:
-        logger.error("Failed to dispatch disconnect command via service: %s", exc)
+        logger.error("Failed to dispatch disconnect command via service: {}", exc)
         await audit_log_failure(
             request,
             detail="failed to dispatch disconnect command via service",
@@ -348,7 +348,7 @@ async def disconnect_ibkr(
         try:
             await _enqueue_command(command)
         except Exception as queue_exc:
-            logger.error("Failed to enqueue disconnect command: %s", queue_exc)
+            logger.error("Failed to enqueue disconnect command: {}", queue_exc)
             await audit_log_failure(request, detail="failed to enqueue disconnect command")
             raise HTTPException(status_code=503, detail="Failed to enqueue disconnect command") from queue_exc
 
@@ -402,5 +402,5 @@ async def get_connection_status(user: Optional[str] = Depends(get_current_user))
             "source": "http",
         }
     except Exception as exc:
-        logger.error("Failed to get connection status: %s", exc)
+        logger.error("Failed to get connection status: {}", exc)
         raise HTTPException(status_code=500, detail="Failed to get connection status") from exc

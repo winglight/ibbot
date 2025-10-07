@@ -260,10 +260,10 @@ async def _load_hash(redis: Any, key: str) -> MutableMapping[str, Any] | None:
     try:
         values = await asyncio.wait_for(redis.hgetall(key), timeout=_REDIS_COMMAND_TIMEOUT)
     except asyncio.TimeoutError as exc:
-        logger.warning("Redis command hgetall(%s) timed out", key)
+        logger.warning("Redis command hgetall({}) timed out", key)
         raise RedisUnavailableError(f"Redis 命令超时: hgetall({key})") from exc
     except Exception as exc:  # pragma: no cover - depends on runtime redis availability
-        logger.debug("Failed to load health hash %s: %s", key, exc)
+        logger.debug("Failed to load health hash {}: {}", key, exc)
         raise RedisUnavailableError(f"Redis 命令失败: hgetall({key})") from exc
     if not values:
         return None
@@ -489,7 +489,7 @@ async def gather_service_statuses(redis: Any | None = None) -> Sequence[ServiceS
     try:
         statuses.append(await _build_ib_command_status(client))
     except Exception as exc:  # pragma: no cover - defensive guard
-        logger.warning("Failed to build ib_command health payload: %s", exc)
+        logger.warning("Failed to build ib_command health payload: {}", exc)
         statuses.append(
             ServiceStatus(
                 service="ib_command",
@@ -505,7 +505,7 @@ async def gather_service_statuses(redis: Any | None = None) -> Sequence[ServiceS
     try:
         readiness = await refresh_account_service_status(max_age=60.0, log_failure=False)
     except Exception as exc:  # pragma: no cover - defensive guard
-        logger.warning("Failed to refresh account service readiness: %s", exc)
+        logger.warning("Failed to refresh account service readiness: {}", exc)
         account_readiness_status = "unhealthy"
         account_readiness_detail = f"无法刷新账户服务状态: {exc}"
         account_readiness_payload = {"error": str(exc)}
@@ -592,7 +592,7 @@ async def gather_service_statuses(redis: Any | None = None) -> Sequence[ServiceS
     try:
         statuses.append(await _build_queue_monitor_status(client))
     except Exception as exc:  # pragma: no cover - defensive guard
-        logger.warning("Failed to build queue monitor status: %s", exc)
+        logger.warning("Failed to build queue monitor status: {}", exc)
         statuses.append(
             ServiceStatus(
                 service="queue_monitor",
@@ -604,7 +604,7 @@ async def gather_service_statuses(redis: Any | None = None) -> Sequence[ServiceS
     try:
         statuses.append(await _build_dom_service_status(client))
     except Exception as exc:  # pragma: no cover - defensive guard
-        logger.warning("Failed to build DOM service status: %s", exc)
+        logger.warning("Failed to build DOM service status: {}", exc)
         statuses.append(
             ServiceStatus(
                 service=DOM_SERVICE_NAME,

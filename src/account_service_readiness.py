@@ -95,7 +95,7 @@ async def probe_account_service(*, log: bool = True) -> AccountServiceReadiness:
     else:
         if log and (previous_status.ready or not _WARNING_REPORTED):
             logger.warning(
-                "Account service readiness probe failed: %s",
+                "Account service readiness probe failed: {}",
                 error_message or "unknown error",
             )
             _WARNING_REPORTED = True

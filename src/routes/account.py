@@ -366,7 +366,7 @@ async def get_account_info(
     try:
         info_result = await client.fetch_info(force_refresh=effective_force_refresh)
     except ServiceUnavailableError as exc:
-        logger.warning("Account service unavailable for account_info: %s", exc)
+        logger.warning("Account service unavailable for account_info: {}", exc)
         cached = await _fallback_snapshot_response(
             snapshot,
             read_account_info_snapshot,
@@ -485,7 +485,7 @@ async def get_positions(
             force_refresh=effective_force_refresh,
         )
     except ServiceUnavailableError as exc:
-        logger.warning("Account service unavailable for positions: %s", exc)
+        logger.warning("Account service unavailable for positions: {}", exc)
         cached = await _fallback_snapshot_response(
             snapshot,
             read_positions_snapshot,
@@ -690,7 +690,7 @@ async def get_account_daily_summary(
                 force_refresh=False
             )
         except (ServiceUnavailableError, ServiceResponseError, ServiceClientError) as exc:
-            logger.debug("Account service fetch for daily summary failed: %s", exc)
+            logger.debug("Account service fetch for daily summary failed: {}", exc)
             service_info = None
 
         if net_liquidation is None and service_info is not None:

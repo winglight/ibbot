@@ -30,7 +30,7 @@ async def _warm_account_service_status() -> None:
     try:
         await refresh_account_service_status(max_age=None, log_failure=False)
     except Exception as exc:  # pragma: no cover - defensive guard
-        logger.warning("Account service readiness warmup failed: %s", exc)
+        logger.warning("Account service readiness warmup failed: {}", exc)
 
 
 @router.get("/api/services/status")

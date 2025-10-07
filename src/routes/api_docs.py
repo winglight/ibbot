@@ -245,12 +245,12 @@ async def _fetch_service_spec(
         response = await client.get(spec_url)
         response.raise_for_status()
     except httpx.HTTPError as exc:
-        logger.debug("Failed to fetch %s OpenAPI schema: %s", target.name, exc)
+        logger.debug("Failed to fetch {} OpenAPI schema: {}", target.name, exc)
         return None, str(exc), base_url
     try:
         data = response.json()
     except ValueError as exc:
-        logger.debug("Invalid OpenAPI payload from %s: %s", target.name, exc)
+        logger.debug("Invalid OpenAPI payload from {}: {}", target.name, exc)
         return None, "invalid JSON payload", base_url
     if not isinstance(data, Mapping):
         return None, "unexpected payload structure", base_url

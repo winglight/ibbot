@@ -242,10 +242,10 @@ async def _fetch_market_snapshot(symbol: str) -> Optional[Dict[str, Any]]:
     try:
         payload = await _MARKET_CLIENT.fetch_current_price(symbol)
     except ServiceUnavailableError as exc:
-        logger.debug("Market data service unavailable for %s: %s", symbol, exc)
+        logger.debug("Market data service unavailable for {}: {}", symbol, exc)
         return None
     except ServiceClientError as exc:
-        logger.warning("Market data service error for %s: %s", symbol, exc)
+        logger.warning("Market data service error for {}: {}", symbol, exc)
         return None
 
     if isinstance(payload, Mapping):
@@ -264,12 +264,12 @@ async def _fetch_account_info(
             fast=fast,
         )
     except ServiceUnavailableError as exc:
-        logger.debug("Account service unavailable: %s", exc)
+        logger.debug("Account service unavailable: {}", exc)
         error_payload = _service_unavailable_payload("account_update")
         error_payload["details"] = str(exc)
         return error_payload
     except ServiceClientError as exc:
-        logger.warning("Account service error: %s", exc)
+        logger.warning("Account service error: {}", exc)
         return None
     return payload
 
@@ -283,12 +283,12 @@ async def _fetch_positions(
             fast=fast,
         )
     except ServiceUnavailableError as exc:
-        logger.debug("Account service unavailable for positions: %s", exc)
+        logger.debug("Account service unavailable for positions: {}", exc)
         error_payload = _service_unavailable_payload("position_update")
         error_payload["details"] = str(exc)
         return error_payload
     except ServiceClientError as exc:
-        logger.warning("Account service error fetching positions: %s", exc)
+        logger.warning("Account service error fetching positions: {}", exc)
         return None
 
     if isinstance(payload, AccountServiceResult):
@@ -324,12 +324,12 @@ async def _fetch_orders(
             start_date=start_date,
         )
     except ServiceUnavailableError as exc:
-        logger.debug("Orders service unavailable for orders: %s", exc)
+        logger.debug("Orders service unavailable for orders: {}", exc)
         error_payload = _service_unavailable_payload("orders_snapshot")
         error_payload["details"] = str(exc)
         return error_payload
     except ServiceClientError as exc:
-        logger.warning("Orders service error fetching orders: %s", exc)
+        logger.warning("Orders service error fetching orders: {}", exc)
         return None
 
     orders_list: List[Dict[str, Any]] = []
@@ -455,7 +455,7 @@ async def _handle_risk_rules_pubsub(_: str, message: str) -> None:
     try:
         data: Any = json.loads(message) if message else {}
     except Exception:
-        logger.debug("Invalid risk rules pubsub payload: %s", message)
+        logger.debug("Invalid risk rules pubsub payload: {}", message)
         data = {}
 
     payload: Dict[str, Any]
@@ -532,7 +532,7 @@ async def _load_ib_command_health() -> Optional[Dict[str, Any]]:
     try:
         raw = await redis_client.hgetall(IB_COMMAND_HEALTH_KEY)
     except Exception as exc:  # pragma: no cover - redis access errors
-        logger.debug("Failed to load ib-command health from Redis: %s", exc)
+        logger.debug("Failed to load ib-command health from Redis: {}", exc)
         return None
 
     if not raw:
@@ -1664,11 +1664,11 @@ class MarketDataPubSubHub:
         try:
             data = json.loads(payload)
         except json.JSONDecodeError:
-            logger.debug("Invalid market data payload on %s", channel)
+            logger.debug("Invalid market data payload on {}", channel)
             return
         symbol = str(data.get("symbol") or "").strip().upper()
         if not symbol:
-            logger.debug("Market data payload missing symbol on %s", channel)
+            logger.debug("Market data payload missing symbol on {}", channel)
             return
 
         message = _build_realtime_message(symbol, data)
@@ -1778,7 +1778,7 @@ async def websocket_endpoint(websocket: WebSocket):
             return
 
         logger.warning(
-            "Account service unavailable during %s (account_service_ready=%s)",
+            "Account service unavailable during {} (account_service_ready={})",
             context,
             account_service_readiness,
         )
