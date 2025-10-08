@@ -411,13 +411,101 @@ async def test_request_account_updates_returns_snapshot() -> None:
     contract = Contract(symbol="AAPL", secType="STK", exchange="SMART", currency="USD")
     client.emit_account_value("NetLiquidation", "15000", "USD", "DU123")
     client.emit_portfolio_update(contract, 10.0, 150.0, 1500.0, 1200.0, 300.0, 0.0, "DU123")
+    client.emit_account_time("20231001 12:00:00")
     client.emit_account_download_end("DU123")
 
     snapshot = await task
     assert snapshot["account"] == "DU123"
     assert snapshot["account_values"]
     assert snapshot["portfolio"]
+    assert snapshot["account_time"] == "20231001 12:00:00"
     assert client._account_updates_subscribed is False
+
+    await controller.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_request_account_updates_ignores_other_accounts() -> None:
+    controller = IBAPIController(loop=asyncio.get_running_loop())
+
+    await controller.connect()
+    await controller.wait_until_connected()
+
+    task = asyncio.create_task(controller.request_account_updates(account="DU123", timeout=1))
+    await asyncio.sleep(0)
+
+    client = controller.client
+    contract = Contract(symbol="AAPL", secType="STK", exchange="SMART", currency="USD")
+    client.emit_account_value("NetLiquidation", "5000", "USD", "OTHER")
+    client.emit_portfolio_update(contract, 5.0, 120.0, 600.0, 100.0, 20.0, 0.0, "OTHER")
+    client.emit_account_value("NetLiquidation", "15000", "USD", "DU123")
+    client.emit_portfolio_update(contract, 10.0, 150.0, 1500.0, 1200.0, 300.0, 0.0, "DU123")
+    client.emit_account_download_end("DU123")
+
+    snapshot = await task
+    assert snapshot["account"] == "DU123"
+    assert all(item["account"] == "DU123" for item in snapshot["account_values"])
+    assert all(item["account"] == "DU123" for item in snapshot["portfolio"])
+
+    await controller.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_request_account_updates_uses_default_account_when_missing() -> None:
+    controller = IBAPIController(loop=asyncio.get_running_loop())
+
+    await controller.connect()
+    await controller.wait_until_connected()
+
+    task = asyncio.create_task(controller.request_account_updates(timeout=1))
+    await asyncio.sleep(0)
+
+    client = controller.client
+    client.emit_managed_accounts(["DU123"])
+    await asyncio.sleep(0)
+
+    contract = Contract(symbol="AAPL", secType="STK", exchange="SMART", currency="USD")
+    client.emit_account_value("NetLiquidation", "15000", "USD", "DU123")
+    client.emit_portfolio_update(contract, 10.0, 150.0, 1500.0, 1200.0, 300.0, 0.0, "DU123")
+    client.emit_account_download_end("DU123")
+
+    snapshot = await task
+    assert snapshot["account"] == "DU123"
+    assert snapshot["account_time"] is None
+    assert client._account_updates_subscribed is False
+
+    await controller.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_request_account_updates_times_out_without_managed_accounts() -> None:
+    controller = IBAPIController(loop=asyncio.get_running_loop())
+
+    await controller.connect()
+    await controller.wait_until_connected()
+
+    with pytest.raises(asyncio.TimeoutError):
+        await controller.request_account_updates(timeout=0.05)
+
+    assert controller.client._account_updates_subscribed is False
+
+    await controller.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_request_account_updates_cancels_subscription_on_timeout() -> None:
+    controller = IBAPIController(loop=asyncio.get_running_loop())
+
+    await controller.connect()
+    await controller.wait_until_connected()
+
+    controller.client.emit_managed_accounts(["DU123"])
+    await asyncio.sleep(0)
+
+    with pytest.raises(asyncio.TimeoutError):
+        await controller.request_account_updates(timeout=0.05)
+
+    assert controller.client._account_updates_subscribed is False
 
     await controller.disconnect()
 

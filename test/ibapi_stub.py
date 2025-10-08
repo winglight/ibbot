@@ -197,6 +197,28 @@ class EWrapper:
     def connectionClosed(self) -> None:  # noqa: N802 - IB API naming
         pass
 
+    def managedAccounts(self, accountsList: str) -> None:  # noqa: N802 - IB API naming
+        pass
+
+    def updateAccountValue(self, key: str, val: str, currency: str, accountName: str) -> None:  # noqa: N802,E501
+        pass
+
+    def updatePortfolio(
+        self,
+        contract: Contract,
+        position: float,
+        marketPrice: float,
+        marketValue: float,
+        averageCost: float,
+        unrealizedPNL: float,
+        realizedPNL: float,
+        accountName: str,
+    ) -> None:  # noqa: N802 - IB API naming
+        pass
+
+    def updateAccountTime(self, timeStamp: str) -> None:  # noqa: N802 - IB API naming
+        pass
+
     def openOrder(self, orderId: int, contract: Contract, order: Order, orderState: OrderState) -> None:  # noqa: N802 - API naming
         pass
 
@@ -629,6 +651,12 @@ class EClient:
 
     def emit_account_download_end(self, account: str) -> None:
         self.wrapper.accountDownloadEnd(account)
+
+    def emit_managed_accounts(self, accounts: List[str]) -> None:
+        self.wrapper.managedAccounts(",".join(accounts))
+
+    def emit_account_time(self, timestamp: str) -> None:
+        self.wrapper.updateAccountTime(timestamp)
 
     def emit_position(
         self,

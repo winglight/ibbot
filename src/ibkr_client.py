@@ -2079,11 +2079,19 @@ class IBKRClient:
             return None
 
         async with self._ibapi_account_lock:
+            configured_account = getattr(self.connection_manager.config, "account", "")
             try:
                 snapshot = await controller.request_account_updates(
-                    account=getattr(self.connection_manager.config, "account", ""),
+                    account=configured_account,
                     timeout=self._ibapi_account_request_timeout,
                 )
+            except asyncio.TimeoutError:
+                ibkr_logger.debug(
+                    "Timed out waiting for account updates via ibapi controller (account=%s, managed_accounts=%s)",
+                    configured_account or "<default>",
+                    ",".join(controller.managed_accounts) or "<none>",
+                )
+                return None
             except Exception as exc:
                 ibkr_logger.debug(
                     "Failed to request account updates via ibapi controller: {}",

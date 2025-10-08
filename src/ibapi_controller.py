@@ -89,9 +89,10 @@ class _AccountUpdatesRequest:
     """Collect streaming updates from ``reqAccountUpdates``."""
 
     future: "asyncio.Future[dict[str, Any]]"
-    account: str
+    account: str = ""
     account_values: List[dict[str, Any]] = field(default_factory=list)
     portfolio: List[dict[str, Any]] = field(default_factory=list)
+    account_time: Optional[str] = None
 
 
 @dataclass
@@ -156,6 +157,8 @@ class IBAPIController(EWrapper):
         self._pending_order_submissions: Dict[int, asyncio.Future[OrderPlacement]] = {}
         self._pending_order_cancellations: Dict[int, asyncio.Future[str]] = {}
         self._event_consumers_lock = threading.Lock()
+        self._managed_accounts: List[str] = []
+        self._managed_accounts_event = asyncio.Event()
 
     # ------------------------------------------------------------------
     # Public API
@@ -171,6 +174,12 @@ class IBAPIController(EWrapper):
         """Queue receiving structured events produced by callbacks."""
 
         return self._event_queue
+
+    @property
+    def managed_accounts(self) -> List[str]:
+        """Return a snapshot of the managed accounts reported by TWS."""
+
+        return list(self._managed_accounts)
 
     def register_event_consumer(self) -> "asyncio.Queue[dict[str, Any]]":
         """Create a new queue that will receive controller events."""
@@ -227,6 +236,8 @@ class IBAPIController(EWrapper):
             self._params = params or self._params
             self._connected_event.clear()
             self._next_valid_id_future = self._loop.create_future()
+            self._managed_accounts.clear()
+            self._managed_accounts_event.clear()
 
             await self._loop.run_in_executor(
                 None,
@@ -265,6 +276,8 @@ class IBAPIController(EWrapper):
             self._connected_event.clear()
             self._next_order_id = None
             self._order_id_waiters.clear()
+            self._managed_accounts.clear()
+            self._managed_accounts_event.clear()
 
     async def reconnect(self, *, timeout: float = 5.0) -> int:
         """Convenience helper that performs a disconnect followed by connect."""
@@ -534,23 +547,40 @@ class IBAPIController(EWrapper):
             raise RuntimeError("request_account_updates already in progress")
 
         future: asyncio.Future[dict[str, Any]] = self._loop.create_future()
-        request = _AccountUpdatesRequest(future=future, account=account)
+        request = _AccountUpdatesRequest(future=future)
         self._account_updates_request = request
-
-        await self._loop.run_in_executor(
-            None,
-            partial(self._client.reqAccountUpdates, True, account),
-        )
+        subscribed = False
+        account_code = account.strip()
+        start_time = self._loop.time()
 
         try:
-            return await asyncio.wait_for(future, timeout)
-        except Exception:
-            raise
-        finally:
+            if not account_code:
+                remaining = timeout - (self._loop.time() - start_time)
+                account_code = await self._await_default_account(remaining)
+
+            request.account = account_code
+
             await self._loop.run_in_executor(
                 None,
-                partial(self._client.reqAccountUpdates, False, account),
+                partial(self._client.reqAccountUpdates, True, account_code),
             )
+            subscribed = True
+
+            remaining = timeout - (self._loop.time() - start_time)
+            if remaining <= 0:
+                raise asyncio.TimeoutError("account updates timed out before snapshot arrived")
+
+            return await asyncio.wait_for(future, remaining)
+        finally:
+            if subscribed:
+                await self._loop.run_in_executor(
+                    None,
+                    partial(self._client.reqAccountUpdates, False, account_code),
+                )
+
+            if self._account_updates_request is request and not future.done():
+                future.cancel()
+
             self._account_updates_request = None
 
     async def request_positions(
@@ -729,6 +759,8 @@ class IBAPIController(EWrapper):
             self._on_account_updates_error(RuntimeError("connection closed"))
             self._on_positions_error(RuntimeError("connection closed"))
             self._reset_order_tracking()
+            self._managed_accounts.clear()
+            self._managed_accounts_event.clear()
 
         self._loop.call_soon_threadsafe(_handle_close)
 
@@ -839,6 +871,15 @@ class IBAPIController(EWrapper):
         event = {"type": "accountDownloadEnd", "account": account}
         self._loop.call_soon_threadsafe(self._publish_event, event)
         self._loop.call_soon_threadsafe(self._on_account_download_end, account)
+
+    def updateAccountTime(self, timeStamp: str) -> None:  # noqa: N802 (ibapi naming)
+        event = {"type": "updateAccountTime", "timestamp": timeStamp}
+        self._loop.call_soon_threadsafe(self._publish_event, event)
+        self._loop.call_soon_threadsafe(self._on_account_update_time, timeStamp)
+
+    def managedAccounts(self, accountsList: str) -> None:  # noqa: N802 (ibapi naming)
+        accounts = [account.strip() for account in accountsList.split(",") if account.strip()]
+        self._loop.call_soon_threadsafe(self._on_managed_accounts, accounts)
 
     def position(  # noqa: N802 (ibapi naming)
         self,
@@ -1207,6 +1248,8 @@ class IBAPIController(EWrapper):
         request = self._account_updates_request
         if request is None:
             return
+        if request.account and account and account != request.account:
+            return
         request.account_values.append(
             {
                 "tag": tag,
@@ -1230,6 +1273,8 @@ class IBAPIController(EWrapper):
         request = self._account_updates_request
         if request is None:
             return
+        if request.account and account and account != request.account:
+            return
         request.portfolio.append(
             {
                 "contract": contract,
@@ -1243,15 +1288,24 @@ class IBAPIController(EWrapper):
             }
         )
 
+    def _on_account_update_time(self, account_time: str) -> None:
+        request = self._account_updates_request
+        if request is None:
+            return
+        request.account_time = account_time
+
     def _on_account_download_end(self, account: str) -> None:
         request = self._account_updates_request
         if request is None:
+            return
+        if request.account and account and account != request.account:
             return
         if not request.future.done():
             payload = {
                 "account": account or request.account,
                 "account_values": list(request.account_values),
                 "portfolio": list(request.portfolio),
+                "account_time": request.account_time,
             }
             request.future.set_result(payload)
 
@@ -1260,6 +1314,13 @@ class IBAPIController(EWrapper):
         if request and not request.future.done():
             request.future.set_exception(error)
         self._account_updates_request = None
+
+    def _on_managed_accounts(self, accounts: Sequence[str]) -> None:
+        self._managed_accounts = list(dict.fromkeys(accounts))
+        if self._managed_accounts:
+            self._managed_accounts_event.set()
+        else:
+            self._managed_accounts_event.clear()
 
     def _on_position_update(
         self,
@@ -1374,3 +1435,17 @@ class IBAPIController(EWrapper):
         self._order_id_waiters.clear()
         self._pending_order_submissions.clear()
         self._pending_order_cancellations.clear()
+
+    async def _await_default_account(self, timeout: float) -> str:
+        if self._managed_accounts and self._managed_accounts_event.is_set():
+            return self._managed_accounts[0]
+
+        if timeout <= 0:
+            raise asyncio.TimeoutError("managed account list not available")
+
+        await asyncio.wait_for(self._managed_accounts_event.wait(), timeout)
+
+        if self._managed_accounts:
+            return self._managed_accounts[0]
+
+        raise asyncio.TimeoutError("managed account list not available")
