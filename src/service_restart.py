@@ -204,9 +204,16 @@ class LocalSupervisorController:
         if "{service}" in first:
             # we cannot validate until a service is provided
             return True
-        if shutil.which(first) is None and not Path(first).exists():
-            return False
-        return True
+        if shutil.which(first) is not None:
+            return True
+
+        candidate = Path(first)
+        if not candidate.is_absolute():
+            candidate = self._working_dir / candidate
+        if candidate.exists():
+            return True
+
+        return False
 
     async def restart(self, service: str) -> RestartCommandResult:
         command = self._build_command(service)

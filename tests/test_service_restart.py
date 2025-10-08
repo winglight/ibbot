@@ -11,6 +11,7 @@ from src.service_restart import (
     RestartMode,
     ServiceRestartManager,
     DockerComposeController,
+    LocalSupervisorController,
 )
 
 
@@ -78,3 +79,18 @@ def test_compose_controller_maps_service_names() -> None:
         assert targets == ["ib-feed", "market-data", "queue-monitor"]
 
     asyncio.run(_run())
+
+
+def test_local_controller_accepts_relative_binary_path(tmp_path) -> None:
+    workdir = tmp_path / "app"
+    workdir.mkdir()
+    restart_script = workdir / "bin" / "restart.sh"
+    restart_script.parent.mkdir()
+    restart_script.write_text("#!/bin/sh\nexit 0\n")
+
+    controller = LocalSupervisorController(
+        command_template=("bin/restart.sh", "{service}"),
+        working_dir=workdir,
+    )
+
+    assert controller.is_available()
