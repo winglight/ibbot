@@ -15,7 +15,7 @@ from fastapi.responses import JSONResponse
 from loguru import logger
 
 from src.account_snapshot_cache import read_account_info_snapshot, read_positions_snapshot
-from src.account_snapshot_service import AccountSnapshotService
+from src.account_snapshot_service import AccountSnapshotService, IB_COMMAND_SOURCE
 from src.ibbot import update_service_health
 from src.ibbot.redis import IBCommandError, IBCommandTimeout, get_redis_client, request_ib_command
 from src.routes.service_clients import (
@@ -438,8 +438,11 @@ def _snapshot_is_stale(snapshot: Optional[Dict[str, Any]]) -> bool:
 
 
 def _snapshot_metadata(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    source = snapshot.get("source")
+    if not source and snapshot.get("data"):
+        source = IB_COMMAND_SOURCE
     return {
-        "source": snapshot.get("source"),
+        "source": source,
         "snapshot_updated_at": snapshot.get("updated_at"),
         "stale": snapshot.get("stale", False),
         "stale_reason": snapshot.get("stale_reason"),
@@ -1042,7 +1045,7 @@ async def get_daily_summary() -> Dict[str, Any]:
         except IBCommandTimeout as exc:
             detail = "Timed out while requesting daily summary refresh"
             await _record_daily_summary_metrics(
-                source=f"ib-command:{method}",
+                source=IB_COMMAND_SOURCE,
                 updated_at=None,
                 from_cache=False,
                 stale=True,
@@ -1053,7 +1056,7 @@ async def get_daily_summary() -> Dict[str, Any]:
         except IBCommandError as exc:
             detail = f"Daily summary command {method} failed: {exc}"
             await _record_daily_summary_metrics(
-                source=f"ib-command:{method}",
+                source=IB_COMMAND_SOURCE,
                 updated_at=None,
                 from_cache=False,
                 stale=True,
@@ -1064,7 +1067,7 @@ async def get_daily_summary() -> Dict[str, Any]:
         except Exception as exc:
             detail = f"Failed to execute daily summary command {method}: {exc}"
             await _record_daily_summary_metrics(
-                source=f"ib-command:{method}",
+                source=IB_COMMAND_SOURCE,
                 updated_at=None,
                 from_cache=False,
                 stale=True,
@@ -1073,7 +1076,7 @@ async def get_daily_summary() -> Dict[str, Any]:
             )
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=detail) from exc
 
-        command_source = str(command_result.get("source") or f"ib-command:{method}")
+        command_source = str(command_result.get("source") or IB_COMMAND_SOURCE)
         rows, net_liq, refreshed_metadata = await _load_daily_summary_cache()
         if rows or net_liq:
             metadata = dict(refreshed_metadata)

@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from src.routes import account as account_module
 from src.routes import websocket as websocket_module
+from src.account_snapshot_service import IB_COMMAND_SOURCE
 
 
 class DummyDomClient:
@@ -83,7 +84,7 @@ def test_account_info_and_positions_include_snapshot_status(
     account_snapshot = {
         "data": {"equity": 123.45, "connected": True},
         "updated_at": "2024-06-01T09:30:00",
-        "source": "redis",
+        "source": IB_COMMAND_SOURCE,
         "stale": True,
         "stale_reason": "refreshing",
         "stale_at": "2024-06-01T09:31:00",
@@ -94,7 +95,7 @@ def test_account_info_and_positions_include_snapshot_status(
             {"symbol": "NQ", "position": -2},
         ],
         "updated_at": "2024-06-01T09:32:00",
-        "source": "redis",
+        "source": IB_COMMAND_SOURCE,
         "stale": True,
     }
 
@@ -149,8 +150,8 @@ def test_account_info_and_positions_include_snapshot_status(
     assert account_payload["snapshot_updated_at"] == account_snapshot["updated_at"]
     assert account_payload["stale_reason"] == account_snapshot["stale_reason"]
     assert account_payload["stale_at"] == account_snapshot["stale_at"]
-    assert account_payload["source"] == "redis"
-    assert account_payload["cache_source"] == "redis"
+    assert account_payload["source"] == IB_COMMAND_SOURCE
+    assert account_payload["cache_source"] == IB_COMMAND_SOURCE
     assert account_payload["from_cache"] is False
     assert stub_client.info_calls == [True]
 
@@ -158,8 +159,8 @@ def test_account_info_and_positions_include_snapshot_status(
     positions_payload = positions_response.json()
     assert positions_payload["stale"] is True
     assert positions_payload["snapshot_updated_at"] == positions_snapshot["updated_at"]
-    assert positions_payload["source"] == "redis"
-    assert positions_payload["cache_source"] == "redis"
+    assert positions_payload["source"] == IB_COMMAND_SOURCE
+    assert positions_payload["cache_source"] == IB_COMMAND_SOURCE
     assert positions_payload["from_cache"] is False
     assert stub_client.position_calls == [True]
 
@@ -215,14 +216,18 @@ def test_account_info_returns_cached_when_service_unavailable(
     snapshot = {
         "data": {"equity": 1500.0, "connected": True},
         "updated_at": "2024-06-03T09:30:00",
-        "source": "redis",
+        "source": IB_COMMAND_SOURCE,
     }
 
     async def fake_read_account_snapshot() -> Dict[str, Any]:
         return snapshot
 
     async def fake_read_positions_snapshot() -> Dict[str, Any]:
-        return {"data": [], "updated_at": "2024-06-03T09:30:10", "source": "redis"}
+        return {
+            "data": [],
+            "updated_at": "2024-06-03T09:30:10",
+            "source": IB_COMMAND_SOURCE,
+        }
 
     class FailingClient:
         async def fetch_info(self, *, force_refresh: bool = False) -> AccountServiceResult:
@@ -290,7 +295,7 @@ async def test_websocket_emits_snapshot_status_when_cache_stale(
         return {
             "data": {"equity": 1000.0},
             "updated_at": "2024-06-01T10:00:00",
-            "source": "redis",
+            "source": IB_COMMAND_SOURCE,
             "stale": True,
         }
 
@@ -298,7 +303,7 @@ async def test_websocket_emits_snapshot_status_when_cache_stale(
         return {
             "data": [{"symbol": "ES", "position": 1}],
             "updated_at": "2024-06-01T10:00:05",
-            "source": "redis",
+            "source": IB_COMMAND_SOURCE,
             "stale": True,
         }
 
@@ -338,12 +343,12 @@ async def test_websocket_emits_snapshot_status_when_cache_stale(
             websocket.close()
 
     assert account_update is not None
-    assert account_update["source"] == "redis"
+    assert account_update["source"] == IB_COMMAND_SOURCE
     assert account_update["stale"] is True
     assert account_update.get("snapshot_updated_at") == "2024-06-01T10:00:00"
 
     assert positions_update is not None
-    assert positions_update["source"] == "redis"
+    assert positions_update["source"] == IB_COMMAND_SOURCE
     assert positions_update["stale"] is True
     assert positions_update.get("snapshot_updated_at") == "2024-06-01T10:00:05"
 

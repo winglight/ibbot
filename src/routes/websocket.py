@@ -26,6 +26,7 @@ from src.account_snapshot_cache import (
     read_account_info_snapshot,
     read_positions_snapshot,
 )
+from src.account_snapshot_service import IB_COMMAND_SOURCE
 from src.websocket_manager import websocket_manager as global_websocket_manager
 from src.data_layer import (
     DataSubscriptionRequest,
@@ -1880,7 +1881,9 @@ async def websocket_endpoint(websocket: WebSocket):
 
         if isinstance(snapshot, Mapping):
             if "source" not in snapshot_metadata or not snapshot_metadata.get("source"):
-                snapshot_metadata["source"] = snapshot.get("source") or "redis"
+                snapshot_metadata["source"] = (
+                    snapshot.get("source") or IB_COMMAND_SOURCE
+                )
         snapshot_data = snapshot.get("data") if isinstance(snapshot, Mapping) else None
 
         if unavailable_payload is not None:
@@ -1899,7 +1902,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
             combined_meta = _merge_metadata(payload, snapshot_metadata)
             if not payload.get("source"):
-                payload["source"] = combined_meta.get("source") or "redis"
+                payload["source"] = combined_meta.get("source") or IB_COMMAND_SOURCE
             if combined_meta.get("snapshot_updated_at") and "snapshot_updated_at" not in payload:
                 payload["snapshot_updated_at"] = combined_meta["snapshot_updated_at"]
             if combined_meta.get("stale_reason") and "stale_reason" not in payload:
@@ -1946,16 +1949,20 @@ async def websocket_endpoint(websocket: WebSocket):
                 source_value = combined_meta.get("source")
                 if not source_value:
                     if isinstance(info_result, AccountServiceResult):
-                        source_value = info_result.metadata.get("source") or "service"
+                        source_value = (
+                            info_result.metadata.get("source") or IB_COMMAND_SOURCE
+                        )
                     else:
-                        source_value = snapshot_metadata.get("source") or "redis"
+                        source_value = (
+                            snapshot_metadata.get("source") or IB_COMMAND_SOURCE
+                        )
 
                 stale_flag = AccountServiceClient.is_metadata_stale(combined_meta)
                 response_payload: Dict[str, Any] = {
                     "type": "account_update",
                     "success": True,
                     "account_info": info_payload,
-                    "source": source_value or "service",
+                    "source": source_value or IB_COMMAND_SOURCE,
                     "stale": stale_flag,
                     "from_cache": bool(combined_meta.get("from_cache")),
                 }
@@ -2005,7 +2012,9 @@ async def websocket_endpoint(websocket: WebSocket):
                         status_payload["stale_at"] = combined_meta["stale_at"]
                     account_payloads.append(status_payload)
             else:
-                combined_meta.setdefault("source", snapshot_metadata.get("source") or "redis")
+                combined_meta.setdefault(
+                    "source", snapshot_metadata.get("source") or IB_COMMAND_SOURCE
+                )
                 fallback_payload = _service_unavailable_payload(
                     "account_update",
                     account_info={
@@ -2020,7 +2029,9 @@ async def websocket_endpoint(websocket: WebSocket):
                     fallback_payload["stale_reason"] = combined_meta["stale_reason"]
                 if combined_meta.get("stale_at"):
                     fallback_payload["stale_at"] = combined_meta["stale_at"]
-                fallback_payload["source"] = combined_meta.get("source") or "redis"
+                fallback_payload["source"] = (
+                    combined_meta.get("source") or IB_COMMAND_SOURCE
+                )
                 if combined_meta:
                     fallback_payload["metadata"] = dict(combined_meta)
                 for key in (
@@ -2105,7 +2116,7 @@ async def websocket_endpoint(websocket: WebSocket):
         if isinstance(positions_snapshot, Mapping):
             if not positions_snapshot_metadata.get("source"):
                 positions_snapshot_metadata["source"] = (
-                    positions_snapshot.get("source") or "redis"
+                    positions_snapshot.get("source") or IB_COMMAND_SOURCE
                 )
         positions_snapshot_data = (
             positions_snapshot.get("data") if isinstance(positions_snapshot, Mapping) else None
@@ -2118,7 +2129,9 @@ async def websocket_endpoint(websocket: WebSocket):
                 payload["positions"] = list(positions_snapshot_data)
             payload.setdefault("positions", [])
             if not payload.get("source"):
-                payload["source"] = combined_meta.get("source") or "redis"
+                payload["source"] = (
+                    combined_meta.get("source") or IB_COMMAND_SOURCE
+                )
             if combined_meta.get("snapshot_updated_at") and "snapshot_updated_at" not in payload:
                 payload["snapshot_updated_at"] = combined_meta["snapshot_updated_at"]
             if combined_meta.get("stale_reason") and "stale_reason" not in payload:
@@ -2172,16 +2185,22 @@ async def websocket_endpoint(websocket: WebSocket):
                 source_value = combined_meta.get("source")
                 if not source_value:
                     if isinstance(positions_result, AccountServiceResult):
-                        source_value = positions_result.metadata.get("source") or "service"
+                        source_value = (
+                            positions_result.metadata.get("source")
+                            or IB_COMMAND_SOURCE
+                        )
                     else:
-                        source_value = positions_snapshot_metadata.get("source") or "redis"
+                        source_value = (
+                            positions_snapshot_metadata.get("source")
+                            or IB_COMMAND_SOURCE
+                        )
 
                 stale_flag = AccountServiceClient.is_metadata_stale(combined_meta)
                 response_payload = {
                     "type": "position_update",
                     "success": True,
                     "positions": positions_payload,
-                    "source": source_value or "service",
+                    "source": source_value or IB_COMMAND_SOURCE,
                     "stale": stale_flag,
                     "from_cache": bool(combined_meta.get("from_cache")),
                 }
@@ -2220,7 +2239,8 @@ async def websocket_endpoint(websocket: WebSocket):
                     position_payloads.append(status_payload)
             else:
                 combined_meta.setdefault(
-                    "source", positions_snapshot_metadata.get("source") or "redis"
+                    "source",
+                    positions_snapshot_metadata.get("source") or IB_COMMAND_SOURCE,
                 )
                 fallback_payload = _service_unavailable_payload(
                     "position_update",
@@ -2793,7 +2813,9 @@ async def websocket_endpoint(websocket: WebSocket):
                             if not snapshot_metadata:
                                 snapshot_metadata = _merge_metadata(snapshot)
                             if not source_value:
-                                source_value = snapshot.get("source") or "redis"
+                                source_value = (
+                                    snapshot.get("source") or IB_COMMAND_SOURCE
+                                )
                             data = snapshot.get("data")
                             if isinstance(data, list):
                                 positions_payload = [
@@ -2809,7 +2831,7 @@ async def websocket_endpoint(websocket: WebSocket):
                             positions=[],
                             source=combined_meta.get("source")
                             or source_value
-                            or "service",
+                            or IB_COMMAND_SOURCE,
                             fast=fast,
                             force_refresh=bool(effective_force),
                             connected=bool(connected_flag),
@@ -2849,7 +2871,9 @@ async def websocket_endpoint(websocket: WebSocket):
                         continue
 
                     source_field = (
-                        combined_meta.get("source") or source_value or "service"
+                        combined_meta.get("source")
+                        or source_value
+                        or IB_COMMAND_SOURCE
                     )
                     stale_flag = AccountServiceClient.is_metadata_stale(combined_meta)
 

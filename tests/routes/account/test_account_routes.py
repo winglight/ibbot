@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from src.routes import account as account_module
 from src.routes.service_clients import AccountServiceResult, ServiceUnavailableError
+from src.account_snapshot_service import IB_COMMAND_SOURCE
 
 
 @pytest.fixture()
@@ -75,7 +76,7 @@ def test_positions_returns_cached_snapshot_when_service_unavailable(account_app:
     snapshot = {
         "data": [{"symbol": "ES", "position": 2}],
         "updated_at": "2024-01-01T00:00:00",
-        "source": "redis",
+        "source": IB_COMMAND_SOURCE,
     }
     snapshots = collections.deque([snapshot, snapshot])
 

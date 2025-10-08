@@ -2,7 +2,12 @@
 """
 测试订单列表错误修复的脚本
 """
-import requests
+import pytest
+
+try:  # pragma: no cover - dependency guard for optional test requirement
+    import requests  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover
+    pytest.skip("requests library is not installed", allow_module_level=True)
 import json
 
 def get_auth_token():

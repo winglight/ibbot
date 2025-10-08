@@ -330,6 +330,7 @@ class DomBackfillRequest(BaseModel):
         return result or None
 
     @model_validator(mode="after")
+    @classmethod
     def _ensure_window(cls, data: "DomBackfillRequest") -> "DomBackfillRequest":
         if not data.duration and not data.start:
             raise ValueError("Either duration or start must be provided")
