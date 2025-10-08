@@ -63,6 +63,18 @@ def check_required_env():
     print("✅ 所有必需的环境变量都已设置")
     return True
 
+def check_ibapi_dependency():
+    """检测 ``ibapi`` 依赖是否已经安装。"""
+
+    try:
+        import ibapi  # noqa: F401  # pylint: disable=unused-import
+    except ImportError:
+        print("⚠️  未检测到 ibapi 包，请运行 pip install -r requirements.txt 进行安装")
+        return False
+
+    print("✅ 已检测到 ibapi 官方 API 依赖")
+    return True
+
 def show_env_info():
     """显示关键环境变量信息"""
     print("\n📋 关键环境变量:")
@@ -113,6 +125,9 @@ def main():
     
     # 显示环境变量信息
     show_env_info()
+
+    # 检查 ibapi 依赖
+    check_ibapi_dependency()
     
     # 启动服务
     service_name = sys.argv[1] if len(sys.argv) > 1 else None

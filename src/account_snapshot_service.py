@@ -720,4 +720,4 @@ class AccountSnapshotService:
         }
 
 
-IB_COMMAND_SOURCE = "ib-command"
+IB_COMMAND_SOURCE = "ib-command:ibapi-controller"

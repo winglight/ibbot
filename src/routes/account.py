@@ -13,6 +13,7 @@ from src.account_snapshot_cache import (
     read_account_info_snapshot,
     read_positions_snapshot,
 )
+from src.account_snapshot_service import IB_COMMAND_SOURCE
 from src.utils.account_pnl_cache import (
     load_all_daily_totals,
     read_net_liquidation_snapshot,
@@ -96,6 +97,9 @@ def _snapshot_response(
         "updated_at"
     )
     source = metadata_map.get("source")
+    if not source and snapshot and snapshot.get("data"):
+        source = IB_COMMAND_SOURCE
+        metadata_map.setdefault("source", source)
     stale_reason = metadata_map.get("stale_reason")
     stale_flag = metadata_map.get("stale")
     if isinstance(stale_flag, bool):
@@ -165,6 +169,10 @@ def _extract_snapshot_metadata(
 
     if "snapshot_updated_at" not in metadata and isinstance(metadata.get("updated_at"), str):
         metadata["snapshot_updated_at"] = metadata["updated_at"]
+
+    if metadata and not metadata.get("source"):
+        if metadata.get("snapshot_updated_at") or metadata.get("updated_at"):
+            metadata["source"] = IB_COMMAND_SOURCE
 
     return metadata
 

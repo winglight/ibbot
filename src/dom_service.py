@@ -22,6 +22,7 @@ from src.data_layer import (
 )
 from src.data_layer.event_bus import BusSubscriptionToken
 from src.data_layer.bootstrap import get_data_source_manager
+from src.connection_manager import connection_manager as _GLOBAL_CONNECTION_MANAGER
 from src.dom_cache import DomCacheManager
 from src.dom_dependencies import (
     dom_config,
@@ -1343,6 +1344,10 @@ class DOMService:
     ) -> Dict[str, Dict[str, float]]:
         return self._sanitize_feature_thresholds(values)
 
+
+# Legacy module-level alias for compatibility with historical imports and
+# pytest fixtures that monkeypatch DOM connectivity helpers.
+connection_manager = _GLOBAL_CONNECTION_MANAGER
 
 # Global service instance
 _dom_service = DOMService()

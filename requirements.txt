@@ -1,4 +1,4 @@
-ib_insync
+ibapi~=10.22.1
 fastapi~=0.110.0
 uvicorn~=0.29.0
 jinja2~=3.1.0

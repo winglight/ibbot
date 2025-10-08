@@ -2,7 +2,12 @@
 """Test script to verify strategy creation fix."""
 
 import json
-import requests
+import pytest
+
+try:  # pragma: no cover - dependency guard for optional test requirement
+    import requests  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover
+    pytest.skip("requests library is not installed", allow_module_level=True)
 
 def test_strategy_creation():
     """Test creating a strategy with the fields that frontend sends."""
