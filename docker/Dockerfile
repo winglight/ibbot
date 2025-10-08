@@ -5,21 +5,10 @@
 # - Easily override APP_MODULE/WEB_* via environment
 # ============================================================
 
-FROM python:3.11-slim AS base
-
-# -------- System deps --------
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc g++ curl ca-certificates \
-    # (Optional) troubleshooting tools — uncomment if you need them:
-    # procps net-tools iproute2 dnsutils iputils-ping mtr-tiny \
- && rm -rf /var/lib/apt/lists/*
+ARG BASE_IMAGE=ibbot-base:py311
+FROM ${BASE_IMAGE} AS base
 
 WORKDIR /app
-
-# -------- Python deps --------
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt \
- && pip install --no-cache-dir gunicorn "uvicorn[standard]"
 
 # -------- App code --------
 COPY . .
