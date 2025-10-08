@@ -74,7 +74,49 @@ docker compose --profile tunnel up -d cloudflared
 
 在 Cloudflare 控制台新增 `Public Hostname`，将域名指向 `http://ibbot:8000` 即可。
 
-## 5. 推送镜像到 GHCR（可选）
+## 5. 基础镜像与分层构建方案
+
+本项目将以“基础镜像 + 应用镜像”的分层方式交付，便于后续仅更新业务代码即可完成发布。以下步骤默认 **protobuf 生成的 `.pb` 文件已经在仓库中准备好且可复用**，因此在容器内无需重复执行 `protoc`。
+
+### 5.1 准备 TWS API 源码
+
+1. 在仓库根目录执行 `git submodule update --init --recursive`，或手动确认 `IBJts` 目录已经更新到官方最新版本。
+2. 构建上下文中必须包含 `IBJts/source/pythonclient` 的全部内容，以及已经生成好的 protobuf Python 文件。
+
+### 5.2 构建基础镜像
+
+仓库已经提供 `docker/Dockerfile.base`，以 `python:3.11-slim` 为基础镜像并完成如下步骤：
+
+1. 安装最小化的系统依赖（`build-essential`、`curl`、`gcc`、`g++` 等）。
+2. 将 `IBJts/source/pythonclient` 复制到镜像中并执行 `python setup.py install` 安装 TWS API。
+3. 复制 `requirements.txt`，执行 `pip install -r requirements.txt` 以及 `pip install gunicorn "uvicorn[standard]"`。
+
+> ⚠️ 当前方案假设 protobuf `.pb` 文件已在仓库中准备就绪，如需重新生成，请在基础镜像中额外安装 `protobuf-compiler` 并调用生成脚本。
+
+构建命令示例：
+
+```bash
+docker build -f docker/Dockerfile.base -t ghcr.io/<OWNER>/ibbot-base:py311 .
+docker push ghcr.io/<OWNER>/ibbot-base:py311
+```
+
+### 5.3 构建项目镜像
+
+`docker/Dockerfile` 默认通过 `BASE_IMAGE` 构建参数引用上述基础镜像，避免重复安装依赖，仅负责复制业务代码、生成运行所需的目录以及写入入口脚本。
+
+```bash
+# 如需使用自定义 tag，可在构建时覆盖 BASE_IMAGE
+docker build \
+  -f docker/Dockerfile \
+  --build-arg BASE_IMAGE=ghcr.io/<OWNER>/ibbot-base:py311 \
+  -t ghcr.io/<OWNER>/ibbot:latest .
+
+docker push ghcr.io/<OWNER>/ibbot:latest
+```
+
+Compose 文件（`docker/docker-compose.yml`）已通过 `x-app-build` 共享该参数，确保所有依赖应用镜像的服务均使用相同的基础镜像层。
+
+## 6. 推送镜像到 GHCR（可选）
 
 ```bash
 # 登录（GITHUB_TOKEN 需具备 write/read:packages 权限）
@@ -90,7 +132,7 @@ docker push ghcr.io/<OWNER>/ibbot:<TAG>
 
 将生产 compose 中 `image:` 指向新的 GHCR 路径即可。
 
-## 6. 常见问题
+## 7. 常见问题
 
 | 现象 | 排查建议 |
 | --- | --- |

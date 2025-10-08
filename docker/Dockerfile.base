@@ -1,0 +1,39 @@
+# ============================================================
+# Dockerfile.base — reusable base image for IB Trading Bot
+# - Installs system dependencies on top of python:3.11-slim
+# - Installs the Interactive Brokers TWS API from local sources
+# - Installs all Python requirements shared by application images
+# ============================================================
+
+FROM python:3.11-slim AS base
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+# -------- System dependencies --------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    curl \
+    gcc \
+    g++ \
+    ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+
+# -------- Install TWS API from source --------
+WORKDIR /opt/ibjts/pythonclient
+COPY IBJts/source/pythonclient/ ./
+RUN python setup.py install
+
+# -------- Install shared Python requirements --------
+WORKDIR /tmp/pip
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt \
+ && pip install --no-cache-dir gunicorn "uvicorn[standard]"
+
+WORKDIR /
+
+# -------- Metadata --------
+LABEL org.opencontainers.image.source="https://github.com/your-org/ibbot" \
+      org.opencontainers.image.description="Base image with TWS API and project dependencies pre-installed"
