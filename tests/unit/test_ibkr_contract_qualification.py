@@ -5,11 +5,6 @@ import pytest
 from src.connection_manager import ConnectionConfig
 from src.ibkr_client import IBKRClient
 
-try:  # pragma: no cover - exercised when ib_insync is installed locally
-    from ib_insync import Stock  # type: ignore
-except ImportError:  # pragma: no cover - fallback for CI/test environments
-    from test.ib_insync_stub import Stock  # type: ignore
-
 try:  # pragma: no cover - executed only when the real ibapi package is present
     from ibapi.contract import Contract as IBAPIContract, ContractDetails as IBAPIContractDetails
 except ImportError:  # pragma: no cover - default path during unit tests
@@ -82,7 +77,7 @@ async def test_contract_details_cached(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(IBKRClient, "_ensure_ibapi_controller", _fake_ensure, raising=False)
 
-    contract = Stock("AAPL")
+    contract = client.get_stock_contract("AAPL", "SMART", "USD")
     qualified = await client._qualify_contract(contract, symbol="AAPL", exchange="SMART", currency="USD")
 
     assert qualified is contract
@@ -90,7 +85,7 @@ async def test_contract_details_cached(monkeypatch: pytest.MonkeyPatch) -> None:
     assert fake_controller.calls == 1
     assert manager.ib.calls == 0
 
-    second_contract = Stock("AAPL")
+    second_contract = client.get_stock_contract("AAPL", "SMART", "USD")
     qualified_second = await client._qualify_contract(
         second_contract,
         symbol="AAPL",

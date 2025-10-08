@@ -1,13 +1,28 @@
 from __future__ import annotations
 
-from typing import Any, Callable, Coroutine, Dict, Optional
+from typing import Any, Callable, Coroutine, Dict, Optional, TYPE_CHECKING
 from datetime import datetime
 from dataclasses import dataclass
 
+if TYPE_CHECKING:  # pragma: no cover - typing helper
+    from ib_insync import IB as IBClient  # type: ignore
+else:
+    IBClient = Any  # type: ignore[assignment]
+
+_IB_IMPORT_MODULE: str | None = None
+_IB_IMPORT_IS_STUB = False
+
 try:  # pragma: no cover - exercised indirectly when ib_insync is missing
-    from ib_insync import IB, util, ExecutionFilter
-except ImportError:  # pragma: no cover - fallback for test environments
-    from test.ib_insync_stub import IB, util, ExecutionFilter
+    from ib_insync import IB as _ImportedIB
+except ImportError:  # pragma: no cover - gracefully handle missing optional dependency
+    _ImportedIB = None  # type: ignore[assignment]
+else:
+    _IB_IMPORT_MODULE = getattr(_ImportedIB, "__module__", None)
+    if isinstance(_IB_IMPORT_MODULE, str) and "ib_insync_stub" in _IB_IMPORT_MODULE:
+        _IB_IMPORT_IS_STUB = True
+        _ImportedIB = None  # type: ignore[assignment]
+
+IB: type[IBClient] | None = _ImportedIB  # type: ignore[assignment]
 from loguru import logger
 
 from .utils import now_local
@@ -15,6 +30,11 @@ from .restart_utils import restart_program
 
 # 为connection模块创建专用logger
 connection_logger = logger.bind(module="connection", request_id="-")
+
+if _IB_IMPORT_IS_STUB:
+    connection_logger.info(
+        "Detected ib_insync stub import; routing connections through IBAPIController"
+    )
 import os
 import threading
 import asyncio
@@ -23,6 +43,7 @@ from concurrent.futures import ThreadPoolExecutor
 from src.config import load_project_env
 from . import account_snapshot_cache
 from .routes.service_clients import AccountServiceClient, ServiceClientError
+from .ibapi_controller import IBAPIController, ConnectionParams
 import types
 import subprocess
 from pathlib import Path
@@ -122,7 +143,11 @@ class ConnectionManager:
     """统一的IBKR连接管理器"""
     
     def __init__(self):
-        self.ib: Optional[IB] = None
+        self.ib: Optional[IBClient] = None
+        self._ib_import_is_stub = _IB_IMPORT_IS_STUB
+        self._ibapi_controller: Optional[IBAPIController] = None
+        self._controller_events_task: Optional[asyncio.Task] = None
+        self._controller_events_stop: Optional[asyncio.Event] = None
         self.config: ConnectionConfig = ConnectionConfig.from_env()
         self.connected: bool = False
         self._connection_thread_alive: bool = False
@@ -187,6 +212,95 @@ class ConnectionManager:
         self._next_client_id_hint = self._normalize_client_id(self.config.client_id)
         self.config.client_id = self._next_client_id_hint
         self._client_id_conflict_detected: bool = False
+        self._allow_legacy_ib = _get_env_bool("IBKR_ENABLE_IB_INSYNC", False)
+        if self._allow_legacy_ib and IB is None:
+            connection_logger.warning(
+                "IBKR_ENABLE_IB_INSYNC is set but ib_insync is unavailable; falling back to IBAPIController",
+            )
+            self._allow_legacy_ib = False
+        if self._allow_legacy_ib:
+            connection_logger.info(
+                "Legacy ib_insync connection path enabled via IBKR_ENABLE_IB_INSYNC",
+            )
+        else:
+            connection_logger.info(
+                "Defaulting IBKR connections to IBAPIController; set IBKR_ENABLE_IB_INSYNC=1 to opt into ib_insync",
+            )
+
+    # ------------------------------------------------------------------
+    # IBAPI controller helpers
+    # ------------------------------------------------------------------
+    def _should_use_legacy_ib_client(self) -> bool:
+        """Return ``True`` when the legacy ``ib_insync`` client should be used."""
+
+        if self._ib_import_is_stub:
+            return False
+
+        if IB is None:
+            return False
+
+        return self._allow_legacy_ib
+
+    def _ensure_ibapi_controller(self, loop: asyncio.AbstractEventLoop) -> IBAPIController:
+        """Return an ``IBAPIController`` bound to ``loop``."""
+
+        controller = self._ibapi_controller
+        if controller is None or controller._loop is not loop:  # type: ignore[attr-defined]
+            controller = IBAPIController(loop=loop)
+            self._ibapi_controller = controller
+        return controller
+
+    def _start_controller_event_listener(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Monitor controller events to detect disconnections."""
+
+        controller = self._ibapi_controller
+        if controller is None:
+            return
+        if self._controller_events_task and not self._controller_events_task.done():
+            return
+
+        stop_event = asyncio.Event()
+        self._controller_events_stop = stop_event
+
+        async def _listener() -> None:
+            queue = controller.event_queue
+            while True:
+                if stop_event.is_set():
+                    return
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    continue
+                except Exception as exc:  # pragma: no cover - defensive guard
+                    connection_logger.debug("Controller event listener stopped", error=str(exc))
+                    return
+
+                event_type = event.get("type") if isinstance(event, dict) else None
+                if event_type == "connectionClosed":
+                    self._mark_snapshots_stale("connectionClosed")
+                    disconnect_event = self._disconnect_wait_event
+                    if disconnect_event is not None:
+                        disconnect_event.set()
+                    return
+
+        self._controller_events_task = loop.create_task(_listener())
+
+    def _stop_controller_event_listener(self) -> None:
+        """Stop the controller event monitoring task."""
+
+        stop_event = self._controller_events_stop
+        if stop_event is not None:
+            try:
+                stop_event.set()
+            except Exception:  # pragma: no cover - defensive guard
+                pass
+            self._controller_events_stop = None
+
+        task = self._controller_events_task
+        if task is not None:
+            if not task.done():
+                task.cancel()
+            self._controller_events_task = None
 
     def _schedule_background_task(
         self,
@@ -681,6 +795,117 @@ class ConnectionManager:
         with self._connect_state_cond:
             self._connect_state_cond.notify_all()
 
+    async def _connect_via_ibapi_controller(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        *,
+        external: bool,
+    ) -> bool:
+        """Establish a connection using :class:`IBAPIController`."""
+
+        controller = self._ensure_ibapi_controller(loop)
+        connected = False
+        attempts = 0
+        attempted_ids: set[int] = set()
+        try_client_id = self._normalize_client_id(self._next_client_id_hint)
+
+        while attempts < self._client_id_retry_limit:
+            if try_client_id in attempted_ids:
+                break
+            attempted_ids.add(try_client_id)
+            attempts += 1
+            params = ConnectionParams(
+                host=self.config.host,
+                port=self.config.port,
+                client_id=try_client_id,
+            )
+            try:
+                connection_logger.info(
+                    "尝试连接IBKR（官方API）",
+                    client_id=try_client_id,
+                )
+                await controller.connect(params=params, timeout=self._connect_async_timeout_sec)
+                await controller.wait_until_connected(timeout=self._connect_handshake_grace_sec or 5.0)
+            except Exception as exc:
+                error_msg = str(exc)
+                self._last_connect_error = error_msg
+                connection_logger.warning(
+                    "官方API连接失败",
+                    error=error_msg,
+                    client_id=try_client_id,
+                )
+                try_client_id = self._compute_next_client_id(try_client_id)
+                continue
+
+            connected = controller.is_connected()
+            if connected:
+                break
+
+            try_client_id = self._compute_next_client_id(try_client_id)
+
+        if not connected:
+            attempted = ", ".join(str(cid) for cid in sorted(attempted_ids)) or str(self.config.client_id)
+            self._last_connect_error = f"无法找到可用的客户端ID (尝试了 {attempted})"
+            self._notify_connect_waiters()
+            return False
+
+        self._next_client_id_hint = try_client_id
+        self.connected = True
+        self.ib = None
+        self._last_connect_error = None
+        self._disconnect_wait_event = asyncio.Event()
+        self._connection_thread_alive = True
+        self._loop_timeout_warning_suppressed = 0
+        self._last_loop_timeout_warning = 0.0
+
+        self._start_controller_event_listener(loop)
+        self._notify_connect_waiters()
+
+        account_type = "Paper" if self.config.paper_trading else "Live"
+        connection_logger.info(
+            f"Connected to IBKR {account_type} account via官方API at {self.config.host}:{self.config.port}"
+        )
+
+        self._notify_ibkr_client_connected(external=external)
+        self._request_account_refresh("connection_established")
+
+        disconnect_reason = "external-request"
+        disconnect_event = self._disconnect_wait_event
+
+        try:
+            while True:
+                if disconnect_event is None:
+                    break
+                try:
+                    await asyncio.wait_for(
+                        disconnect_event.wait(),
+                        timeout=self._post_connect_health_interval,
+                    )
+                    disconnect_reason = "ib-event"
+                    break
+                except asyncio.TimeoutError:
+                    if not controller.is_connected():
+                        connection_logger.warning("IBKR connection lost during controller health check")
+                        disconnect_reason = "connection-health-check"
+                        break
+                    continue
+        finally:
+            self._stop_controller_event_listener()
+            self._disconnect_wait_event = None
+            self.connected = False
+            self._connection_thread_alive = False
+            try:
+                await controller.disconnect()
+            except Exception as exc:
+                connection_logger.debug(f"Error disconnecting controller: {exc}")
+            connection_logger.info("IBKR controller loop ended", reason=disconnect_reason)
+            try:
+                self._notify_ibkr_client_disconnected(trigger=disconnect_reason)
+            except Exception:
+                pass
+
+        return True
+
     def _connect_in_thread(self) -> bool:
         """在独立线程中连接到IBKR服务器"""
         self._connect_result_event = threading.Event()
@@ -688,15 +913,23 @@ class ConnectionManager:
             try:
                 # 获取当前事件循环
                 loop = asyncio.get_event_loop()
-                
+
                 # 断开现有连接
                 if self.ib:
                     try:
                         self.ib.disconnect()
                     except:
                         pass
-                
+
+                external = not self._ibkr_connect_in_progress
+
+                if not self._should_use_legacy_ib_client():
+                    await self._connect_via_ibapi_controller(loop, external=external)
+                    return
+
                 # 创建新的IB实例
+                if IB is None:
+                    raise RuntimeError("ib_insync is not available; cannot honour IBKR_ENABLE_IB_INSYNC")
                 self.ib = IB()
                 self._patch_wrapper_depth_guard(self.ib.wrapper)
                 self._ensure_error_handler_installed(self.ib.wrapper)
@@ -1437,14 +1670,28 @@ class ConnectionManager:
                     if loop.is_running():
                         event.set()
 
-            # 安全断开 IB
+            # 安全断开 IB 或官方控制器
             if self.ib and self.ib.isConnected():
                 try:
                     self.ib.disconnect()
                     connection_logger.info("Disconnected from IBKR")
                 except Exception as e:
                     connection_logger.warning(f"Error while disconnecting IB: {e}")
-            
+            elif self._ibapi_controller and self._ibapi_controller.is_connected():
+                loop = self._loop
+                if not loop:
+                    connection_logger.warning("Controller loop not available during disconnect")
+                else:
+                    try:
+                        future = asyncio.run_coroutine_threadsafe(
+                            self._ibapi_controller.disconnect(),
+                            loop,
+                        )
+                        future.result(timeout=5.0)
+                        connection_logger.info("Disconnected IBAPI controller")
+                    except Exception as e:
+                        connection_logger.warning(f"Error while disconnecting IBAPI controller: {e}")
+
             # 关闭事件循环
             if self._loop and not self._loop.is_closed():
                 try:
@@ -1453,17 +1700,18 @@ class ConnectionManager:
                     # 等待线程结束时再做最终清理
                 except Exception as e:
                     connection_logger.debug(f"Error closing loop: {e}")
-            
+
             # 等待线程结束
             if self._connection_thread and self._connection_thread.is_alive():
                 try:
                     self._connection_thread.join(timeout=2.0)
                 except Exception:
                     pass
-            
+
             # 清理状态
             self.connected = False
             self.ib = None
+            self._stop_controller_event_listener()
             self._loop = None
             self._connection_thread = None
 
@@ -1473,6 +1721,11 @@ class ConnectionManager:
 
     def is_connected(self) -> bool:
         """检查连接状态"""
+        controller = self._ibapi_controller
+        if controller is not None and controller.is_connected():
+            self.connected = True
+            return True
+
         if not self.ib:
             self.connected = False
             return False
@@ -1529,6 +1782,9 @@ class ConnectionManager:
             while True:
                 if self.connected and self.ib and self.ib.isConnected():
                     return True
+                controller = self._ibapi_controller
+                if controller is not None and controller.is_connected():
+                    return True
                 if not self._connect_in_progress:
                     return False
 
@@ -1545,9 +1801,13 @@ class ConnectionManager:
         except Exception:
             return None
     
-    def get_ib_instance(self) -> Optional[IB]:
+    def get_ib_instance(self) -> Optional[IBClient | IBAPIController]:
         """获取IB实例"""
-        if self.is_connected():
+        controller = self._ibapi_controller
+        if controller is not None and controller.is_connected():
+            return controller  # type: ignore[return-value]
+
+        if self.ib and self.ib.isConnected():
             return self.ib
         return None
     
@@ -1574,7 +1834,10 @@ class ConnectionManager:
             if not loop or loop.is_closed():
                 connection_logger.warning("Connection event loop not available")
                 return None
-            if not self.ib or not self.ib.isConnected():
+            controller = self._ibapi_controller
+            ib_connected = bool(self.ib and hasattr(self.ib, "isConnected") and self.ib.isConnected())
+            controller_connected = bool(controller and controller.is_connected())
+            if not ib_connected and not controller_connected:
                 connection_logger.warning("IBKR connection not available")
                 return None
 
@@ -1658,7 +1921,10 @@ class ConnectionManager:
             if not loop or loop.is_closed():
                 connection_logger.warning("Connection event loop not available")
                 return None
-            if not self.ib or not self.ib.isConnected():
+            controller = self._ibapi_controller
+            ib_connected = bool(self.ib and hasattr(self.ib, "isConnected") and self.ib.isConnected())
+            controller_connected = bool(controller and controller.is_connected())
+            if not ib_connected and not controller_connected:
                 connection_logger.warning("IBKR connection not available")
                 return None
 

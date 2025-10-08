@@ -19,7 +19,7 @@ import asyncio
 import threading
 from dataclasses import dataclass, field
 from functools import partial
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Set
 
 try:  # pragma: no cover - exercised indirectly when ibapi is missing
     from ibapi.client import EClient
@@ -140,6 +140,7 @@ class IBAPIController(EWrapper):
         self._connection_lock = asyncio.Lock()
         self._next_valid_id_future: Optional[asyncio.Future[int]] = None
         self._event_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        self._event_consumers: Set[asyncio.Queue[dict[str, Any]]] = {self._event_queue}
         self._next_request_id = 1
         self._contract_details_requests: Dict[int, _ContractDetailsRequest] = {}
         self._market_data_requests: Dict[int, Contract] = {}
@@ -154,6 +155,7 @@ class IBAPIController(EWrapper):
         self._order_id_waiters: List[asyncio.Future[int]] = []
         self._pending_order_submissions: Dict[int, asyncio.Future[OrderPlacement]] = {}
         self._pending_order_cancellations: Dict[int, asyncio.Future[str]] = {}
+        self._event_consumers_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Public API
@@ -169,6 +171,37 @@ class IBAPIController(EWrapper):
         """Queue receiving structured events produced by callbacks."""
 
         return self._event_queue
+
+    def register_event_consumer(self) -> "asyncio.Queue[dict[str, Any]]":
+        """Create a new queue that will receive controller events."""
+
+        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        with self._event_consumers_lock:
+            self._event_consumers.add(queue)
+        return queue
+
+    def unregister_event_consumer(self, queue: "asyncio.Queue[dict[str, Any]]") -> None:
+        """Stop publishing events to ``queue``."""
+
+        with self._event_consumers_lock:
+            self._event_consumers.discard(queue)
+
+    def _publish_event(self, event: Dict[str, Any]) -> None:
+        """Broadcast ``event`` to every registered consumer."""
+
+        with self._event_consumers_lock:
+            consumers = list(self._event_consumers)
+
+        if not consumers:
+            return
+
+        base_payload = dict(event)
+        for index, queue in enumerate(consumers):
+            payload = base_payload if index == 0 else dict(base_payload)
+            try:
+                queue.put_nowait(payload)
+            except Exception:
+                continue
 
     def is_connected(self) -> bool:
         """Return ``True`` if the underlying client reports a connection."""
@@ -626,6 +659,15 @@ class IBAPIController(EWrapper):
             self._pending_order_cancellations.pop(order_id, None)
             raise exc
 
+    async def request_open_orders_snapshot(self) -> None:
+        """Ask the gateway to stream the current set of open orders."""
+
+        if not self.is_connected():
+            raise RuntimeError("request_open_orders_snapshot requires an active connection")
+
+        await self._loop.run_in_executor(None, self._client.reqOpenOrders)
+        await self._loop.run_in_executor(None, self._client.reqAllOpenOrders)
+
     # ------------------------------------------------------------------
     # ``EWrapper`` callback implementations
     # ------------------------------------------------------------------
@@ -651,7 +693,7 @@ class IBAPIController(EWrapper):
                 "message": errorString,
                 "advanced": advancedOrderRejectJson,
             }
-            self._event_queue.put_nowait(event)
+            self._publish_event(event)
 
             error = IBAPIRequestError(f"{errorCode}: {errorString}")
             if reqId in self._contract_details_requests:
@@ -673,7 +715,7 @@ class IBAPIController(EWrapper):
         """Bridge connection acknowledgements into the asyncio queue."""
 
         event = {"type": "connectAck"}
-        self._loop.call_soon_threadsafe(self._event_queue.put_nowait, event)
+        self._loop.call_soon_threadsafe(self._publish_event, event)
 
     def connectionClosed(self) -> None:  # noqa: N802 (ibapi naming)
         """Reset controller state when the connection is closed."""
@@ -681,7 +723,7 @@ class IBAPIController(EWrapper):
         def _handle_close() -> None:
             self._connected_event.clear()
             event = {"type": "connectionClosed"}
-            self._event_queue.put_nowait(event)
+            self._publish_event(event)
             self._fail_all_requests(RuntimeError("connection closed"))
             self._reset_market_data_requests()
             self._on_account_updates_error(RuntimeError("connection closed"))
@@ -720,7 +762,7 @@ class IBAPIController(EWrapper):
             "value": value,
             "currency": currency,
         }
-        self._loop.call_soon_threadsafe(self._event_queue.put_nowait, event)
+        self._loop.call_soon_threadsafe(self._publish_event, event)
         self._loop.call_soon_threadsafe(
             self._on_account_summary,
             reqId,
@@ -732,7 +774,7 @@ class IBAPIController(EWrapper):
 
     def accountSummaryEnd(self, reqId: int) -> None:  # noqa: N802 (ibapi naming)
         event = {"type": "accountSummaryEnd", "request_id": reqId}
-        self._loop.call_soon_threadsafe(self._event_queue.put_nowait, event)
+        self._loop.call_soon_threadsafe(self._publish_event, event)
         self._loop.call_soon_threadsafe(self._on_account_summary_end, reqId)
 
     def updateAccountValue(  # noqa: N802 (ibapi naming)
@@ -749,7 +791,7 @@ class IBAPIController(EWrapper):
             "currency": currency,
             "account": accountName,
         }
-        self._loop.call_soon_threadsafe(self._event_queue.put_nowait, event)
+        self._loop.call_soon_threadsafe(self._publish_event, event)
         self._loop.call_soon_threadsafe(
             self._on_account_update_value,
             key,
@@ -780,7 +822,7 @@ class IBAPIController(EWrapper):
             "realized_pnl": realizedPNL,
             "account": accountName,
         }
-        self._loop.call_soon_threadsafe(self._event_queue.put_nowait, event)
+        self._loop.call_soon_threadsafe(self._publish_event, event)
         self._loop.call_soon_threadsafe(
             self._on_account_update_portfolio,
             contract,
@@ -795,7 +837,7 @@ class IBAPIController(EWrapper):
 
     def accountDownloadEnd(self, account: str) -> None:  # noqa: N802 (ibapi naming)
         event = {"type": "accountDownloadEnd", "account": account}
-        self._loop.call_soon_threadsafe(self._event_queue.put_nowait, event)
+        self._loop.call_soon_threadsafe(self._publish_event, event)
         self._loop.call_soon_threadsafe(self._on_account_download_end, account)
 
     def position(  # noqa: N802 (ibapi naming)
@@ -812,7 +854,7 @@ class IBAPIController(EWrapper):
             "position": position,
             "avg_cost": avgCost,
         }
-        self._loop.call_soon_threadsafe(self._event_queue.put_nowait, event)
+        self._loop.call_soon_threadsafe(self._publish_event, event)
         self._loop.call_soon_threadsafe(
             self._on_position_update,
             account,
@@ -823,7 +865,7 @@ class IBAPIController(EWrapper):
 
     def positionEnd(self) -> None:  # noqa: N802 (ibapi naming)
         event = {"type": "positionEnd"}
-        self._loop.call_soon_threadsafe(self._event_queue.put_nowait, event)
+        self._loop.call_soon_threadsafe(self._publish_event, event)
         self._loop.call_soon_threadsafe(self._on_position_end)
 
     def tickPrice(  # noqa: N802 (ibapi naming)
@@ -844,7 +886,7 @@ class IBAPIController(EWrapper):
                 "pre_open": getattr(attrib, "preOpen", False),
             },
         }
-        self._loop.call_soon_threadsafe(self._event_queue.put_nowait, event)
+        self._loop.call_soon_threadsafe(self._publish_event, event)
 
     def tickSize(self, reqId: int, tickType: int, size: float) -> None:  # noqa: N802 (ibapi naming)
         event = {
@@ -853,7 +895,7 @@ class IBAPIController(EWrapper):
             "tick_type": tickType,
             "size": size,
         }
-        self._loop.call_soon_threadsafe(self._event_queue.put_nowait, event)
+        self._loop.call_soon_threadsafe(self._publish_event, event)
 
     def marketDataType(self, reqId: int, marketDataType: int) -> None:  # noqa: N802 (ibapi naming)
         event = {
@@ -861,14 +903,14 @@ class IBAPIController(EWrapper):
             "request_id": reqId,
             "market_data_type": marketDataType,
         }
-        self._loop.call_soon_threadsafe(self._event_queue.put_nowait, event)
+        self._loop.call_soon_threadsafe(self._publish_event, event)
 
     def tickSnapshotEnd(self, reqId: int) -> None:  # noqa: N802 (ibapi naming)
         event = {
             "type": "tickSnapshotEnd",
             "request_id": reqId,
         }
-        self._loop.call_soon_threadsafe(self._event_queue.put_nowait, event)
+        self._loop.call_soon_threadsafe(self._publish_event, event)
 
     def updateMktDepthL2(  # noqa: N802 (ibapi naming)
         self,
@@ -892,7 +934,7 @@ class IBAPIController(EWrapper):
             "size": size,
             "is_smart_depth": isSmartDepth,
         }
-        self._loop.call_soon_threadsafe(self._event_queue.put_nowait, event)
+        self._loop.call_soon_threadsafe(self._publish_event, event)
 
     def historicalData(  # noqa: N802 (ibapi naming)
         self,
@@ -947,7 +989,7 @@ class IBAPIController(EWrapper):
             "order": order,
             "order_state": orderState,
         }
-        self._loop.call_soon_threadsafe(self._event_queue.put_nowait, event)
+        self._loop.call_soon_threadsafe(self._publish_event, event)
         self._loop.call_soon_threadsafe(self._on_open_order, orderId, contract, order, orderState)
 
     def orderStatus(  # noqa: N802 (ibapi naming)
@@ -978,7 +1020,7 @@ class IBAPIController(EWrapper):
             "why_held": whyHeld,
             "mkt_cap_price": mktCapPrice,
         }
-        self._loop.call_soon_threadsafe(self._event_queue.put_nowait, event)
+        self._loop.call_soon_threadsafe(self._publish_event, event)
         self._loop.call_soon_threadsafe(
             self._on_order_status,
             orderId,
@@ -997,7 +1039,7 @@ class IBAPIController(EWrapper):
             "contract": contract,
             "execution": execution,
         }
-        self._loop.call_soon_threadsafe(self._event_queue.put_nowait, event)
+        self._loop.call_soon_threadsafe(self._publish_event, event)
 
     def commissionReport(  # noqa: N802 (ibapi naming)
         self,
@@ -1007,7 +1049,7 @@ class IBAPIController(EWrapper):
             "type": "commissionReport",
             "report": commissionReport,
         }
-        self._loop.call_soon_threadsafe(self._event_queue.put_nowait, event)
+        self._loop.call_soon_threadsafe(self._publish_event, event)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -1316,13 +1358,13 @@ class IBAPIController(EWrapper):
         if self._market_data_requests:
             for req_id in list(self._market_data_requests.keys()):
                 event = {"type": "marketDataCancelled", "request_id": req_id}
-                self._event_queue.put_nowait(event)
+                self._publish_event(event)
             self._market_data_requests.clear()
 
         if self._market_depth_requests:
             for req_id in list(self._market_depth_requests.keys()):
                 event = {"type": "marketDepthCancelled", "request_id": req_id}
-                self._event_queue.put_nowait(event)
+                self._publish_event(event)
             self._market_depth_requests.clear()
 
     def _reset_order_tracking(self) -> None:

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone, timedelta
+import asyncio
+import threading
+import types
+from datetime import datetime, timedelta, timezone
 from typing import Any, List
 
 import pytest
@@ -25,85 +28,101 @@ class FakeHistoricalTickBidAsk:
         self.sizeAsk = size_ask
 
 
-class FakeIB:
+class StubController:
     def __init__(self, ticks: List[Any]) -> None:
         self._ticks = list(ticks)
-        self.request_history: list[dict[str, Any]] = []
 
-    def isConnected(self) -> bool:
+    def is_connected(self) -> bool:
         return True
 
-    def qualifyContracts(self, contract: Any) -> List[Any]:  # pragma: no cover - trivial
-        return [contract]
-
-    def reqHistoricalTicks(
+    async def request_historical_ticks(
         self,
         contract: Any,
-        startDateTime: str,
-        endDateTime: str,
-        numberOfTicks: int,
-        whatToShow: str,
-        useRth: bool,
-        ignoreSize: bool,
-        miscOptions: list[Any],
+        *,
+        start_datetime: str,
+        end_datetime: str,
+        number_of_ticks: int,
+        what_to_show: str,
+        use_rth: bool,
+        ignore_size: bool,
+        misc_options: List[Any],
+        timeout: float,
     ) -> List[Any]:
-        self.request_history.append(
-            {
-                "contract": contract,
-                "start": startDateTime,
-                "end": endDateTime,
-                "count": numberOfTicks,
-                "what": whatToShow,
-            }
-        )
-        return list(self._ticks[: numberOfTicks or None])
-
-
-class FakeIBWithoutHistory:
-    def __init__(self) -> None:
-        self.qualifyContracts_called = False
-
-    def isConnected(self) -> bool:  # pragma: no cover - trivial
-        return True
-
-    def qualifyContracts(self, contract: Any) -> List[Any]:  # pragma: no cover - trivial
-        self.qualifyContracts_called = True
-        return [contract]
+        _ = (contract, start_datetime, end_datetime, what_to_show, use_rth, ignore_size, misc_options, timeout)
+        return list(self._ticks[: number_of_ticks or None])
 
 
 class StubConnectionManager:
-    def __init__(self, ib: Any) -> None:
-        self.ib = ib
-        self._ibkr_client_ref = None
-        self._ibkr_connect_in_progress = False
+    def __init__(self) -> None:
+        self.config = types.SimpleNamespace(host="127.0.0.1", port=4002, client_id=1)
         self._connected = True
 
-    def connect(self) -> bool:  # pragma: no cover - trivial
+    def connect(self) -> bool:
         self._connected = True
         return True
 
-    def disconnect(self) -> None:  # pragma: no cover - trivial
+    def disconnect(self) -> None:
         self._connected = False
 
     def is_connected(self) -> bool:
         return self._connected
 
+    def get_ib_instance(self) -> None:
+        return None
+
     def run_in_connection_thread(self, func, *args, timeout=None, **kwargs):
+        _ = timeout
         return func(*args, **kwargs)
 
 
-@pytest.fixture(autouse=True)
-def _suppress_async_components(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(IBKRClient, "_setup_async_components", lambda self: None)
-    monkeypatch.setattr(IBKRClient, "_start_connection_monitor_task", lambda self: None)
+@pytest.fixture
+def background_loop() -> asyncio.AbstractEventLoop:
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    try:
+        yield loop
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join()
+        loop.close()
 
 
-def _build_client(ticks: list[FakeHistoricalTickBidAsk]) -> IBKRClient:
-    manager = StubConnectionManager(FakeIB(ticks))
-    return IBKRClient(connection_manager=manager)
+def _build_client(
+    ticks: List[FakeHistoricalTickBidAsk],
+    *,
+    loop: asyncio.AbstractEventLoop,
+) -> IBKRClient:
+    manager = StubConnectionManager()
+    client = IBKRClient(connection_manager=manager)
+
+    controller = StubController(ticks)
+
+    async def _ensure_controller(self: IBKRClient) -> StubController:
+        self._ibapi_controller = controller
+        return controller
+
+    async def _qualify_contract(
+        self: IBKRClient,
+        contract: Any,
+        *,
+        symbol: str,
+        exchange: str,
+        currency: str,
+    ) -> Any:
+        _ = (symbol, exchange, currency)
+        return contract
+
+    client._async_loop = loop
+    client._setup_async_components = lambda: None  # type: ignore[assignment]
+    client._start_connection_monitor_task = lambda: None  # type: ignore[assignment]
+    client._ensure_ibapi_controller = types.MethodType(_ensure_controller, client)
+    client._qualify_contract = types.MethodType(_qualify_contract, client)
+
+    return client
 
 
-def test_get_dom_history_returns_snapshots_in_order() -> None:
+def test_get_dom_history_returns_snapshots_in_order(background_loop: asyncio.AbstractEventLoop) -> None:
     base = datetime(2023, 1, 1, tzinfo=timezone.utc)
     ticks = [
         FakeHistoricalTickBidAsk(
@@ -116,7 +135,7 @@ def test_get_dom_history_returns_snapshots_in_order() -> None:
         for idx in range(3)
     ]
 
-    client = _build_client(ticks)
+    client = _build_client(ticks, loop=background_loop)
 
     snapshots = client.get_dom_history("ES", limit=2)
 
@@ -127,7 +146,7 @@ def test_get_dom_history_returns_snapshots_in_order() -> None:
     assert snapshots[-1]["asks"][0]["size"] == pytest.approx(14.0)
 
 
-def test_get_dom_history_respects_duration_window() -> None:
+def test_get_dom_history_respects_duration_window(background_loop: asyncio.AbstractEventLoop) -> None:
     base = datetime(2023, 1, 1, tzinfo=timezone.utc)
     ticks = [
         FakeHistoricalTickBidAsk(
@@ -140,7 +159,7 @@ def test_get_dom_history_respects_duration_window() -> None:
         for offset in range(6)
     ]
 
-    client = _build_client(ticks)
+    client = _build_client(ticks, loop=background_loop)
 
     snapshots = client.get_dom_history("ES", duration="2 min", end_datetime=base + timedelta(minutes=5))
 
@@ -149,9 +168,18 @@ def test_get_dom_history_respects_duration_window() -> None:
     assert timestamps[-1] == (base + timedelta(minutes=5)).isoformat()
 
 
-def test_get_dom_history_raises_when_ib_lacks_ticks(monkeypatch: pytest.MonkeyPatch) -> None:
-    manager = StubConnectionManager(FakeIBWithoutHistory())
+def test_get_dom_history_raises_when_controller_unavailable(background_loop: asyncio.AbstractEventLoop) -> None:
+    manager = StubConnectionManager()
     client = IBKRClient(connection_manager=manager)
 
-    with pytest.raises(NotImplementedError):
+    client._async_loop = background_loop
+    client._setup_async_components = lambda: None  # type: ignore[assignment]
+    client._start_connection_monitor_task = lambda: None  # type: ignore[assignment]
+
+    async def _ensure_controller(self: IBKRClient) -> None:
+        return None
+
+    client._ensure_ibapi_controller = types.MethodType(_ensure_controller, client)
+
+    with pytest.raises(RuntimeError):
         client.get_dom_history("ES")

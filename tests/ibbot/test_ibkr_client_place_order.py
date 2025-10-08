@@ -23,7 +23,7 @@ def test_place_order_returns_serialisable_mapping(monkeypatch: Any) -> None:
             )
         )
     finally:
-        client.disconnect()
+        asyncio.run(client.disconnect())
         monkeypatch.delenv("IBBOT_DISABLE_TRADING", raising=False)
 
     assert isinstance(result, dict)
