@@ -522,6 +522,32 @@ class IBKRClient:
 
         self._handle_disconnect_detected(reason)
 
+    async def _ensure_active_ib(self, *, reason: str) -> Optional[IB]:
+        """Return a connected ``IB`` instance, reconnecting on demand."""
+
+        ib = self.ib
+        if ib and ib.isConnected():
+            return ib
+
+        # The connection manager may report success even though TWS/Gateway
+        # immediately closes the socket because of a client ID conflict. When
+        # that happens we see misleading "connection lost" errors in subsequent
+        # commands. Mark the connection as stale and trigger another reconnect
+        # attempt so callers either receive a healthy session or a consistent
+        # failure.
+        self.mark_connection_lost(f"{reason}-stale")
+
+        try:
+            await self.ensure_connection(reason=reason)
+        except IBKRConnectionError:
+            return None
+
+        ib = self.ib
+        if ib and ib.isConnected():
+            return ib
+
+        return None
+
     @property
     def ib(self) -> Optional[IB]:
         """获取IB实例"""
@@ -3220,9 +3246,9 @@ class IBKRClient:
                 return self._return_cached_account_info()
 
             # 获取IB实例
-            ib = self.ib
-            if not ib or not ib.isConnected():
-                ibkr_logger.error(f"IBKR connection lost for get account info")
+            ib = await self._ensure_active_ib(reason="get-account-info")
+            if not ib:
+                ibkr_logger.error("IBKR connection lost for get account info")
                 return self._return_cached_account_info()
 
             # Use synchronous methods in async context without blocking the
@@ -3317,8 +3343,8 @@ class IBKRClient:
                 ibkr_logger.error("Cannot retrieve account summary: IBKR is not connected")
                 return []
 
-            ib = self.ib
-            if not ib or not ib.isConnected():
+            ib = await self._ensure_active_ib(reason="get-account-summary")
+            if not ib:
                 ibkr_logger.error("IBKR connection lost for get_account_summary")
                 return []
 
@@ -3351,9 +3377,9 @@ class IBKRClient:
                 return []
             
             # 获取IB实例
-            ib = self.ib
-            if not ib or not ib.isConnected():
-                ibkr_logger.error(f"IBKR connection lost for get positions")
+            ib = await self._ensure_active_ib(reason="get-positions")
+            if not ib:
+                ibkr_logger.error("IBKR connection lost for get positions")
                 return []
             
             # Use portfolio() to get current market data snapshot without blocking the event loop
