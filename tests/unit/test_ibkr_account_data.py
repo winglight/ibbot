@@ -43,13 +43,20 @@ class _FakeAccountController:
     def __init__(self) -> None:
         self.summary_calls: List[Dict[str, Any]] = []
         self.update_calls: List[Dict[str, Any]] = []
+        self.positions_calls: List[Dict[str, Any]] = []
+        self._contract = SimpleNamespace(
+            symbol="MES",
+            multiplier="5",
+            secType="FUT",
+            exchange="CME",
+            currency="USD",
+        )
 
     def is_connected(self) -> bool:
         return True
 
     async def request_account_updates(self, *, account: str, timeout: float) -> Dict[str, Any]:
         self.update_calls.append({"account": account, "timeout": timeout})
-        contract = SimpleNamespace(symbol="MES", multiplier="5", secType="FUT", exchange="CME", currency="USD")
         return {
             "account": account or "DU123",
             "account_values": [
@@ -63,7 +70,7 @@ class _FakeAccountController:
             ],
             "portfolio": [
                 {
-                    "contract": contract,
+                    "contract": self._contract,
                     "position": 2.0,
                     "market_price": 4200.0,
                     "market_value": 42000.0,
@@ -80,6 +87,17 @@ class _FakeAccountController:
         return [
             {"account": "DU123", "tag": "TotalCashValue", "value": "10000", "currency": "USD"},
             {"account": "DU123", "tag": "NetLiquidation", "value": "12000", "currency": "USD"},
+        ]
+
+    async def request_positions(self, *, timeout: float) -> List[Dict[str, Any]]:
+        self.positions_calls.append({"timeout": timeout})
+        return [
+            {
+                "account": "DU123",
+                "contract": self._contract,
+                "position": 2.0,
+                "avg_cost": 20800.0,
+            }
         ]
 
 
@@ -159,3 +177,4 @@ async def test_get_positions_uses_controller_snapshot(monkeypatch: pytest.Monkey
     assert positions[0]["symbol"] == "MES"
     assert positions[0]["unrealized_pnl"] == pytest.approx(400.0)
     assert controller.update_calls
+    assert controller.positions_calls

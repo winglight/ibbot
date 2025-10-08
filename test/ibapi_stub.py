@@ -197,6 +197,12 @@ class EWrapper:
     def connectionClosed(self) -> None:  # noqa: N802 - IB API naming
         pass
 
+    def openOrder(self, orderId: int, contract: Contract, order: Order, orderState: OrderState) -> None:  # noqa: N802 - API naming
+        pass
+
+    def openOrderEnd(self) -> None:  # noqa: N802 - API naming
+        pass
+
 
 class EClient:
     """Very small stand-in for :class:`ibapi.client.EClient`."""
@@ -419,6 +425,22 @@ class EClient:
         )
         self._orders.pop(orderId, None)
         self._order_contracts.pop(orderId, None)
+
+    def reqOpenOrders(self) -> None:  # noqa: N802 - API signature
+        if not self.isConnected():
+            raise RuntimeError("Not connected")
+
+        for order_id, order in list(self._orders.items()):
+            contract = self._order_contracts.get(order_id, Contract())
+            state = OrderState(
+                status="Submitted",
+                filled=0.0,
+                remaining=getattr(order, "totalQuantity", 0.0),
+            )
+            self.wrapper.openOrder(order_id, contract, order, state)
+
+    def reqAllOpenOrders(self) -> None:  # noqa: N802 - API signature
+        self.reqOpenOrders()
 
     def reqAccountSummary(self, reqId: int, groupName: str, tags: str) -> None:  # noqa: N802 - API signature
         if not self.isConnected():

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import suppress
 from types import SimpleNamespace
 
 import pytest
@@ -118,10 +117,5 @@ def test_registry_sync_accessor(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 async def _cleanup_client(client: IBKRClient) -> None:
-    client.disconnect()
-    task = getattr(client, "_connection_monitor_task", None)
-    if task is not None:
-        task.cancel()
-        with suppress(asyncio.CancelledError):
-            await task
+    await client.disconnect()
 

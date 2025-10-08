@@ -32,8 +32,8 @@ IBBot 是一个围绕 Interactive Brokers API 构建的全栈交易与风险管�
        │                        │
        ▼                        ▼
 ┌──────────────┐      ┌────────────────────┐
-│ IBKR Client  │      │ Services / Cache   │
-│ (ib_insync)  │      │ HTTP APIs + Redis  │
+│ IBAPI        │      │ Services / Cache   │
+│ Controller   │      │ HTTP APIs + Redis  │
 └──────────────┘      └────────────────────┘
 ```
 
@@ -42,6 +42,7 @@ IBBot 是一个围绕 Interactive Brokers API 构建的全栈交易与风险管�
 - **src/dom_*** 深度行情分析、参数调优与自动化调度。
 - **src/optimizer_service/** 提供 DOM 优化任务编排与异步执行。
 - **src/config/** 统一加载 `.env` 与 `.env.local`，供 CLI 与服务端脚本复用。
+- **src/ibapi_controller.py** 实现官方 IB API 的事件循环桥接、请求封装与连接管理，是运行时默认入口。
 
 ### 🗄️ 持久化模型
 
@@ -157,6 +158,15 @@ python scripts/run_all.py --dry-run ib_command
 上述命令无需额外设置 `PYTHONPATH`，直接使用 `python scripts/run_all.py ...` 即可完成导入检测与服务启动。
 
 常见服务的外部依赖如下表所示：
+
+### 4. 验证 IB API 控制器流程
+
+官方 IB API 现为默认运行时依赖，建议在接入或升级后执行以下自检步骤：
+
+1. **运行测试套件**：`pytest` 会调用内置的 `IBAPIController` stub，覆盖行情、下单、账户、连接管理等核心路径，确保在没有 `ib_insync` 的环境下也可通过。
+2. **执行诊断脚本**：运行 `python diagnose_connection.py`，脚本会基于 `IBAPIController` 逐个尝试客户端 ID，验证与 TWS/Gateway 的 TCP 连接、握手与数据库配置。
+3. **检查运行日志**：`src/connection_manager` 在默认情况下会记录 `Defaulting IBKR connections to IBAPIController`，若显式设置 `IBKR_ENABLE_IB_INSYNC=1` 且真实依赖存在，日志会注明进入兼容模式。
+4. **生产前验证**：在仿真或正式账户中启动主服务后，通过前端连接面板或 `/api/connect` 触发连接，确认市场数据、订单与账户快照均能更新；如需回退到 `ib_insync`，请明确设置 `IBKR_ENABLE_IB_INSYNC=1` 并确保依赖安装完成。
 
 | 服务模块 | 启动命令 | 主要依赖 | 说明 |
 | --- | --- | --- | --- |

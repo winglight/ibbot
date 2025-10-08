@@ -313,7 +313,7 @@ async def _run_place_order_flow(redis_client: Any) -> None:
             await asyncio.wait_for(task, timeout=2.0)
         except asyncio.CancelledError:
             pass
-        client.disconnect()
+        await client.disconnect()
 
     assert result_entry.get("status") == "success"
     assert "result" in result_entry

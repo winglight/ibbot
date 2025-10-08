@@ -29,17 +29,14 @@ from src.db import (  # noqa: E402
     run_sql_query,
 )
 from src.db.schema import REQUIRED_TABLES  # noqa: E402
-
-try:  # pragma: no cover - utility script, rarely exercised in tests
-    from ib_insync import IB
-except ImportError:  # pragma: no cover - allow diagnostics in stub mode
-    from test.ib_insync_stub import IB
+from src.ibapi_controller import (  # noqa: E402
+    ConnectionParams,
+    IBAPIController,
+)
 
 load_project_env()
 
 REQUIRED_DB_TABLES: Set[str] = set(REQUIRED_TABLES)
-
-print("IB class from:", IB.__module__)
 
 def _redact_db_url(url: str) -> str:
     try:
@@ -80,28 +77,25 @@ def check_port_connectivity(host: str, port: int) -> bool:
         return False
 
 async def test_ibkr_connection(host: str, port: int, client_id: int) -> bool:
-    print("IB class from:", IB.__module__)
-    ib = IB()
-    # 尝试更多 clientId，避免撞车
     candidates = [(client_id + i - 1) % 49 + 1 for i in range(12)]
     for try_client_id in candidates:
+        controller = IBAPIController()
+        params = ConnectionParams(host=host, port=port, client_id=try_client_id)
         try:
             print(f"   尝试客户端ID: {try_client_id}")
-            await ib.connectAsync(host=host, port=port, clientId=try_client_id, timeout=30)
-            # 连接建立后做一次轻量请求，确认握手真的完成
-            if not ib.isConnected():
-                raise RuntimeError("connectAsync returned but ib.isConnected() == False")
-            await ib.reqCurrentTime()
+            await controller.connect(params, timeout=30)
+            await controller.wait_until_connected(timeout=30)
             print(f"   ✓ 成功（clientId={try_client_id}）")
-            ib.disconnect()
             return True
         except Exception as exc:
-            msg = str(exc).lower()
-            if "duplicate" in msg or "already connected" in msg:
+            message = str(exc).lower()
+            if "client id already in use" in message or "duplicate" in message:
                 print(f"   客户端ID {try_client_id} 被占用，继续尝试")
-                continue
-            print(f"   客户端ID {try_client_id} 连接失败: {exc}")
+            else:
+                print(f"   客户端ID {try_client_id} 连接失败: {exc}")
             await asyncio.sleep(0.8)
+        finally:
+            await controller.disconnect()
     return False
 
 

@@ -231,13 +231,15 @@ class MarketDataRouter:
         )
 
     async def _event_dispatch_loop(self, controller: IBAPIController) -> None:
-        queue = controller.event_queue
+        queue = controller.register_event_consumer()
         try:
             while True:
                 event = await queue.get()
                 self._handle_event(event)
         except asyncio.CancelledError:  # pragma: no cover - shutdown path
             return
+        finally:
+            controller.unregister_event_consumer(queue)
 
     def _handle_event(self, event: Mapping[str, Any]) -> None:
         event_type = event.get("type")
