@@ -240,7 +240,7 @@ services:
     restart: unless-stopped
 
   ib-gateway:
-    image: ghcr.io/gnzsnz/ib-gateway:10.39.1h
+    image: ghcr.io/gnzsnz/ib-gateway:latest
     container_name: ib-gateway
     restart: always
     env_file:
@@ -282,7 +282,6 @@ services:
       - "4002:4004"
       - "5900:5900"
     volumes:
-      - ../data/ibgateway:/config:rw
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
     networks:

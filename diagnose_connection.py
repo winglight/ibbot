@@ -39,6 +39,7 @@ load_project_env()
 
 REQUIRED_DB_TABLES: Set[str] = set(REQUIRED_TABLES)
 
+print("IB class from:", IB.__module__)
 
 def _redact_db_url(url: str) -> str:
     try:
@@ -67,43 +68,40 @@ def _detect_backend(url: str) -> str:
 
 
 def check_port_connectivity(host: str, port: int) -> bool:
-    """检查端口连通性"""
     try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(5)
-        result = sock.connect_ex((host, port))
-        sock.close()
-        return result == 0
-    except Exception as exc:  # pragma: no cover - system specific
-        logger.error(f"端口连通性检查失败: {exc}")
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(5)
+            result = sock.connect_ex((host, port))
+            if result != 0:
+                print(f"   TCP连接失败 errno={result}（可能是端口未监听/防火墙/地址不对）")
+            return result == 0
+    except Exception as exc:
+        logger.error(f"端口连通性检查失败: {exc!r}")
         return False
 
-
 async def test_ibkr_connection(host: str, port: int, client_id: int) -> bool:
-    """测试IBKR连接，自动尝试不同的客户端ID"""
+    print("IB class from:", IB.__module__)
     ib = IB()
-
-    for attempt in range(6):
-        try_client_id = client_id + attempt
-        if try_client_id > 32:
-            try_client_id -= 32
-
+    # 尝试更多 clientId，避免撞车
+    candidates = [(client_id + i - 1) % 49 + 1 for i in range(12)]
+    for try_client_id in candidates:
         try:
             print(f"   尝试客户端ID: {try_client_id}")
-            await ib.connectAsync(host=host, port=port, clientId=try_client_id, timeout=8)
-            logger.info(f"IBKR连接测试成功，使用客户端ID: {try_client_id}")
+            await ib.connectAsync(host=host, port=port, clientId=try_client_id, timeout=30)
+            # 连接建立后做一次轻量请求，确认握手真的完成
+            if not ib.isConnected():
+                raise RuntimeError("connectAsync returned but ib.isConnected() == False")
+            await ib.reqCurrentTime()
+            print(f"   ✓ 成功（clientId={try_client_id}）")
             ib.disconnect()
             return True
         except Exception as exc:
-            error_msg = str(exc)
-            if "already connected" in error_msg.lower() or "duplicate" in error_msg.lower():
-                print(f"   客户端ID {try_client_id} 已被使用")
+            msg = str(exc).lower()
+            if "duplicate" in msg or "already connected" in msg:
+                print(f"   客户端ID {try_client_id} 被占用，继续尝试")
                 continue
-            if attempt == 5:
-                logger.error(f"IBKR连接测试失败: {exc}")
-                return False
-            print(f"   客户端ID {try_client_id} 连接失败: {error_msg}")
-
+            print(f"   客户端ID {try_client_id} 连接失败: {exc}")
+            await asyncio.sleep(0.8)
     return False
 
 
@@ -272,7 +270,7 @@ def main() -> None:
     print("=" * 60)
 
     host = os.getenv("IBKR_HOST", "127.0.0.1")
-    port = int(os.getenv("IBKR_PORT", "4002"))
+    port = 4102
     client_id = int(os.getenv("IBKR_CLIENT_ID", "1"))
     paper_trading = os.getenv("IBKR_PAPER_TRADING", "True").lower() == "true"
 
