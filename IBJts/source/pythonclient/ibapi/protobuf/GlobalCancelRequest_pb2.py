@@ -22,7 +22,7 @@ _runtime_version.ValidateProtobufRuntimeVersion(
 _sym_db = _symbol_database.Default()
 
 
-import OrderCancel_pb2 as OrderCancel__pb2
+from ibapi.protobuf import OrderCancel_pb2 as OrderCancel__pb2
 
 
 DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x19GlobalCancelRequest.proto\x12\x08protobuf\x1a\x11OrderCancel.proto\"V\n\x13GlobalCancelRequest\x12/\n\x0borderCancel\x18\x01 \x01(\x0b\x32\x15.protobuf.OrderCancelH\x00\x88\x01\x01\x42\x0e\n\x0c_orderCancelBC\n\x16\x63om.ib.client.protobufB\x18GlobalCancelRequestProto\xaa\x02\x0eIBApi.protobufb\x06proto3')

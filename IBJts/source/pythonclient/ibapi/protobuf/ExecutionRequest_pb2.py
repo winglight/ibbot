@@ -22,7 +22,7 @@ _runtime_version.ValidateProtobufRuntimeVersion(
 _sym_db = _symbol_database.Default()
 
 
-import ExecutionFilter_pb2 as ExecutionFilter__pb2
+from ibapi.protobuf import ExecutionFilter_pb2 as ExecutionFilter__pb2
 
 
 DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x16\x45xecutionRequest.proto\x12\x08protobuf\x1a\x15\x45xecutionFilter.proto\"}\n\x10\x45xecutionRequest\x12\x12\n\x05reqId\x18\x01 \x01(\x05H\x00\x88\x01\x01\x12\x37\n\x0f\x65xecutionFilter\x18\x02 \x01(\x0b\x32\x19.protobuf.ExecutionFilterH\x01\x88\x01\x01\x42\x08\n\x06_reqIdB\x12\n\x10_executionFilterB@\n\x16\x63om.ib.client.protobufB\x15\x45xecutionRequestProto\xaa\x02\x0eIBApi.protobufb\x06proto3')

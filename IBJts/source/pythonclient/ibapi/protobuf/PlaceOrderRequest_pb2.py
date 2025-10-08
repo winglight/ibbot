@@ -22,8 +22,8 @@ _runtime_version.ValidateProtobufRuntimeVersion(
 _sym_db = _symbol_database.Default()
 
 
-import Contract_pb2 as Contract__pb2
-import Order_pb2 as Order__pb2
+from ibapi.protobuf import Contract_pb2 as Contract__pb2
+from ibapi.protobuf import Order_pb2 as Order__pb2
 
 
 DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x17PlaceOrderRequest.proto\x12\x08protobuf\x1a\x0e\x43ontract.proto\x1a\x0bOrder.proto\"\x9c\x01\n\x11PlaceOrderRequest\x12\x14\n\x07orderId\x18\x01 \x01(\x05H\x00\x88\x01\x01\x12)\n\x08\x63ontract\x18\x02 \x01(\x0b\x32\x12.protobuf.ContractH\x01\x88\x01\x01\x12#\n\x05order\x18\x03 \x01(\x0b\x32\x0f.protobuf.OrderH\x02\x88\x01\x01\x42\n\n\x08_orderIdB\x0b\n\t_contractB\x08\n\x06_orderBA\n\x16\x63om.ib.client.protobufB\x16PlaceOrderRequestProto\xaa\x02\x0eIBApi.protobufb\x06proto3')

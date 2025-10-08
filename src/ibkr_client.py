@@ -771,7 +771,7 @@ class IBKRClient:
             1.0,
             self._parse_env_float(
                 "IBAPI_ACCOUNT_REQUEST_TIMEOUT_SEC",
-                self._ibapi_contract_request_timeout,
+                15.0,  # Increased from 5.0 to 15.0 seconds for account updates
             ),
         )
         self._ibapi_account_lock = asyncio.Lock()
@@ -2086,15 +2086,17 @@ class IBKRClient:
                     timeout=self._ibapi_account_request_timeout,
                 )
             except asyncio.TimeoutError:
-                ibkr_logger.debug(
-                    "Timed out waiting for account updates via ibapi controller (account=%s, managed_accounts=%s)",
+                ibkr_logger.warning(
+                    "Timed out waiting for account updates via ibapi controller (account=%s, managed_accounts=%s, timeout=%ss)",
                     configured_account or "<default>",
                     ",".join(controller.managed_accounts) or "<none>",
+                    self._ibapi_account_request_timeout,
                 )
                 return None
             except Exception as exc:
-                ibkr_logger.debug(
-                    "Failed to request account updates via ibapi controller: {}",
+                ibkr_logger.warning(
+                    "Failed to request account updates via ibapi controller (account=%s): %s",
+                    configured_account or "<default>",
                     exc,
                 )
                 return None
