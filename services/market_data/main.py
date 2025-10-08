@@ -189,6 +189,10 @@ if not _IB_COMMAND_STREAM_KEY:
 
 _IB_COMMAND_TIMEOUT = max(0.0, _env_float("MARKET_DATA_IB_COMMAND_TIMEOUT", 30.0))
 
+_IB_CLIENT: Any | None = None
+_IB_CLIENT_UNAVAILABLE = object()
+_IB_CLIENT_LOCK = asyncio.Lock()
+
 
 class ChartDataQuery(BaseModel):
     """Request payload accepted by the chart data endpoint."""
@@ -1222,14 +1226,98 @@ async def _fetch_dom_history_from_ib(
 
 
 async def _ensure_ib_client(logger: Any) -> Any | None:
+    """Lazily instantiate and cache the shared IBKR client used for fallbacks."""
+
     global _IB_CLIENT
+
     if _IB_CLIENT is _IB_CLIENT_UNAVAILABLE:
         return None
+
+    if _IB_CLIENT is not None:
+        return _IB_CLIENT
+
+    async with _IB_CLIENT_LOCK:
+        if _IB_CLIENT is _IB_CLIENT_UNAVAILABLE:
+            return None
+        if _IB_CLIENT is not None:
+            return _IB_CLIENT
+
+        try:
+            from src.ibkr_client import IBKRClient
+        except Exception:
+            if logger:
+                logger.warning(
+                    "Failed to import IBKRClient for fallback fetches", exc_info=True
+                )
+            _IB_CLIENT = _IB_CLIENT_UNAVAILABLE
+            return None
+
+        try:
+            client = IBKRClient(metadata={"source": "market-data-fallback"})
+        except Exception:
+            if logger:
+                logger.warning(
+                    "Failed to instantiate IBKRClient for fallback fetches", exc_info=True
+                )
+            _IB_CLIENT = _IB_CLIENT_UNAVAILABLE
+            return None
+
+        _IB_CLIENT = client
+        return _IB_CLIENT
+
+
+async def _ensure_ib_connected(client: Any, logger: Any) -> bool:
+    """Ensure the provided IB client is connected before issuing requests."""
+
+    try:
+        if getattr(client, "connected", False):
+            return True
+    except Exception:
+        pass
+
+    connect_fn = getattr(client, "connect", None)
+    if not callable(connect_fn):
+        if logger:
+            logger.warning("IB client does not expose a connect() method")
+        return False
+
+    try:
+        result = await asyncio.to_thread(connect_fn)
+    except Exception:
+        if logger:
+            logger.warning("IB client connect() failed", exc_info=True)
+        return False
+
+    if result:
+        return True
+
+    try:
+        return bool(getattr(client, "connected", False))
+    except Exception:
+        return False
+
+
+def _serialise_end_datetime(value: datetime | str | None) -> str | None:
+    """Serialise ``end_datetime`` for IB command dispatch."""
+
+    if value is None:
+        return None
+
+    if isinstance(value, str):
+        text = value.strip()
+        return text or None
+
     if isinstance(value, datetime):
         try:
-            return value.isoformat()
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=timezone.utc)
+            return value.astimezone(timezone.utc).isoformat()
         except Exception:
-            return value.strftime("%Y-%m-%dT%H:%M:%S")
+            try:
+                return value.strftime("%Y-%m-%dT%H:%M:%S")
+            except Exception:
+                return None
+
     return str(value)
 
 
