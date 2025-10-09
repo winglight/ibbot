@@ -17,6 +17,8 @@
 > 💡 **客户端 ID 规划建议**：Account/Orders/Market Data 服务默认监听不同的 Redis 通道，可将客户端 ID 分别设置为 `101/102/103`
 等固定值，以便在 IB Gateway/TWS 侧快速识别连接来源。
 
+所有 `*_IB_HOST` 与 `*_IB_PORT` 变量均支持使用逗号或空格分隔的候选值，`BaseServiceIBClient` 会依次尝试每个主机/端口组合，并在最后自动追加 `127.0.0.1` 兜底，方便在本地或容器网络解析失败时回落到本机网关。【F:src/ib/base_client.py†L84-L173】
+
 ## Redis 连接与覆盖规则
 
 全局默认 Redis 连接由 `IBBOT_REDIS_URL` 提供，其它服务在未设置专属 URL 时也会继承该地址。需要拆分依赖时，可通过下列变量覆

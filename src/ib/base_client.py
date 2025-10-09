@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import queue
+import re
 import threading
 import time
 from collections.abc import Iterable
@@ -18,6 +19,8 @@ class BaseServiceIBClient(EWrapper, EClient):
     """Common connection management for service-local IB clients."""
 
     DEFAULT_TIMEOUT = 10.0
+    DEFAULT_HOST = "127.0.0.1"
+    DEFAULT_PORT = 7497
 
     def __init__(
         self,
@@ -75,27 +78,41 @@ class BaseServiceIBClient(EWrapper, EClient):
         self._next_request_id = 0
         self._async_request_waiters.clear()
 
-        host = os.getenv(self._host_env, "127.0.0.1")
-        port = int(os.getenv(self._port_env, "7497"))
         client_id = int(os.getenv(self._client_id_env, "0"))
+        endpoints = self._build_connection_targets()
 
-        logger.info(
-            "{} connecting to {}:{} with client id {}",
-            self._service_name,
-            host,
-            port,
-            client_id,
-        )
+        last_error: Exception | None = None
+        connected_host: str | None = None
+        connected_port: int | None = None
 
-        try:
-            # Set connection options like the working reference code
-            self.setConnectOptions("+PACEAPI")
-            connected = EClient.connect(self, host, port, client_id)
-        except Exception:
-            logger.exception("{} failed to initiate connection", self._service_name)
-            raise
+        for host, port in endpoints:
+            logger.info(
+                "{} connecting to {}:{} with client id {}",
+                self._service_name,
+                host,
+                port,
+                client_id,
+            )
 
-        if not connected:
+            try:
+                # Set connection options like the working reference code
+                self.setConnectOptions("+PACEAPI")
+                connected = EClient.connect(self, host, port, client_id)
+            except Exception as exc:
+                logger.exception(
+                    "{} failed to initiate connection to {}:{}",
+                    self._service_name,
+                    host,
+                    port,
+                )
+                last_error = exc
+                continue
+
+            if connected:
+                connected_host = host
+                connected_port = port
+                break
+
             logger.error(
                 "{} failed to open socket to {}:{} (client id {})",
                 self._service_name,
@@ -103,8 +120,15 @@ class BaseServiceIBClient(EWrapper, EClient):
                 port,
                 client_id,
             )
-            raise ConnectionError(
+            last_error = ConnectionError(
                 f"{self._service_name} failed to connect to {host}:{port}"
+            )
+
+        if connected_host is None or connected_port is None:
+            if last_error is not None:
+                raise last_error
+            raise ConnectionError(
+                f"{self._service_name} failed to connect to any configured endpoint"
             )
 
         self._reader = EReader(self, self.msg_queue)
@@ -282,4 +306,59 @@ class BaseServiceIBClient(EWrapper, EClient):
 
     def publish_event(self, event_type: str, payload: Any) -> None:
         self._forward_event(event_type, payload)
+
+    @staticmethod
+    def _split_connection_values(raw: str | None) -> list[str]:
+        if not raw:
+            return []
+        parts = re.split(r"[\s,]+", raw)
+        return [part for part in parts if part]
+
+    def _connection_hosts(self) -> list[str]:
+        hosts = self._split_connection_values(os.getenv(self._host_env))
+        if not hosts:
+            hosts = [self.DEFAULT_HOST]
+        elif self.DEFAULT_HOST not in hosts:
+            hosts.append(self.DEFAULT_HOST)
+        deduped: list[str] = []
+        for host in hosts:
+            if host not in deduped:
+                deduped.append(host)
+        return deduped
+
+    def _connection_ports(self) -> list[int]:
+        raw_ports = self._split_connection_values(os.getenv(self._port_env))
+        ports: list[int] = []
+        for entry in raw_ports:
+            try:
+                port = int(entry)
+            except (TypeError, ValueError):
+                logger.debug(
+                    "%s ignoring invalid port value '%s' from %s",
+                    self._service_name,
+                    entry,
+                    self._port_env,
+                )
+                continue
+            if port <= 0:
+                logger.debug(
+                    "%s ignoring non-positive port value '%s' from %s",
+                    self._service_name,
+                    entry,
+                    self._port_env,
+                )
+                continue
+            ports.append(port)
+        if not ports:
+            ports = [self.DEFAULT_PORT]
+        deduped: list[int] = []
+        for port in ports:
+            if port not in deduped:
+                deduped.append(port)
+        return deduped
+
+    def _build_connection_targets(self) -> list[tuple[str, int]]:
+        hosts = self._connection_hosts()
+        ports = self._connection_ports()
+        return [(host, port) for host in hosts for port in ports]
 
