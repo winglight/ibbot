@@ -33,3 +33,5 @@ test/.*
 src/strategies/test*
 
 *.pyc
+*.log
+log/*

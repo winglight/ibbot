@@ -88,6 +88,8 @@ class BaseServiceIBClient(EWrapper, EClient):
         )
 
         try:
+            # Set connection options like the working reference code
+            self.setConnectOptions("+PACEAPI")
             EClient.connect(self, host, port, client_id)
         except Exception:
             logger.exception("%s failed to initiate connection", self._service_name)

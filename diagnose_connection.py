@@ -264,7 +264,7 @@ def main() -> None:
     print("=" * 60)
 
     host = os.getenv("IBKR_HOST", "127.0.0.1")
-    port = 4102
+    port = int(os.getenv("IBKR_PORT", "4002"))
     client_id = int(os.getenv("IBKR_CLIENT_ID", "1"))
     paper_trading = os.getenv("IBKR_PAPER_TRADING", "True").lower() == "true"
 

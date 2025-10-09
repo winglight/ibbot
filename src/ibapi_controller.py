@@ -24,18 +24,16 @@ from typing import Any, Dict, List, Optional, Sequence, Set
 try:  # pragma: no cover - exercised indirectly when ibapi is missing
     from ibapi.client import EClient
     from ibapi.wrapper import EWrapper
-    from ibapi.common import BarData, HistoricalTick, HistoricalTickBidAsk, HistoricalTickLast
+    from ibapi.common import BarData, HistoricalTick, HistoricalTickBidAsk, HistoricalTickLast, TickAttrib
     from ibapi.contract import Contract, ContractDetails
-    from ibapi.order import Order, OrderState
+    from ibapi.order import Order
+    from ibapi.order_state import OrderState
     from ibapi.execution import Execution
-    from ibapi.commission_report import CommissionReport
-    from ibapi.ticktype import TickAttrib
 except ImportError:  # pragma: no cover - fallback used in CI/unit tests
     from test.ibapi_stub import (  # type: ignore
         BarData,
         Contract,
         ContractDetails,
-        CommissionReport,
         EClient,
         Execution,
         HistoricalTick,
@@ -239,6 +237,9 @@ class IBAPIController(EWrapper):
             self._managed_accounts.clear()
             self._managed_accounts_event.clear()
 
+            # Set connection options like the working reference code
+            self._client.setConnectOptions("+PACEAPI")
+            
             await self._loop.run_in_executor(
                 None,
                 lambda: self._client.connect(
