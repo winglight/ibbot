@@ -253,7 +253,7 @@ class IBAPIController(EWrapper):
             try:
                 order_id = await asyncio.wait_for(self._next_valid_id_future, timeout)
             except Exception:
-                await self.disconnect()
+                await self._disconnect_locked()
                 raise
             finally:
                 self._next_valid_id_future = None
@@ -264,20 +264,7 @@ class IBAPIController(EWrapper):
         """Disconnect from TWS/Gateway and stop the network thread."""
 
         async with self._connection_lock:
-            if not self.is_connected():
-                return
-
-            await self._loop.run_in_executor(None, self._client.disconnect)
-
-            if self._run_thread and self._run_thread.is_alive():
-                await self._loop.run_in_executor(None, partial(self._run_thread.join, 1.0))
-
-            self._run_thread = None
-            self._connected_event.clear()
-            self._next_order_id = None
-            self._order_id_waiters.clear()
-            self._managed_accounts.clear()
-            self._managed_accounts_event.clear()
+            await self._disconnect_locked()
 
     async def reconnect(self, *, timeout: float = 5.0) -> int:
         """Convenience helper that performs a disconnect followed by connect."""
@@ -1104,6 +1091,31 @@ class IBAPIController(EWrapper):
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+    async def _disconnect_locked(self) -> None:
+        """Internal helper that tears down the client without re-locking."""
+
+        if not self.is_connected() and not (self._run_thread and self._run_thread.is_alive()):
+            # Ensure state is cleared even if ``ibapi`` thinks we are already disconnected.
+            self._run_thread = None
+            self._connected_event.clear()
+            self._next_order_id = None
+            self._order_id_waiters.clear()
+            self._managed_accounts.clear()
+            self._managed_accounts_event.clear()
+            return
+
+        await self._loop.run_in_executor(None, self._client.disconnect)
+
+        if self._run_thread and self._run_thread.is_alive():
+            await self._loop.run_in_executor(None, partial(self._run_thread.join, 1.0))
+
+        self._run_thread = None
+        self._connected_event.clear()
+        self._next_order_id = None
+        self._order_id_waiters.clear()
+        self._managed_accounts.clear()
+        self._managed_accounts_event.clear()
+
     def _start_network_loop(self) -> None:
         if self._run_thread and self._run_thread.is_alive():
             return
