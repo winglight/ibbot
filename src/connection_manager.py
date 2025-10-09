@@ -129,13 +129,20 @@ class ConnectionConfig:
 
 class ConnectionManager:
     """统一的IBKR连接管理器"""
-    
+
+    _event_loop_initialised_logged = False
+    _event_loop_initialised_lock = threading.Lock()
+
     def __init__(self):
         # 首先设置事件循环管理器以确保兼容性
         try:
             setup_event_loop_policy()
             self._event_loop_manager = EventLoopManager.get_instance()
-            connection_logger.info("事件循环管理器初始化成功")
+            cls = type(self)
+            with cls._event_loop_initialised_lock:
+                if not cls._event_loop_initialised_logged:
+                    connection_logger.info("事件循环管理器初始化成功")
+                    cls._event_loop_initialised_logged = True
         except Exception as e:
             connection_logger.warning(f"事件循环管理器初始化失败: {e}")
             self._event_loop_manager = None
