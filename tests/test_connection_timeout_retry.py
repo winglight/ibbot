@@ -120,3 +120,17 @@ async def test_adapter_disconnect_supports_async_aliases():
     await adapter.disconnect()
 
     assert client.calls == ["disconnectAsync"]
+
+
+@pytest.mark.asyncio
+async def test_adapter_disconnect_clears_client_state():
+    from test.ib_insync_stub import IB as StubIB
+
+    client = StubIB()
+    adapter = IBAsyncAdapter(client=client)
+    adapter._connection_args = {"host": "ib", "port": 4002}
+
+    await adapter.disconnect()
+
+    assert adapter.native_client is None
+    assert adapter._connection_args == {}
