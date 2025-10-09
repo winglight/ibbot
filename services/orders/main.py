@@ -6,6 +6,8 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Mapping
 
+from datetime import datetime, timezone
+
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.encoders import jsonable_encoder
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
@@ -400,6 +402,45 @@ async def delete_orders_subscription() -> Mapping[str, Any]:
         await _close_publisher()
         await _publish_service_health(status="idle")
     return {"success": True, "subscription_count": count}
+
+
+@app.get("/orders")
+async def list_orders(
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+) -> Mapping[str, Any]:
+    client = await _get_client_and_publisher()
+    try:
+        orders = await client.fetch_open_orders(include_all_accounts=True)
+    except Exception as exc:
+        _LOGGER.warning("Failed to fetch orders list: %s", exc)
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE, "Orders unavailable"
+        ) from exc
+
+    total = len(orders)
+    start = min(max(offset, 0), total)
+    end = min(start + limit, total)
+    paginated = orders[start:end]
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    metadata = {
+        "page": (start // limit) + 1 if limit else 1,
+        "limit": limit,
+        "total": total,
+        "returned": len(paginated),
+        "has_more": end < total,
+    }
+
+    payload: dict[str, Any] = {
+        "success": True,
+        "orders": jsonable_encoder(paginated),
+        "meta": metadata,
+        "from_cache": False,
+        "snapshot_updated_at": now_iso,
+        "source": ORDERS_SERVICE_NAME,
+    }
+    return payload
 
 
 @app.post("/orders", status_code=status.HTTP_201_CREATED)

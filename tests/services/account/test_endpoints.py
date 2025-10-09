@@ -11,7 +11,6 @@ from src.routes.service_clients import ServiceClientError, ServiceUnavailableErr
 
 from services.account.main import (
     ACCOUNT_SERVICE_NAME,
-    DEFAULT_DAILY_SUMMARY_COMMAND,
     DEFAULT_ORDER_LIMIT,
     app,
     _state,
@@ -185,6 +184,7 @@ def test_client(fake_redis: Any, monkeypatch: pytest.MonkeyPatch) -> TestClient:
             self.on_refresh_account_info = None
             self.on_refresh_positions = None
             self.on_refresh_both = None
+            self.ib_client = None
 
         async def start(self) -> None:
             return None
@@ -194,6 +194,9 @@ def test_client(fake_redis: Any, monkeypatch: pytest.MonkeyPatch) -> TestClient:
 
         def request_immediate_refresh(self, reason: str = "connection_restored") -> None:
             return None
+
+        def set_ib_client(self, client: Any) -> None:
+            self.ib_client = client
 
         async def refresh_account_info(self, *, reason: str = "manual") -> None:
             self.refresh_account_info_calls.append({"reason": reason})
@@ -213,11 +216,6 @@ def test_client(fake_redis: Any, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     monkeypatch.setattr(
         "services.account.main.AccountSnapshotService", _StubSnapshotService
     )
-
-    async def _fake_request_ib_command(*_: Any, **__: Any) -> Dict[str, Any]:
-        return {"status": "success"}
-
-    monkeypatch.setattr("services.account.main.request_ib_command", _fake_request_ib_command)
 
     with TestClient(app) as client:
         yield client
@@ -300,21 +298,15 @@ def test_get_positions_missing_returns_503(test_client: TestClient) -> None:
     assert "snapshot unavailable" in response.json()["detail"].lower()
 
 
-def test_refresh_endpoint_sets_timestamp(test_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    triggered: dict[str, Any] = {"called": False}
-
-    async def _fake_request(*_: Any, **__: Any) -> Dict[str, Any]:
-        triggered["called"] = True
-        return {"status": "success"}
-
-    monkeypatch.setattr("services.account.main.request_ib_command", _fake_request)
-
+def test_refresh_endpoint_sets_timestamp(test_client: TestClient) -> None:
     response = test_client.post("/account/refresh")
     assert response.status_code == 200
     payload = response.json()
     assert "requested_at" in payload
     assert payload["from_cache"] is False
-    assert triggered["called"] is True
+    service = _state.snapshot_service
+    assert service is not None
+    assert service.refresh_both_calls
 
 
 def test_account_orders_service_success_updates_metrics(
@@ -760,25 +752,15 @@ def test_account_orders_service_error_returns_502(
     assert "orders service" in response.json()["detail"].lower()
 
 
-def test_daily_summary_missing_triggers_command_and_returns_503(
+def test_daily_summary_missing_returns_503(
     capture_service_health: List[Dict[str, Any]],
     test_client: TestClient,
     fake_redis: Any,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    called: Dict[str, Any] = {}
-
-    async def _fake_request(method: str, **_: Any) -> Dict[str, Any]:
-        called["method"] = method
-        return {"status": "success"}
-
-    monkeypatch.setattr("services.account.main.request_ib_command", _fake_request)
-
     response = test_client.get("/account/daily-summary")
     assert response.status_code == 503
     detail = response.json()["detail"].lower()
     assert "unavailable" in detail
-    assert called["method"] == DEFAULT_DAILY_SUMMARY_COMMAND
 
     assert capture_service_health
     metrics = capture_service_health[-1]["metrics"]

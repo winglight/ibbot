@@ -30,11 +30,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover - optional dependency gua
             ) from _IB_IMPORT_ERROR
 from src.ibbot import update_service_health
 from src.ibbot.logging import configure_service_logger
-from src.ibbot.redis import (
-    LegacyIBCommandUnavailableError,
-    get_redis_client,
-    request_ib_command,
-)
+from src.ibbot.redis import get_redis_client
 from src.ib.redis_streaming import (
     RedisPublisher,
     publish_account_event,
@@ -335,6 +331,9 @@ async def _ensure_ib_client() -> ServiceIBClient:
     if not client.isConnected():
         await client.connect()
         record_ib_reconnect(service="account")
+    snapshot_service = _state.snapshot_service
+    if snapshot_service is not None:
+        snapshot_service.set_ib_client(client)
     return client
 
 
@@ -1085,7 +1084,15 @@ async def _startup() -> None:
     _state.snapshot_service = AccountSnapshotService()
     service = _state.snapshot_service
 
+    ib_client: ServiceIBClient | None = None
+    try:
+        ib_client = await _ensure_ib_client()
+    except Exception as exc:  # pragma: no cover - defensive guard
+        logger.warning("Failed to initialise account IB client: %s", exc)
+        ib_client = None
+
     if service is not None:
+        service.set_ib_client(ib_client)
         await service.start()
 
     if _state.health_task is not None and not _state.health_task.done():
@@ -1510,70 +1517,19 @@ async def get_daily_summary() -> Dict[str, Any]:
     has_data = bool(rows) or bool(net_liq)
 
     if not has_data:
-        client = await _ensure_redis_client()
-        if client is None:
-            detail = "Daily summary unavailable: Redis client unavailable"
-            metadata.setdefault("error", detail)
-            await _record_daily_summary_metrics(
-                source=str(metadata.get("source") or "daily-summary-unavailable"),
-                updated_at=metadata.get("snapshot_updated_at"),
-                from_cache=bool(metadata.get("from_cache", False)),
-                stale=bool(metadata.get("stale", True)),
-                stale_reason=metadata.get("stale_reason"),
-                error=detail,
-            )
-            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=detail)
-
-        method = _resolve_daily_summary_command_method()
-        timeout = _resolve_daily_summary_timeout()
-        try:
-            command_result = await request_ib_command(method, redis=client, timeout=timeout)
-        except LegacyIBCommandUnavailableError as exc:
-            detail = str(exc)
-            await _record_daily_summary_metrics(
-                source=IB_COMMAND_SOURCE,
-                updated_at=None,
-                from_cache=False,
-                stale=True,
-                stale_reason="daily-summary-unavailable",
-                error=detail,
-            )
-            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=detail) from exc
-        except Exception as exc:
-            detail = f"Failed to execute daily summary command {method}: {exc}"
-            await _record_daily_summary_metrics(
-                source=IB_COMMAND_SOURCE,
-                updated_at=None,
-                from_cache=False,
-                stale=True,
-                stale_reason="daily-summary-error",
-                error=detail,
-            )
-            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=detail) from exc
-
-        command_source = str(command_result.get("source") or IB_COMMAND_SOURCE)
-        rows, net_liq, refreshed_metadata = await _load_daily_summary_cache()
-        if rows or net_liq:
-            metadata = dict(refreshed_metadata)
-            metadata["from_cache"] = False
-            metadata["source"] = command_source
-        else:
-            detail = "Daily summary data unavailable after refresh"
-            metadata = dict(refreshed_metadata)
-            metadata["from_cache"] = False
-            metadata["source"] = command_source
-            metadata.setdefault("stale", True)
-            metadata.setdefault("stale_reason", metadata.get("stale_reason") or "daily-summary-missing")
-            metadata["error"] = detail
-            await _record_daily_summary_metrics(
-                source=metadata.get("source", command_source),
-                updated_at=metadata.get("snapshot_updated_at"),
-                from_cache=False,
-                stale=bool(metadata.get("stale", True)),
-                stale_reason=metadata.get("stale_reason"),
-                error=detail,
-            )
-            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=detail)
+        detail = "Daily summary data unavailable"
+        metadata.setdefault("error", detail)
+        metadata.setdefault("stale", True)
+        metadata.setdefault("stale_reason", metadata.get("stale_reason") or "daily-summary-missing")
+        await _record_daily_summary_metrics(
+            source=str(metadata.get("source") or "daily-summary-unavailable"),
+            updated_at=metadata.get("snapshot_updated_at"),
+            from_cache=bool(metadata.get("from_cache", False)),
+            stale=bool(metadata.get("stale", True)),
+            stale_reason=metadata.get("stale_reason"),
+            error=detail,
+        )
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=detail)
 
     response_metadata = dict(metadata)
     from_cache_flag = bool(response_metadata.pop("from_cache", True))
@@ -1603,19 +1559,22 @@ async def get_daily_summary() -> Dict[str, Any]:
 async def post_refresh_request() -> JSONResponse:
     _state.last_refresh_request = now_local()
     requested_at = to_local_iso(_state.last_refresh_request)
-    redis_client = _state.redis
     triggered = False
     error: Optional[str] = None
 
-    if redis_client is not None:
+    service = _state.snapshot_service
+    if service is not None:
         try:
-            await request_ib_command("refresh_account", redis=redis_client, timeout=5)
+            await service.refresh_both(
+                reason="api-manual-refresh",
+                fast_positions=True,
+            )
             triggered = True
-        except Exception as exc:  # pragma: no cover - optional command may fail
+        except Exception as exc:  # pragma: no cover - refresh may fail in degraded mode
             error = str(exc)
-            logger.warning("Failed to request account refresh: %s", exc)
+            logger.warning("Failed to refresh account snapshots: %s", exc)
     else:
-        error = "Redis client unavailable"
+        error = "Account snapshot service unavailable"
 
     payload: Dict[str, Any] = {
         "success": triggered and error is None,
