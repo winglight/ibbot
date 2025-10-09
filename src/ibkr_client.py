@@ -3343,8 +3343,32 @@ class IBKRClient:
                     ibkr_logger.error("IBKR connection lost for get account info")
                     return self._return_cached_account_info()
 
-                # Use synchronous methods in async context without blocking the event loop
+                def _resolve_account_id() -> Optional[str]:
+                    try:
+                        accounts = ib.managedAccounts()
+                    except Exception:
+                        return None
+                    if not accounts:
+                        return None
+                    if isinstance(accounts, (list, tuple)):
+                        for entry in accounts:
+                            if entry:
+                                return str(entry)
+                        return None
+                    if isinstance(accounts, str):
+                        first = accounts.split(",")[0].strip()
+                        return first or None
+                    return None
+
                 def _fetch_account_values():
+                    account_id = _resolve_account_id()
+                    if account_id:
+                        summary = ib.accountSummary(account_id)
+                        if summary:
+                            return summary
+                    summary = ib.accountSummary()
+                    if summary:
+                        return summary
                     return ib.accountValues()
 
                 account_values = await asyncio.to_thread(
@@ -3518,8 +3542,10 @@ class IBKRClient:
                     ibkr_logger.error("IBKR connection lost for get positions")
                     return []
 
-                # Use portfolio() to get current market data snapshot without blocking the event loop
                 def _portfolio_snapshot():
+                    positions = ib.positions()
+                    if positions:
+                        return positions
                     return ib.portfolio()
 
                 portfolio_items = await asyncio.to_thread(

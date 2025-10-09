@@ -207,6 +207,9 @@ class IB:
     def reqPositions(self, *args: Any, **kwargs: Any) -> list[Any]:
         return []
 
+    def positions(self, *args: Any, **kwargs: Any) -> list[Any]:
+        return []
+
     async def portfolio(self) -> list[Any]:
         return []
 
