@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import importlib
 import concurrent.futures
 import copy
 import csv
@@ -21,14 +20,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
-if TYPE_CHECKING:  # pragma: no cover - typing only
-    from ib_insync import IB, LimitOrder, MarketOrder, Order  # type: ignore
-else:
-    try:  # pragma: no cover - optional dependency
-        from ib_insync import IB, LimitOrder, MarketOrder, Order  # type: ignore
-    except ImportError:  # pragma: no cover - fallback when ib_insync is absent
-        IB = None  # type: ignore[assignment]
-        LimitOrder = MarketOrder = Order = None  # type: ignore[assignment]
+from src.ib.insync_compat import IB, LimitOrder, MarketOrder, Order
 
 try:  # pragma: no cover - exercised indirectly in CI when ibapi is unavailable
     from ibapi.contract import Contract as IBAPIContract, ContractDetails as IBAPIContractDetails
@@ -2182,50 +2174,6 @@ class IBKRClient:
                 except Exception:
                     pass
         return api_contract
-
-    def _convert_to_ib_insync_contract(self, contract: IBAPIContract) -> Any:
-        """Convert an IBAPI contract into an ``ib_insync`` contract if available."""
-
-        spec = importlib.util.find_spec("ib_insync")
-        if spec is None:
-            return contract
-
-        module = importlib.import_module("ib_insync")
-        contract_cls = getattr(module, "Contract", None)
-        if contract_cls is None:
-            return contract
-
-        attrs = (
-            "conId",
-            "secType",
-            "symbol",
-            "exchange",
-            "primaryExchange",
-            "currency",
-            "lastTradeDateOrContractMonth",
-            "tradingClass",
-            "multiplier",
-            "localSymbol",
-            "includeExpired",
-            "secIdType",
-            "secId",
-        )
-        kwargs: dict[str, Any] = {}
-        for attr in attrs:
-            value = getattr(contract, attr, None)
-            if value not in (None, ""):
-                kwargs[attr] = value
-
-        try:
-            return contract_cls(**kwargs)
-        except Exception:
-            stub = contract_cls()
-            for attr, value in kwargs.items():
-                try:
-                    setattr(stub, attr, value)
-                except Exception:
-                    pass
-            return stub
 
     def _apply_contract_details(
         self,

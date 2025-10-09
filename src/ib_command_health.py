@@ -92,6 +92,19 @@ def build_ib_connection_health_payload(
     if raw is None:
         raw = {}
 
+    if not raw:
+        resolved_account_type = account_type or resolve_ib_account_type()
+        return IBCommandHealth(
+            connected=False,
+            account_type=resolved_account_type,
+            last_seen=None,
+            queue_depth=None,
+            last_error="ib_command service removed",
+            error_code=None,
+            stale=True,
+            source="legacy",
+        ).as_mapping()
+
     now = datetime.now(timezone.utc)
     last_seen_raw = raw.get("last_seen", "")
     last_seen_dt: datetime | None = None

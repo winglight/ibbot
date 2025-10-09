@@ -84,6 +84,7 @@ from src.routes.config import router as config_router
 from src.routes.runbooks import router as runbook_router
 from src.routes.websocket import router as websocket_router
 from src.routes.dom import router as dom_router
+from src.routes.ib import router as ib_router
 from src.data_layer import get_data_source_manager
 from src.startup_checks import detect_open_sqlite_handles, record_sqlite_handle_check
 
@@ -920,6 +921,7 @@ app.include_router(config_router)
 app.include_router(runbook_router)
 app.include_router(websocket_router)
 app.include_router(dom_router)
+app.include_router(ib_router)
 
 # Utility helpers
 

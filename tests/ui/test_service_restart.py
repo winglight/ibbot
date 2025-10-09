@@ -8,7 +8,7 @@ from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from src.routes import service as service_module
-from src.service_restart import RestartCommandResult, RestartMode
+from src.service_restart import RestartCommandResult, RestartMode, UnknownServiceError
 
 
 class MockRestartManager:
@@ -17,19 +17,19 @@ class MockRestartManager:
         self.mode = RestartMode.DOCKER
         self.plans: dict[str, tuple[str, ...]] = {
             "ibbot": ("account", "orders", "ibbot"),
-            "market_data": ("market_data_feed", "market_data"),
-            "market_data_feed": ("market_data_feed",),
+            "market_data": ("market_data",),
             "queue_monitor": ("queue_monitor",),
         }
         self.service_names: dict[str, str] = {
-            "market_data_feed": "ib-feed",
             "market_data": "market-data",
             "queue_monitor": "queue-monitor",
         }
 
     async def restart(self, service: str, *, include_dependencies: bool = True) -> list[RestartCommandResult]:
+        if service not in self.plans:
+            raise UnknownServiceError(service)
         self.calls.append((service, include_dependencies))
-        plan = self.plans.get(service, (service,)) if include_dependencies else (service,)
+        plan = self.plans[service] if include_dependencies else (service,)
         results: list[RestartCommandResult] = []
         for name in plan:
             target = self.service_names.get(name, name)
@@ -54,8 +54,10 @@ class LocalMockRestartManager(MockRestartManager):
     async def restart(
         self, service: str, *, include_dependencies: bool = True
     ) -> list[RestartCommandResult]:
+        if service not in self.plans:
+            raise UnknownServiceError(service)
         self.calls.append((service, include_dependencies))
-        plan = self.plans.get(service, (service,)) if include_dependencies else (service,)
+        plan = self.plans[service] if include_dependencies else (service,)
         results: list[RestartCommandResult] = []
         for name in plan:
             results.append(
@@ -163,23 +165,19 @@ def test_restart_market_data_plan(restart_app: FastAPI) -> None:
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["restarted"] == ["market_data_feed", "market_data"]
+    assert payload["restarted"] == ["market_data"]
     assert manager.calls[-1] == ("market_data", True)
-    assert payload["logs"][0]["command"][-1] == "ib-feed"
-    assert payload["logs"][1]["command"][-1] == "market-data"
+    assert payload["logs"][0]["command"][-1] == "market-data"
 
 
-def test_restart_market_data_feed_plan(restart_app: FastAPI) -> None:
+def test_restart_removed_service_returns_404(restart_app: FastAPI) -> None:
     manager: MockRestartManager = restart_app.state._mock_restart_manager  # type: ignore[attr-defined]
     manager.calls.clear()
     with TestClient(restart_app) as client:
         response = client.post("/api/services/restart", json={"service": "market_data_feed"})
 
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["restarted"] == ["market_data_feed"]
-    assert manager.calls[-1] == ("market_data_feed", True)
-    assert payload["logs"][0]["command"][-1] == "ib-feed"
+    assert response.status_code == 404
+    assert "has been removed" in response.json()["detail"]
 
 
 def test_restart_queue_monitor_plan(restart_app: FastAPI) -> None:

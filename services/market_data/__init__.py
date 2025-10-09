@@ -1,5 +1,5 @@
-"""Market data aggregation service."""
+"""Market data service exports."""
 
-from .main import app, create_app, MarketDataRuntime
+from .main import app
 
-__all__ = ["app", "create_app", "MarketDataRuntime"]
+__all__ = ["app"]

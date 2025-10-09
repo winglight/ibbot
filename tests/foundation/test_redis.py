@@ -9,6 +9,7 @@ import pytest
 
 from src.ibbot import redis as redis_module
 from src.ibbot.redis import (
+    LegacyIBCommandUnavailableError,
     PubSubListener,
     StreamMessage,
     ack_stream,
@@ -105,13 +106,8 @@ def test_basic_get_set_and_queue(
 
     queue_key = "queue:test"
     payload = {"command_id": "cmd-1", "action": "ping"}
-    length = run(enqueue_ib_command(payload, redis=redis_client, queue_key=queue_key))
-    assert length == 1
-    assert run(get_queue_length(queue_key, redis=redis_client)) == 1
-
-    raw = run(redis_client.lpop(queue_key))
-    assert raw is not None
-    assert json.loads(raw) == payload
+    with pytest.raises(LegacyIBCommandUnavailableError):
+        run(enqueue_ib_command(payload, redis=redis_client, queue_key=queue_key))
     assert run(get_queue_length(queue_key, redis=redis_client)) == 0
 
 

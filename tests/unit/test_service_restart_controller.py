@@ -31,7 +31,6 @@ class RecordingDockerController(DockerComposeController):
     ("slug", "expected"),
     (
         ("market_data", "market-data"),
-        ("market_data_feed", "ib-feed"),
         ("queue_monitor", "queue-monitor"),
     ),
 )

@@ -4,15 +4,15 @@
 
 | Step | Scope | Current Status | Notes |
 | --- | --- | --- | --- |
-| 1 | Service-scoped IB integrations | Not Started | Awaiting design review |
-| 2 | Remove `ib_command` / `ib_feed` | Not Started | Blocked by Step 1 artifacts |
-| 3 | Account service refactor | Not Started | Requires Step 1 client + Step 2 cleanup |
-| 4 | Orders service refactor | Not Started | Depends on Step 1 + Step 2 completion |
-| 5 | Market data service refactor | Not Started | Depends on Step 1 + Step 2 completion |
-| 6 | Main FastAPI rewiring | Not Started | Requires Steps 2–5 completion |
-| 7 | Strategy service updates | Not Started | Requires Step 5 data parity validation |
-| 8 | Cross-cutting tasks | Not Started | Requires Step 1–7 completion |
-| 9 | Acceptance validation | Not Started | Execute after Step 8 sign-off |
+| 1 | Service-scoped IB integrations | Completed | Base clients, shared events, and Redis publisher implemented |
+| 2 | Remove `ib_command` / `ib_feed` | Completed | Legacy services removed; callers now receive deprecation errors |
+| 3 | Account service refactor | Completed | Account service now wires the async IB client with Redis fan-out and subscription APIs |
+| 4 | Orders service refactor | Completed | Orders service now wires async IB client with REST + Redis streaming |
+| 5 | Market data service refactor | Completed | Market data service now exposes async IB-backed subscriptions and Redis fan-out |
+| 6 | Main FastAPI rewiring | Completed | Main API now proxies connection orchestration to the connection-control service and exposes channel metadata |
+| 7 | Strategy service updates | Completed | Strategy service consumes Redis streams with configurable channel defaults |
+| 8 | Cross-cutting tasks | Completed | Observability, deployment, and integration tooling refreshed |
+| 9 | Acceptance validation | Completed | Acceptance harness, soak validation, and regression capture documented |
 
 This plan describes the concrete code changes required to migrate the IB Bot stack away from the legacy `ib_command`/`ib_feed` bridge and toward dedicated Interactive Brokers (IB) TWS API integrations inside the Account, Orders, Market Data, and Strategy services. Follow the steps in sequence; every step contains the files to edit, new modules to introduce, and acceptance checks to perform before moving on.
 
@@ -269,6 +269,18 @@ This plan describes the concrete code changes required to migrate the IB Bot sta
 * Redis pub/sub channels provide complete, real-time data for account, orders, and market data.
 * Strategy service consumes DOM and price feeds exclusively from Redis and can operate without direct IB connectivity.
 * Automated tests cover the new infrastructure layers.
+
+### Implementation summary
+
+* Added an automated acceptance test suite (`tests/acceptance/test_refactor_acceptance.py`) that exercises Redis publishing for every refactored channel and validates that the strategy event stream observes the resulting payloads.
+* Seeded regression coverage for the refactor integration capture script to ensure subscription endpoints are triggered and Redis payload snapshots are persisted for downstream comparison.
+* Introduced a soak runner (`scripts/refactor_soak.py`) that replays the integration harness across multiple iterations, records per-channel message counts, and fails fast when channels become silent or throughput drops below configured thresholds.
+
+### Soak validation workflow
+
+* Execute `python scripts/refactor_soak.py --iterations 6 --duration 30` against a live IB Gateway or TWS session.
+* Inspect the generated `summary.json` for the `failures` array to confirm no channels dropped messages during the soak period.
+* Archive the per-iteration captures (e.g., `iteration_000.json`) alongside operational runbooks so regressions can be diffed during future upgrades.
 
 ### Data flow impact after Step 9
 

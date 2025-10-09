@@ -1,5 +1,6 @@
 """Strategy execution service components."""
 
+from .base import StrategyEventStream
 from .components import (
     MarketDataFacade,
     StrategyAdapter,
@@ -11,6 +12,7 @@ from .components import (
 )
 
 __all__ = [
+    "StrategyEventStream",
     "MarketDataFacade",
     "StrategyAdapter",
     "StrategyContext",

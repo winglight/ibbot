@@ -26,7 +26,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 # Import from run_service after adding PROJECT_ROOT to sys.path
 sys.path.insert(0, str(Path(__file__).parent))
-from run_service import SERVICE_ALIASES, _resolve_module
+from run_service import LEGACY_SERVICES, SERVICE_ALIASES, _resolve_module
 
 from src.utils.dataclass_compat import enable_slots_compat
 
@@ -60,13 +60,16 @@ _SERVICE_REDIS_ENV: dict[str, str] = {
     "optimizer": "OPTIMIZER_REDIS_URL",
 }
 
-_SERVICE_REDIS_FALLBACK: dict[str, tuple[str, ...]] = {
-    "ib_gateway": ("IB_COMMAND_REDIS_URL", "IB_FEED_REDIS_URL"),
-}
+_SERVICE_REDIS_FALLBACK: dict[str, tuple[str, ...]] = {}
 
 
 def _build_service_command(service: str) -> tuple[list[str], str]:
     """Return the command used to start *service* and a descriptive label."""
+
+    if service in LEGACY_SERVICES:
+        raise ValueError(
+            f"Service '{service}' has been removed as part of the Interactive Brokers refactor"
+        )
 
     canonical = SERVICE_ALIASES.get(service, service)
     host = os.getenv("SERVICE_HOST", "0.0.0.0")
@@ -473,8 +476,7 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="*",
         default=list(DEFAULT_SERVICES),
         help=(
-            "要启动的服务名称列表。例如：python scripts/run_all.py "
-            "ib_feed strategy。留空则使用默认组合（"
+            "要启动的服务名称列表。例如：python scripts/run_all.py strategy risk。留空则使用默认组合（"
             f"{default_services_display}）。"
         ),
     )

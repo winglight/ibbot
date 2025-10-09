@@ -39,14 +39,21 @@ class FlowStrategy:
         symbol = task["symbol"]
         price = await context.get_price(symbol)
         size = int(config.get("size", 1))
-        command_id = f"{task['task_id']}-cmd"
         context.emit_signal({"type": "entry", "symbol": symbol, "price": price})
         return {
             "orders": [
                 {
-                    "command_id": command_id,
-                    "method": "placeOrder",
-                    "args": [symbol, size, price],
+                    "contract": {
+                        "symbol": symbol,
+                        "exchange": "SMART",
+                        "currency": "USD",
+                    },
+                    "order": {
+                        "action": "BUY",
+                        "total_quantity": size,
+                        "order_type": "LIMIT",
+                        "lmt_price": float(price),
+                    },
                 }
             ],
         }
@@ -54,6 +61,15 @@ class FlowStrategy:
 
 def flow_strategy_factory(config: dict[str, str]) -> FlowStrategy:
     return FlowStrategy(config)
+
+
+class StubOrdersClient:
+    def __init__(self) -> None:
+        self.requests: list[Mapping[str, Any]] = []
+
+    async def place_order(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
+        self.requests.append(dict(payload))
+        return {"order_id": f"order-{len(self.requests)}", "status": "accepted"}
 
 
 @pytest.fixture
@@ -74,6 +90,7 @@ def test_strategy_task_to_command_to_receipt(redis_client: InMemoryRedis) -> Non
 async def _run_flow_test(redis_client: InMemoryRedis) -> None:
     await redis_client.hset("hash:market:snapshot:ES", mapping={"price": "4300.0"})
 
+    orders_client = StubOrdersClient()
     adapter = StrategyAdapter(
         redis_client,
         strategies={
@@ -84,6 +101,7 @@ async def _run_flow_test(redis_client: InMemoryRedis) -> None:
         },
         command_queue="queue:test:commands",
         event_stream="stream:strategy:events",
+        orders_client=orders_client,
     )
     consumer = StrategyTaskConsumer(
         redis_client,
@@ -98,30 +116,14 @@ async def _run_flow_test(redis_client: InMemoryRedis) -> None:
         task_payload = {"task_id": "job-1", "strategy": "flow", "symbol": "ES"}
         await redis_client.rpush("list:queue:strategy", json.dumps(task_payload))
 
-        for _ in range(50):
-            if await redis_client.llen("queue:test:commands") > 0:
-                break
-            await asyncio.sleep(0.05)
-        else:  # pragma: no cover - defensive timeout
-            raise AssertionError("command queue remained empty")
-
-        _, raw_command = await redis_client.blpop("queue:test:commands", timeout=1)
-        command = json.loads(raw_command)
-        await redis_client.xadd(
-            "stream:ib:results",
-            {
-                "command_id": command["command_id"],
-                "status": "filled",
-                "task_id": command["task_id"],
-            },
-        )
-
         strategy_events = await redis_client.xrange("stream:strategy:events")
         assert [entry[1]["status"] for entry in strategy_events] == ["started", "completed"]
         assert strategy_events[-1][1]["orders"] == "1"
 
-        receipts = await redis_client.xrange("stream:ib:results")
-        assert receipts[0][1]["status"] == "filled"
+        assert len(orders_client.requests) == 1
+        placed = orders_client.requests[0]
+        assert placed["contract"]["symbol"] == "ES"
+        assert placed["order"]["total_quantity"] == 2
     finally:
         consumer.stop()
         await asyncio.sleep(0.1)

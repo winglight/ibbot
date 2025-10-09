@@ -65,3 +65,11 @@ def test_build_ib_connection_health_payload_prefers_ib_connection_fields():
 
     assert healthy_payload["connected"] is True
     assert healthy_payload["last_error"] is None
+
+
+def test_build_ib_connection_health_payload_defaults_for_removed_service():
+    payload = build_ib_connection_health_payload({}, stale_after=30, account_type="Paper")
+
+    assert payload["connected"] is False
+    assert payload["stale"] is True
+    assert payload["last_error"] == "ib_command service removed"
