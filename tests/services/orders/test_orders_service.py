@@ -46,6 +46,9 @@ class _StubOrdersClient:
         self.connected = False
         self.disconnect_calls += 1
 
+    async def async_disconnect(self) -> None:
+        await self.disconnect()
+
     async def place_order(self, contract: Any, order: Any) -> OrderStatusEvent:
         self.place_calls.append((contract, order))
         return OrderStatusEvent(

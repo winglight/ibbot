@@ -65,6 +65,9 @@ class _StubClient:
         self.connected = False
         self.disconnect_calls += 1
 
+    async def async_disconnect(self) -> None:
+        await self.disconnect()
+
     async def wait_until_ready(self, timeout: float | None = None) -> None:
         return None
 

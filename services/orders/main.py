@@ -229,7 +229,7 @@ async def _disconnect_ib_client() -> None:
         return
     _state.ib_client = None
     try:
-        await client.disconnect()
+        await client.async_disconnect()
     except Exception as exc:  # pragma: no cover - defensive guard
         _LOGGER.warning("Error while disconnecting orders IB client: %s", exc)
 
