@@ -1,6 +1,6 @@
 # 测试清单与执行命令
 
-下表汇总不同层级的自动化/半自动化测试与推荐执行命令，覆盖阶段 1-4 的交付要求。所有命令默认在仓库根目录执行。
+下表汇总不同层级的自动化/半自动化测试与推荐执行命令，覆盖阶段 1-9 的交付要求。所有命令默认在仓库根目录执行。
 
 | 测试类型 | 覆盖阶段 | 说明 | 执行命令 |
 | --- | --- | --- | --- |
@@ -9,6 +9,7 @@
 | 端到端 (E2E) | 阶段 3-4 | 模拟下单/风控/策略链路，依赖 Redis/模拟 IB | `pytest tests/e2e -q` |
 | 性能测试 | 阶段 4 | `tests/perf` 使用内置基准校验吞吐/延迟阈值 | `pytest tests/perf -k benchmark` |
 | 故障注入 | 阶段 4 | `tests/failover` 注入 Redis/MariaDB/IB 断连并验证恢复 | `pytest tests/failover` |
+| 验收测试 | 阶段 9 | Redis 端到端验收与 Soak 验证 | `pytest tests/acceptance/test_refactor_acceptance.py -q`，`python scripts/refactor_soak.py --iterations 6 --duration 30` |
 
 以下章节保留原有的手工测试用例，建议在自动化测试通过后再执行，以覆盖真实 IBKR 数据场景。
 

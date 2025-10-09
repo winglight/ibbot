@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | 阶段 0：准备 | `.env` 模板、`data/logs` 结构、基础 README | 根目录 `.env.example`、`data/` |
 | 阶段 1：基础能力库 | Redis/MariaDB/日志/配置封装、诊断脚本 | `src/ibbot/{config,redis,db,logging}`、`scripts/diagnose_foundation.py` |
-| 阶段 2：独立服务 | 指令执行、行情采集、行情聚合、风险、策略、通知、队列监控等后台服务 | `services/ib_command`、`services/ib_feed`、`services/market_data`、`services/risk`、`services/strategy`、`services/notification`、`services/queue_monitor` |
+| 阶段 2：Legacy 服务下线 | 移除 `ib_command`/`ib_feed`，为账户/订单/行情服务引入本地 IB 客户端占位 | `services/account`、`services/orders`、`services/market_data`、`services/risk`、`services/strategy`、`services/notification`、`services/queue_monitor` |
 | 阶段 3：主程序改造 | FastAPI 主应用整合新服务接口与监控视图 | `main.py`、`src/routes/monitoring.py`、`static/` |
 | 阶段 4：联调回归 | Docker Compose 全量联调、E2E/性能/故障注入测试 | `docker/*.compose.yml`、`tests/{e2e,perf,failover}` |
 
@@ -19,6 +19,7 @@
 - Docker Engine 20+ 与 docker compose 插件。
 - 宿主机开放端口：`6379` (Redis)、`3306` (MariaDB)、`8000/8001` (服务)、`4173` (Optimizer UI)、`5800/5900/4001/4002` (IB Gateway)。
 - 根目录 `.env` 提供默认值，可通过 `.env.local` 覆盖敏感配置，例如账号、密钥或生产端口。
+- 为 `services/account`、`services/orders`、`services/market_data` 设置独立的 `ACCOUNT_IB_HOST/PORT/CLIENT_ID`、`ORDERS_IB_*`、`MARKET_DATA_IB_*` 环境变量，并在 IB Gateway 中预留互不冲突的客户端 ID（详见 [docs/configuration.md](configuration.md)）。
 
 ## 2. 快速启动
 
@@ -48,7 +49,6 @@
 | 服务 | 默认端口 | Docker 重启 | 本地脚本 |
 | --- | --- | --- | --- |
 | Trading Core (`ibbot`) | 8000 | `docker compose restart ibbot` | `python scripts/run_service.py ibbot` |
-| Command Dispatcher (`ib_command`) | — | `docker compose restart ib_command` | `python scripts/run_service.py ib_command` |
 | Connection Control (`connection_control`, legacy) | 8056 | `docker compose restart connection_control` | `python scripts/run_service.py connection_control` |
 | Account Service (`account`) | 8020 | `docker compose restart account` | `python scripts/run_service.py account` |
 | Order Gateway (`orders`) | 8050 | `docker compose restart orders` | `python scripts/run_service.py orders` |
@@ -56,7 +56,6 @@
 | Risk Manager (`risk`) | 8030 | `docker compose restart risk` | `python scripts/run_service.py risk` |
 | Strategy Scheduler (`strategy`) | 8045 | `docker compose restart strategy` | `python scripts/run_service.py strategy` |
 | Notification Dispatcher (`notification`) | 8055 | `docker compose restart notification` | `python scripts/run_service.py notification` |
-| Market Data Feed (`market_data_feed`) | — | `docker compose restart market_data_feed` | `python scripts/run_service.py market_data_feed` |
 | Queue Monitor (`queue_monitor`) | 8011 | `docker compose restart queue_monitor` | `python scripts/run_service.py queue_monitor` |
 
 > ℹ️ **依赖顺序提示**：控制台会自动按依赖顺序重启服务，例如 `market_data` 会先重启 `market_data_feed`，
@@ -115,8 +114,10 @@
 
 - `services/queue_monitor` 写入的 Redis 快照 `hash:service:queue-monitor`（确认队列长度/滞留时间指标）。
 - `services/queue_monitor` 同步的健康哈希 `hash:service:health:queue`（供 `/api/services/status` 及外部仪表板读取聚合指标）。
-- 主服务 `/api/monitoring/metrics/write-rate` 接口返回的 Redis 指标写入速率，用于验证 `services/ib_feed`、`services/market_data` 等服务上报是否正常。
+- 主服务 `/api/monitoring/metrics/write-rate` 接口返回的 Redis 指标写入速率，用于验证 `services/market_data` 等服务上报是否正常（`ib_feed` 已下线）。
 - 需要持久化到 MariaDB 的指标（订单、行情价格、服务运行指标、风控快照等）现统一通过 `src.db` 模块暴露的仓储工厂创建，旧版文档提到的 `write_fn`/`write` 回调已经废弃。
+- 访问主进程 `/ib/channels` 路由，确认 Account/Orders/Market Data 服务暴露的 Redis 通道与订阅端点符合预期；该信息直接来自服务注册表，可作为配置校验基准。【F:src/routes/ib.py†L1-L171】
+- 使用 `redis-cli --scan --pattern 'ib:*'` 或等效脚本检查是否存在 `ib:account:*`、`ib:orders:*`、`ib:market:*` 等通道，必要时结合 `SUBSCRIBE` 验证事件是否由各服务推送（通道列表详见 [docs/configuration.md](configuration.md)）。
 
 若 MariaDB 使用全新凭据，请确保 `.env.local` 中的 `IBBOT_DB_URL`、`IBBOT_DB_USER`、`IBBOT_DB_PASSWORD` 与初始化参数一致。
 

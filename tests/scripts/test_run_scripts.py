@@ -15,9 +15,8 @@ def test_run_service_dry_run(capsys) -> None:
     exit_code = run_service.run_service("ib_command", dry_run=True)
 
     captured = capsys.readouterr()
-    assert exit_code == 0
-    assert "ib_gateway" in captured.out
-    assert "python -m services.ib_gateway.main" in captured.out
+    assert exit_code == 2
+    assert "has been removed" in captured.err
 
 
 def test_run_service_unknown_module(capsys) -> None:
@@ -36,9 +35,8 @@ def test_run_all_dry_run_subset(capsys) -> None:
     exit_code = run_all.run_services(["ib_command", "ib_feed"], dry_run=True)
 
     captured = capsys.readouterr()
-    assert exit_code == 0
-    assert "ib_gateway" in captured.out
-    assert "services.ib_gateway.main" in captured.out
+    assert exit_code == 2
+    assert "has been removed" in captured.err
 
 
 def test_run_all_reports_missing_service(capsys) -> None:
@@ -48,7 +46,7 @@ def test_run_all_reports_missing_service(capsys) -> None:
 
     captured = capsys.readouterr()
     assert exit_code == 2
-    assert "无法导入以下服务模块" in captured.err
+    assert "has been removed" in captured.err
 
 
 def test_run_all_cli_dry_run_ib_command() -> None:
@@ -61,4 +59,5 @@ def test_run_all_cli_dry_run_ib_command() -> None:
         check=False,
     )
 
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == 2
+    assert "has been removed" in result.stderr

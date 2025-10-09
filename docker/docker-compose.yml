@@ -52,8 +52,6 @@ services:
       - strategy
       - notification
       - market-data
-      - ib-command
-      - ib-feed
       - ib-gateway
     networks:
       - ibbot-network
@@ -83,31 +81,6 @@ services:
       - stack
     restart: unless-stopped
 
-  ib-command:
-    <<: *default-environment
-    build: *default-build
-    container_name: ibbot-ib-command
-    command: ["python", "-m", "services.ib_command.main"]
-    volumes:
-      - ../data/logs:/app/logs
-      - ../data:/app/data
-    networks:
-      - ibbot-network
-      - stack
-    restart: unless-stopped
-
-  ib-feed:
-    <<: *default-environment
-    build: *default-build
-    container_name: ibbot-ib-feed
-    command: ["python", "-m", "services.ib_feed.main"]
-    volumes:
-      - ../data/logs:/app/logs
-      - ../data:/app/data
-    depends_on:
-      - ib-gateway
-    networks:
-      - ibbot-network
       - stack
     restart: unless-stopped
 

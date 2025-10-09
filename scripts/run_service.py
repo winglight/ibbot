@@ -24,10 +24,9 @@ from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
-SERVICE_ALIASES = {
-    "ib_command": "ib_gateway",
-    "ib_feed": "ib_gateway",
-}
+SERVICE_ALIASES: dict[str, str] = {}
+
+LEGACY_SERVICES = {"ib_command", "ib_feed"}
 
 
 def _load_env() -> Path | None:
@@ -55,6 +54,10 @@ def _load_env() -> Path | None:
 
 
 def _resolve_module(service_name: str) -> tuple[str, str]:
+    if service_name in LEGACY_SERVICES:
+        raise RuntimeError(
+            f"Service '{service_name}' has been removed as part of the Interactive Brokers refactor"
+        )
     canonical = SERVICE_ALIASES.get(service_name, service_name)
     module_path = f"services.{canonical}.main"
     return canonical, module_path
@@ -71,7 +74,7 @@ def _import_service(service_name: str) -> tuple[ModuleType, str]:
         missing = exc.name or module_path
         raise ModuleNotFoundError(
             f"无法找到服务模块 '{module_path}'。请确认名称是否正确 "
-            "（例如 ib_feed、strategy）。"
+            "（例如 strategy、notification）。"
         ) from exc
 
     if not hasattr(module, "main"):
@@ -94,7 +97,11 @@ def run_service(service_name: str, dry_run: bool = False) -> int:
     """
 
     env_path = _load_env()
-    canonical_name, module_path = _resolve_module(service_name)
+    try:
+        canonical_name, module_path = _resolve_module(service_name)
+    except RuntimeError as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        return 2
 
     try:
         module, _ = _import_service(service_name)
@@ -155,7 +162,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "service",
-        help="服务模块名称，例如 ib_feed、strategy、notification 等。",
+        help="服务模块名称，例如 strategy、notification 等。",
     )
     parser.add_argument(
         "--dry-run",

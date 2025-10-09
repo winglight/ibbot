@@ -19,5 +19,5 @@
 | `test/test_api_docs.py` | 比对 `/api-docs.json` 输出与 `docs/api_doc.json` 的分类快照。 | `tests/integration/docs/test_api_docs_snapshot.py` 使用真实 FastAPI app 生成分类并校验快照。 | ✅ 已迁移：保留分类构建逻辑与差异提示，确保更新时先刷新 `docs/api_doc.json`。 | `tests/integration/docs` |
 
 附录：
-- `test/README.md`、`test/ib_insync_stub.py` 等辅助文件暂未纳入矩阵，待迁移实作时根据需要复制/内联。
+- `test/README.md` 等辅助文件暂未纳入矩阵；原 `test/ib_insync_stub.py` 已迁移为 `src/ib/insync_compat.py`，统一提供测试场景下的轻量兼容类。
 - 差异矩阵将随迁移进度更新状态列（如 `✅ 已迁移`、`🚧 迁移中`）。

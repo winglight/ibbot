@@ -20,29 +20,34 @@ IBBot 是一个围绕 Interactive Brokers API 构建的全栈交易与风险管�
 ## 🧱 架构速览
 
 ```
-┌───────────────┐     ┌─────────────────────┐
-│ FastAPI (main)│◄────┤ JWT Auth / Routers  │
-└─────┬─────────┘     └─────────┬───────────┘
-      │                          │
-      ▼                          ▼
-┌──────────────┐      ┌────────────────────┐
-│ core/* 单例 │      │ Queue / Risk / DOM │
-│ queue_manager│      │ Order / Strategy   │
-└──────┬───────┘      └─────────┬──────────┘
-       │                        │
-       ▼                        ▼
-┌──────────────┐      ┌────────────────────┐
-│ IBAPI        │      │ Services / Cache   │
-│ Controller   │      │ HTTP APIs + Redis  │
-└──────────────┘      └────────────────────┘
+                  ┌──────────────────┐
+                  │ FastAPI (main)   │
+                  └──────┬───────────┘
+                         │ REST / WebSocket
+                         ▼
+            ┌────────────────────────────┐
+            │ Service Routers & Clients  │
+            └────┬──────────┬────────────┘
+                 │          │
+        ┌────────▼───┐  ┌───▼────────┐
+        │Account svc │  │Orders svc  │
+        └────┬───────┘  └────┬───────┘
+             │               │
+             │               │
+        ┌────▼────────┐  ┌───▼────────────┐
+        │Market data  │  │Strategy svc    │
+        └────┬────────┘  └────┬───────────┘
+             │                 │
+             ▼                 ▼
+        Redis streams & typed IB event models
 ```
 
-- **core/** 初始化共享实例（通知、策略、风险、队列、DOM、ATR 等；订单流由独立的 `services/orders` 提供）。
-- **src/routes/** 按功能拆分的 REST/WebSocket 接口；`docs/api_doc.json` 自动从 OpenAPI 导出。
-- **src/dom_*** 深度行情分析、参数调优与自动化调度。
-- **src/optimizer_service/** 提供 DOM 优化任务编排与异步执行。
-- **src/config/** 统一加载 `.env` 与 `.env.local`，供 CLI 与服务端脚本复用。
-- **src/ibapi_controller.py** 实现官方 IB API 的事件循环桥接、请求封装与连接管理，是运行时默认入口。
+- **services/** 目录下的 account/orders/market_data/strategy 微服务各自维护 `ServiceIBClient`，直接与 IB Gateway/TWS 建立连接并将
+  事件发布至 Redis。【F:services/account/ib_client.py†L20-L59】【F:services/orders/ib_client.py†L16-L148】【F:services/market_data/ib_client.py†L34-L115】
+- **src/routes/** 汇总主进程 API，包括 `/ib/channels` 在内的服务发现元数据以及连接控制端点。【F:src/routes/ib.py†L1-L171】
+- **src/ib/** 提供共享的事件模型与 Redis 发布工具，保证跨服务的消息结构一致。【F:src/ib/events.py†L1-L305】【F:src/ib/redis_streaming.py†L1-L162】
+- **core/**、`src/dom_*` 与 `src/optimizer_service/` 仍负责策略、风控、DOM 分析等计算型能力，可通过 Redis 通道消费各服务输出。
+- **src/config/** 统一加载 `.env` 与 `.env.local`，供 CLI、脚本与微服务复用配置。
 
 ### 🗄️ 持久化模型
 
@@ -104,20 +109,23 @@ cp .env.example .env.local  # 本地覆写，保存凭据与私有配置
 
 `src.config.load_project_env` 会同时加载 `.env` 与 `.env.local`（若存在），因此请将敏感配置写入 `.env.local` 并按需覆盖 `.env` 中的公共默认值。
 
-常用环境变量速查表：
+常用环境变量速查表（更多细节请参阅 [docs/configuration.md](docs/configuration.md)）：
 
 | 变量 | 用途 | 关联模块/服务 |
 | --- | --- | --- |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` / `JWT_SECRET` | 配置后台登录与 JWT 密钥 | Web API |
 | `VISITOR_USERNAME` / `VISITOR_PASSWORD` | 可选访客账号，提供只读界面 | Web API |
-| `IBKR_HOST` / `IBKR_PORT` / `IBKR_CLIENT_ID` / `IBKR_PAPER_TRADING` | IBKR 连接主机、端口、客户端 ID 与交易环境 | 连接管理、`ib_command` |
+| `IBKR_HOST` / `IBKR_PORT` / `IBKR_CLIENT_ID` / `IBKR_PAPER_TRADING` | 主进程连接控制器使用的默认 IB Gateway 参数 | 连接管理 |
+| `ACCOUNT_IB_HOST` / `ACCOUNT_IB_PORT` / `ACCOUNT_IB_CLIENT_ID` | Account 服务专用的 IB Gateway 连接参数 | `services/account` |
+| `ORDERS_IB_HOST` / `ORDERS_IB_PORT` / `ORDERS_IB_CLIENT_ID` | Orders 服务专用的 IB Gateway 连接参数 | `services/orders` |
+| `MARKET_DATA_IB_HOST` / `MARKET_DATA_IB_PORT` / `MARKET_DATA_IB_CLIENT_ID` | Market Data 服务专用的 IB Gateway 连接参数 | `services/market_data` |
+| `MARKET_DATA_TYPE` / `MARKET_DATA_DELAYED_FALLBACK` / `MARKET_DATA_MAX_SUBSCRIPTIONS` | 控制行情类型、延迟兜底与并发订阅上限 | `services/market_data` |
+| `STRATEGY_DEFAULT_REQUIRED_CHANNELS` / `STRATEGY_DEFAULT_CHANNEL_MAP` / `STRATEGY_DEFAULT_LATENCY_BUDGET_MS` / `STRATEGY_USE_DELAYED_DATA` | 策略服务默认订阅与延迟预算 | `services/strategy` |
 | `AUTO_CONNECT` / `IBBOT_DISABLE_TRADING` | 控制启动时是否自动连接 IBKR、是否禁用交易 | Web API、策略/订单模块 |
 | `IBBOT_REDIS_URL` | 全局 Redis 连接串，未单独指定时供各服务共用 | 全部后台服务 |
 | `ACCOUNT_SERVICE_URL` / `ACCOUNT_SERVICE_TIMEOUT` | 账户服务 HTTP 接入点，默认 `http://localhost:8020` | `services/account` |
-| `IB_COMMAND_REDIS_URL` / `IB_FEED_REDIS_URL` / `STRATEGY_REDIS_URL` 等 | 覆盖对应微服务的 Redis 连接 | `ib_command`、`ib_feed`、`strategy`、`notification` 等 |
+| `STRATEGY_REDIS_URL` / `NOTIFICATION_REDIS_URL` 等 | 覆盖对应微服务的 Redis 连接 | `strategy`、`notification` 等 |
 | `REDIS_HOST` / `REDIS_PORT` / `REDIS_DB` | 当使用分散配置时拼接 Redis 地址 | Redis 客户端封装 |
-| `IB_COMMAND_HEALTH_POLL_INTERVAL_SEC` / `IB_COMMAND_HEALTH_STALE_AFTER_SEC` | 控制 ib-command 健康检查的轮询频率与过期阈值 | 主进程、`ib_command` |
-| `IB_COMMAND_ACCOUNT_TYPE` / `IB_ACCOUNT_TYPE` | 覆写连接状态响应中的账户类型标签 | Web API |
 | `DATA_LAYER_*`、`TELEGRAM_*` | 行情落地、通知推送等可选能力 | Market Data、Notification |
 
 ### 3. 启动服务
@@ -138,19 +146,19 @@ uvicorn main:app --reload
 
 ```bash
 # 检查某个服务是否可以直接启动（不会连接外部依赖）
-python scripts/run_service.py ib_feed --dry-run
+python scripts/run_service.py strategy --dry-run
 
-# 实际运行单个服务（等同于 python -m services.ib_feed.main）
-python scripts/run_service.py ib_feed
+# 实际运行单个服务（等同于 python -m services.strategy.http:app）
+python scripts/run_service.py strategy
 
-# 批量启动核心服务，默认包含 connection_control/account/orders/ib_command/ib_feed/strategy/risk/notification
+# 批量启动核心服务，默认包含 connection_control/account/orders/strategy/risk/notification
 python scripts/run_all.py
 
 # 仅做导入与环境自检，可自定义服务组合
-python scripts/run_all.py ib_feed strategy --dry-run
+python scripts/run_all.py strategy risk --dry-run
 
 # 在需要逐一排查服务时，也可以单独执行 dry-run
-python scripts/run_all.py --dry-run ib_command
+python scripts/run_all.py --dry-run strategy
 ```
 
 > ⚠️ 主进程依赖 `services/account` 与 `services/orders` 提供账户/订单接口，请优先启动这两个服务（示例：`uvicorn services.account.main:app`、`uvicorn services.orders.main:app`）。Docker Compose 与部署脚本已调整为在启动 `ibbot` 之前拉起相关服务。
@@ -165,19 +173,22 @@ python scripts/run_all.py --dry-run ib_command
 
 1. **运行测试套件**：`pytest` 会调用内置的 `IBAPIController` stub，覆盖行情、下单、账户、连接管理等核心路径，确保在没有 `ib_insync` 的环境下也可通过。
 2. **执行诊断脚本**：运行 `python diagnose_connection.py`，脚本会基于 `IBAPIController` 逐个尝试客户端 ID，验证与 TWS/Gateway 的 TCP 连接、握手与数据库配置。
-3. **检查运行日志**：`src/connection_manager` 在默认情况下会记录 `Defaulting IBKR connections to IBAPIController`，若显式设置 `IBKR_ENABLE_IB_INSYNC=1` 且真实依赖存在，日志会注明进入兼容模式。
-4. **生产前验证**：在仿真或正式账户中启动主服务后，通过前端连接面板或 `/api/connect` 触发连接，确认市场数据、订单与账户快照均能更新；如需回退到 `ib_insync`，请明确设置 `IBKR_ENABLE_IB_INSYNC=1` 并确保依赖安装完成。
+3. **检查运行日志**：`src/connection_manager` 会在启动时输出 `IBKR connections handled exclusively via IBAPIController`，确认主进程没有再尝试加载 `ib_insync` 兼容层。
+4. **生产前验证**：在仿真或正式账户中启动主服务后，通过前端连接面板或 `/api/connect` 触发连接，确认市场数据、订单与账户快照均能更新；所有 IB 交互均通过官方 TWS API 完成。
 
 | 服务模块 | 启动命令 | 主要依赖 | 说明 |
 | --- | --- | --- | --- |
 | `account` | `uvicorn services.account.main:app --port 8020` | Redis（账户快照缓存） | 提供账户 REST 接口，默认监听 `8020` 端口，请在主进程前启动。 |
 | `orders` | `uvicorn services.orders.main:app --port 8050` | Redis（命令队列/健康上报） | 提供下单、撤单与仓位指令 REST 接口，默认监听 `8050` 端口。 |
-| `ib_command` | `python scripts/run_service.py ib_command` | Redis（任务队列） | 可选对接 IB Gateway/TWS，使用 `--dry-run` 可跳过连接。 |
-| `ib_feed` | `python scripts/run_service.py ib_feed` | Redis（行情缓存） | 连接 IBKR 抓取实时/历史行情。 |
 | `strategy` | `uvicorn services.strategy.http:app --port 8045` | Redis（策略调度/事件流） | 提供策略管理 REST 接口并维护任务队列。 |
 | `risk` | `uvicorn services.risk.http:app --port 8030` | Redis（风险配置） | 提供风险配置 REST 接口并刷新风控运行时。 |
 | `notification` | `python scripts/run_service.py notification` | Redis（事件队列） | 推送通知到浏览器/Telegram。 |
 | `optimizer` | `python scripts/run_service.py optimizer` | Redis、MariaDB | 需要历史数据（MariaDB）与事件流（Redis）。 |
+
+#### 4.1 验收与长时回归验证
+
+- **自动化验收套件**：`pytest tests/acceptance/test_refactor_acceptance.py -q` 会模拟 Account/Orders/Market Data 服务的 Redis 推送并验证策略事件流是否收到全部频道的数据。
+- **长时 Soak 验证**：`python scripts/refactor_soak.py --iterations 6 --duration 30` 在真实 IB Gateway/TWS 会话中循环执行集成采集，生成 `summary.json` 与 `iteration_*.json` 记录每轮消息数。若 `summary.json` 的 `failures` 数组为空，即表示所有频道在测试窗口内持续产出数据。
 
 #### 订单服务持久化更新
 
@@ -205,11 +216,12 @@ python scripts/run_all.py --dry-run ib_command
 
 | Redis 键 | 默认来源 | 主要字段 |
 | --- | --- | --- |
-| `hash:service:health:ib-command` | `ib_command` 服务（可由 `IB_COMMAND_HEALTH_KEY` 覆写） | `queue_depth`、`last_seen`、`last_error`、`last_error_code`、`stale` |
 | `hash:service:health:account-service` | 账户服务（`ACCOUNT_SERVICE_HEALTH_KEY`） | `healthy`、`last_error`、`last_seen`、快照时间戳 |
 | `hash:service:health:orders` | 订单服务（`ORDERS_SERVICE_HEALTH_KEY`） | `healthy`、`last_seen`、`active_orders` |
 | `hash:service:health:risk-service` | `risk` 服务（`RISK_SERVICE_HEALTH_KEY`） | `status`、`last_seen`、`last_error` |
 | `hash:service:health:strategy` | `strategy` 服务（`STRATEGY_SERVICE_HEALTH_KEY`） | `status`/`healthy`、`last_error`、`last_seen` |
+
+> 注：历史键 `hash:service:health:ib-command` 不再更新，相关健康状态由各服务本地指标取代。
 | `hash:service:health:notification` | 通知服务（`NOTIFICATION_SERVICE_HEALTH_KEY`） | `healthy`、`last_error`、`pending_retries` |
 | `hash:service:health:queue` | 队列监控守护进程（`QUEUE_MONITOR_HEALTH_KEY`） | `status`、`last_seen`、聚合队列指标 |
 | `hash:service:queue-monitor` | `queue_monitor` 服务 | `timestamp`、队列统计字段 |
@@ -267,6 +279,8 @@ npm test
 
 `pytest` 会注入隔离的服务桩并跳过真实 IBKR/Redis 依赖。`npm test` 运行 Playwright 端到端脚本（默认检查静态前端契约），首次使用前请执行 `npm install` 安装依赖。
 
+- 若需验证 Redis 流与各服务订阅是否按预期工作，可执行 `python scripts/refactor_integration_check.py`。脚本会串行调用账户/订单/行情服务的订阅端点，并在指定时间窗内抓取 Redis 消息写入 `data/regression/ib_stream_baseline.json` 以便回归比对。【F:scripts/refactor_integration_check.py†L1-L165】
+
 ## 🐳 Docker 与远程部署
 
 - [docker/readme.md](docker/readme.md)：本地/生产 compose、镜像推送与 Cloudflare Tunnel。
@@ -277,8 +291,6 @@ npm test
 | Compose 服务 | 后台启动命令 | Profile | 角色说明 |
 | --- | --- | --- | --- |
 | `ibbot` | `gunicorn main:app`（容器入口） | _默认_ | Web API 与前端静态资源。 |
-| `ib-command` | `python -m services.ib_command.main` | `ib-services` | 消费指令队列、执行 IBKR 命令、回写执行结果。 |
-| `ib-feed` | `python -m services.ib_feed.main` | `ib-services` | 订阅 IBKR 行情、发布价格/DOM、写入 MariaDB。 |
 | `market-data` | `python -m uvicorn services.market_data.main:app --host 0.0.0.0 --port 8010` | `market` | 聚合行情快照，暴露 REST/WebSocket（默认端口 8010）。 |
 | `risk` | `python -m services.risk.main` | `risk` | 消费行情/执行结果流，运行风险引擎并触发保护动作。 |
 | `strategy` | `python -m services.strategy.main` | `strategy` | 执行策略任务、写入事件流并下发 IB 指令。 |

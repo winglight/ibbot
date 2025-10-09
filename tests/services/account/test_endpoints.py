@@ -80,6 +80,14 @@ def reset_state() -> None:
     _state.daily_summary_stale = None
     _state.daily_summary_stale_reason = None
     _state.daily_summary_last_error = None
+    _state.ib_client = None
+    _state.publisher = None
+    _state.event_task = None
+    _state.shutdown_event = None
+    _state.subscription_lock = None
+    _state.subscription_accounts = set()
+    _state.subscription_tags = set()
+    _state.subscription_count = 0
 
 
 class _InMemoryRedis:

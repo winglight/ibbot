@@ -3,8 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from dataclasses import dataclass
-from datetime import datetime, timedelta
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from time import perf_counter
 from typing import Any, AsyncIterator, Dict, Iterable, Mapping, Optional, Sequence, Tuple
 
@@ -12,12 +13,39 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Query, status
 from fastapi.responses import JSONResponse
-from loguru import logger
+from pydantic import BaseModel
 
 from src.account_snapshot_cache import read_account_info_snapshot, read_positions_snapshot
 from src.account_snapshot_service import AccountSnapshotService, IB_COMMAND_SOURCE
+
+try:  # pragma: no cover - exercised when ibapi is unavailable
+    from services.account.ib_client import ServiceIBClient
+except ModuleNotFoundError as exc:  # pragma: no cover - optional dependency guard
+    _IB_IMPORT_ERROR = exc
+
+    class ServiceIBClient:  # type: ignore[no-redef]
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            raise RuntimeError(
+                "Interactive Brokers API support is unavailable; install ibapi"
+            ) from _IB_IMPORT_ERROR
 from src.ibbot import update_service_health
-from src.ibbot.redis import IBCommandError, IBCommandTimeout, get_redis_client, request_ib_command
+from src.ibbot.logging import configure_service_logger
+from src.ibbot.redis import (
+    LegacyIBCommandUnavailableError,
+    get_redis_client,
+    request_ib_command,
+)
+from src.ib.redis_streaming import (
+    RedisPublisher,
+    publish_account_event,
+    publish_portfolio_event,
+)
+from src.ib.events import PortfolioPositionEvent
+from src.observability.metrics import (
+    build_metrics_router,
+    record_ib_reconnect,
+    set_subscription_gauge,
+)
 from src.routes.service_clients import (
     OrdersServiceClient,
     ServiceClientError,
@@ -31,12 +59,25 @@ from src.utils.account_pnl_cache import (
 
 
 ACCOUNT_SERVICE_NAME = "account-service"
+logger = configure_service_logger(
+    "ibbot.services.account",
+    service_name="account",
+    ib_client_id_env_var="ACCOUNT_IB_CLIENT_ID",
+)
 DEFAULT_HEALTH_INTERVAL = 30.0
 DEFAULT_ORDER_LIMIT = 50
 DAILY_SUMMARY_COMMAND_ENV = "ACCOUNT_DAILY_SUMMARY_COMMAND"
 DEFAULT_DAILY_SUMMARY_COMMAND = "get_account_daily_summary"
 DAILY_SUMMARY_TIMEOUT_ENV = "ACCOUNT_DAILY_SUMMARY_TIMEOUT"
 DEFAULT_DAILY_SUMMARY_TIMEOUT = 5.0
+
+DEFAULT_ACCOUNT_SUMMARY_TAGS: tuple[str, ...] = (
+    "NetLiquidation",
+    "TotalCashValue",
+    "EquityWithLoanValue",
+    "AvailableFunds",
+)
+DEFAULT_ACCOUNT_SUMMARY_TAG_STRING = ",".join(DEFAULT_ACCOUNT_SUMMARY_TAGS)
 
 
 _ORDERS_CLIENT = OrdersServiceClient()
@@ -70,6 +111,14 @@ class AccountServiceState:
     daily_summary_stale: Optional[bool] = None
     daily_summary_stale_reason: Optional[str] = None
     daily_summary_last_error: Optional[str] = None
+    ib_client: ServiceIBClient | None = None
+    publisher: RedisPublisher | None = None
+    event_task: asyncio.Task | None = None
+    shutdown_event: asyncio.Event | None = None
+    subscription_lock: asyncio.Lock | None = None
+    subscription_accounts: set[str] = field(default_factory=set)
+    subscription_tags: set[str] = field(default_factory=set)
+    subscription_count: int = 0
 
     def update_snapshot_metadata(
         self, *, info: Optional[Dict[str, Any]], positions: Optional[Dict[str, Any]]
@@ -134,6 +183,7 @@ async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="Account Service", lifespan=_lifespan)
+app.include_router(build_metrics_router())
 _state = AccountServiceState()
 
 
@@ -150,6 +200,241 @@ async def _collect_snapshots() -> tuple[Optional[Dict[str, Any]], Optional[Dict[
     info_snapshot = await read_account_info_snapshot()
     positions_snapshot = await read_positions_snapshot()
     return info_snapshot, positions_snapshot
+
+
+def _normalize_accounts(accounts: Sequence[str]) -> list[str]:
+    seen: set[str] = set()
+    normalized: list[str] = []
+    for account in accounts:
+        if not account:
+            continue
+        cleaned = account.strip()
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        normalized.append(cleaned)
+    return normalized
+
+
+def _normalize_tags(tags: Sequence[str] | None) -> list[str]:
+    if not tags:
+        return list(DEFAULT_ACCOUNT_SUMMARY_TAGS)
+    seen: set[str] = set()
+    normalized: list[str] = []
+    for tag in tags:
+        if not tag:
+            continue
+        cleaned = tag.strip()
+        if not cleaned:
+            continue
+        if cleaned in seen:
+            continue
+        seen.add(cleaned)
+        normalized.append(cleaned)
+    return normalized or list(DEFAULT_ACCOUNT_SUMMARY_TAGS)
+
+
+def _parse_tags_query(raw: str | None) -> list[str]:
+    if raw is None:
+        return list(DEFAULT_ACCOUNT_SUMMARY_TAGS)
+    parts = [segment.strip() for segment in raw.split(",")]
+    return _normalize_tags(parts)
+
+
+def _serialize_value(value: Any) -> Any:
+    if isinstance(value, Decimal):
+        return format(value, "f")
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc).isoformat()
+    return value
+
+
+def _serialize_mapping(payload: Mapping[str, Any]) -> Dict[str, Any]:
+    serialised: Dict[str, Any] = {}
+    for key, value in payload.items():
+        if isinstance(value, Mapping):
+            serialised[str(key)] = _serialize_mapping(value)
+        elif isinstance(value, (list, tuple)):
+            serialised[str(key)] = [
+                _serialize_mapping(item)
+                if isinstance(item, Mapping)
+                else _serialize_value(item)
+                for item in value
+            ]
+        else:
+            serialised[str(key)] = _serialize_value(value)
+    return serialised
+
+
+def _prepare_summary_payload(
+    summary: Mapping[str, Any], accounts: Sequence[str]
+) -> Dict[str, Any]:
+    accounts_payload = summary.get("accounts")
+    currencies_payload = summary.get("currencies")
+    serialised_accounts = (
+        _serialize_mapping(accounts_payload)
+        if isinstance(accounts_payload, Mapping)
+        else {}
+    )
+    serialised_currencies = (
+        _serialize_mapping(currencies_payload)
+        if isinstance(currencies_payload, Mapping)
+        else {}
+    )
+    target_accounts = list(accounts) or list(serialised_accounts.keys())
+    filtered_accounts = {
+        account: serialised_accounts.get(account, {}) for account in target_accounts
+    }
+    filtered_currencies = {
+        account: serialised_currencies.get(account, {}) for account in target_accounts
+    }
+    payload: Dict[str, Any] = {
+        "request_id": summary.get("request_id"),
+        "received_at": _serialize_value(summary.get("received_at")),
+        "accounts": filtered_accounts,
+        "currencies": filtered_currencies,
+    }
+    return payload
+
+
+def _prepare_positions_payload(
+    positions: Sequence[PortfolioPositionEvent], account: str
+) -> list[Dict[str, Any]]:
+    serialised: list[Dict[str, Any]] = []
+    for position in positions:
+        if position.account != account:
+            continue
+        data = position.model_dump()
+        serialised.append(_serialize_mapping(data))
+    return serialised
+
+
+def _get_subscription_lock() -> asyncio.Lock:
+    lock = _state.subscription_lock
+    if lock is None:
+        lock = asyncio.Lock()
+        _state.subscription_lock = lock
+    return lock
+
+
+async def _ensure_publisher() -> RedisPublisher:
+    publisher = _state.publisher
+    if publisher is None:
+        publisher = RedisPublisher(service_name="account")
+        _state.publisher = publisher
+    return publisher
+
+
+async def _ensure_ib_client() -> ServiceIBClient:
+    client = _state.ib_client
+    if client is None:
+        client = ServiceIBClient()
+        _state.ib_client = client
+    if not client.isConnected():
+        await client.connect()
+        record_ib_reconnect(service="account")
+    return client
+
+
+async def _start_event_consumer() -> None:
+    if _state.event_task is not None and not _state.event_task.done():
+        return
+    client = _state.ib_client
+    publisher = _state.publisher
+    if client is None or publisher is None:
+        return
+    _state.shutdown_event = asyncio.Event()
+    _state.event_task = asyncio.create_task(_account_event_loop())
+
+
+async def _stop_event_consumer() -> None:
+    task = _state.event_task
+    if task is None:
+        return
+    shutdown_event = _state.shutdown_event
+    if shutdown_event is not None:
+        shutdown_event.set()
+    queue = None
+    client = _state.ib_client
+    if client is not None:
+        try:
+            queue = client.callback_queue
+        except Exception:
+            queue = None
+    if queue is not None:
+        try:
+            await queue.put(("__shutdown__", None))
+        except Exception:
+            pass
+    try:
+        await asyncio.wait_for(task, timeout=5)
+    except asyncio.TimeoutError:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:  # pragma: no cover - defensive guard
+            logger.warning("Account event loop cancellation raised: %s", exc)
+    except asyncio.CancelledError:  # pragma: no cover - expected cancellation path
+        pass
+    except Exception as exc:  # pragma: no cover - defensive guard
+        logger.warning("Account event loop shutdown error: %s", exc)
+    _state.event_task = None
+    _state.shutdown_event = None
+
+
+EVENT_DISPATCH_TABLE: dict[str, Any] = {
+    "account_update": publish_account_event,
+    "account_summary": publish_account_event,
+    "portfolio": publish_portfolio_event,
+}
+
+
+async def _dispatch_account_event(event_type: str, payload: Any) -> None:
+    publisher = _state.publisher
+    if publisher is None:
+        return
+    handler = EVENT_DISPATCH_TABLE.get(event_type)
+    if handler is None:
+        logger.debug("Ignoring unsupported account event '%s'", event_type)
+        return
+    try:
+        await handler(publisher, payload)
+    except Exception as exc:  # pragma: no cover - defensive guard
+        logger.warning(
+            "Failed to publish account event %s to Redis: %s", event_type, exc
+        )
+
+
+async def _account_event_loop() -> None:
+    client = _state.ib_client
+    publisher = _state.publisher
+    if client is None or publisher is None:
+        return
+    shutdown_event = _state.shutdown_event
+    try:
+        queue = client.callback_queue
+    except Exception:
+        logger.warning("Account client callback queue unavailable; event loop stopping")
+        return
+    while True:
+        if shutdown_event is not None and shutdown_event.is_set():
+            break
+        try:
+            event_type, payload = await asyncio.wait_for(queue.get(), timeout=1.0)
+        except asyncio.TimeoutError:
+            continue
+        except asyncio.CancelledError:  # pragma: no cover - cancellation path
+            break
+        except Exception as exc:  # pragma: no cover - defensive guard
+            logger.warning("Account event loop read error: %s", exc)
+            continue
+        if event_type == "__shutdown__":
+            break
+        await _dispatch_account_event(event_type, payload)
 def _resolve_daily_summary_command_method() -> str:
     return os.getenv(DAILY_SUMMARY_COMMAND_ENV, DEFAULT_DAILY_SUMMARY_COMMAND) or DEFAULT_DAILY_SUMMARY_COMMAND
 
@@ -193,6 +478,172 @@ def _coerce_order_iterable(collection: Any) -> list[Dict[str, Any]]:
         if isinstance(entry, Mapping):
             result.append(dict(entry))
     return result
+
+
+class AccountSubscriptionRequest(BaseModel):
+    accounts: list[str]
+    tags: list[str] | None = None
+
+
+@app.post("/subscriptions/account")
+async def create_account_subscription(
+    payload: AccountSubscriptionRequest,
+) -> Dict[str, Any]:
+    accounts = _normalize_accounts(payload.accounts)
+    if not accounts:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="At least one account code is required",
+        )
+    tags = _normalize_tags(payload.tags)
+    await _ensure_publisher()
+    try:
+        client = await _ensure_ib_client()
+    except Exception as exc:
+        logger.warning("Account client unavailable during subscription: %s", exc)
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Account client unavailable",
+        ) from exc
+    await _start_event_consumer()
+    try:
+        await client.subscribe_account_updates(accounts)
+        summary_raw = await client.fetch_account_summary(
+            ",".join(tags) if tags else DEFAULT_ACCOUNT_SUMMARY_TAG_STRING
+        )
+    except Exception as exc:
+        logger.warning("Failed to establish account subscription: %s", exc)
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Failed to establish account subscription",
+        ) from exc
+    summary_payload = _prepare_summary_payload(summary_raw, accounts)
+    lock = _get_subscription_lock()
+    async with lock:
+        _state.subscription_count += 1
+        _state.subscription_accounts.update(accounts)
+        _state.subscription_tags.update(tags)
+        subscription_count = _state.subscription_count
+    set_subscription_gauge(
+        service="account",
+        channel="account-updates",
+        count=subscription_count,
+    )
+    response: Dict[str, Any] = {
+        "success": True,
+        "accounts": accounts,
+        "tags": tags,
+        "subscription_count": subscription_count,
+        "summary": summary_payload["accounts"],
+        "currencies": summary_payload["currencies"],
+        "request_id": summary_payload.get("request_id"),
+        "received_at": summary_payload.get("received_at"),
+    }
+    return response
+
+
+@app.delete("/subscriptions/account")
+async def delete_account_subscription() -> Dict[str, Any]:
+    lock = _get_subscription_lock()
+    async with lock:
+        if _state.subscription_count <= 0:
+            set_subscription_gauge(
+                service="account",
+                channel="account-updates",
+                count=0,
+            )
+            return {"success": True, "remaining_subscribers": 0}
+        _state.subscription_count -= 1
+        remaining = _state.subscription_count
+        should_cleanup = remaining == 0
+    set_subscription_gauge(
+        service="account",
+        channel="account-updates",
+        count=remaining,
+    )
+    if should_cleanup:
+        client = _state.ib_client
+        if client is not None:
+            try:
+                await client.unsubscribe_account_updates()
+            except Exception as exc:  # pragma: no cover - defensive guard
+                logger.warning("Account client unsubscribe failed: %s", exc)
+            await _stop_event_consumer()
+            try:
+                await client.disconnect()
+            except Exception as exc:  # pragma: no cover - defensive guard
+                logger.warning("Account client disconnect failed: %s", exc)
+        _state.subscription_accounts.clear()
+        _state.subscription_tags.clear()
+    return {"success": True, "remaining_subscribers": remaining}
+
+
+@app.get("/accounts/{account_id}/summary")
+async def get_account_summary(
+    account_id: str, tags: str | None = Query(None)
+) -> Dict[str, Any]:
+    accounts = _normalize_accounts([account_id])
+    tag_values = _parse_tags_query(tags)
+    await _ensure_publisher()
+    try:
+        client = await _ensure_ib_client()
+    except Exception as exc:
+        logger.warning("Account client unavailable for summary: %s", exc)
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Account client unavailable",
+        ) from exc
+    await _start_event_consumer()
+    try:
+        summary_raw = await client.fetch_account_summary(
+            ",".join(tag_values) if tag_values else DEFAULT_ACCOUNT_SUMMARY_TAG_STRING
+        )
+    except Exception as exc:
+        logger.warning("Failed to fetch account summary for %s: %s", account_id, exc)
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Account summary unavailable",
+        ) from exc
+    summary_payload = _prepare_summary_payload(summary_raw, accounts)
+    account_summary = summary_payload["accounts"].get(account_id, {})
+    account_currencies = summary_payload["currencies"].get(account_id, {})
+    return {
+        "account": account_id,
+        "summary": account_summary,
+        "currencies": account_currencies,
+        "tags": tag_values,
+        "request_id": summary_payload.get("request_id"),
+        "received_at": summary_payload.get("received_at"),
+    }
+
+
+@app.get("/accounts/{account_id}/positions")
+async def get_account_positions(account_id: str) -> Dict[str, Any]:
+    await _ensure_publisher()
+    try:
+        client = await _ensure_ib_client()
+    except Exception as exc:
+        logger.warning("Account client unavailable for positions: %s", exc)
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Account client unavailable",
+        ) from exc
+    await _start_event_consumer()
+    try:
+        positions = await client.fetch_positions()
+    except Exception as exc:
+        logger.warning("Failed to fetch positions for %s: %s", account_id, exc)
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Account positions unavailable",
+        ) from exc
+    serialised_positions = _prepare_positions_payload(positions, account_id)
+    return {
+        "account": account_id,
+        "positions": serialised_positions,
+        "count": len(serialised_positions),
+        "retrieved_at": _serialize_value(datetime.now(timezone.utc)),
+    }
 
 
 def _extract_orders(payload: Mapping[str, Any]) -> list[Dict[str, Any]]:
@@ -616,6 +1067,15 @@ async def _startup() -> None:
     _state.daily_summary_stale = None
     _state.daily_summary_stale_reason = None
     _state.daily_summary_last_error = None
+    _state.subscription_count = 0
+    _state.subscription_accounts.clear()
+    _state.subscription_tags.clear()
+    _state.subscription_lock = asyncio.Lock()
+    set_subscription_gauge(service="account", channel="account-updates", count=0)
+    _state.ib_client = None
+    _state.publisher = None
+    _state.event_task = None
+    _state.shutdown_event = None
     try:
         _state.redis = await get_redis_client()
     except Exception as exc:  # pragma: no cover - redis optional for local tests
@@ -695,6 +1155,32 @@ async def _shutdown() -> None:
             logger.warning("Account snapshot service shutdown error: %s", exc)
     _state.snapshot_service = None
     _state.watchdog_stop_event = None
+    await _stop_event_consumer()
+    client = _state.ib_client
+    if client is not None:
+        try:
+            await client.unsubscribe_account_updates()
+        except Exception as exc:  # pragma: no cover - defensive guard
+            logger.debug(
+                "Account client unsubscribe during shutdown failed: %s", exc
+            )
+        try:
+            await client.disconnect()
+        except Exception as exc:  # pragma: no cover - defensive guard
+            logger.warning("Account client disconnect failed during shutdown: %s", exc)
+    _state.ib_client = None
+    publisher = _state.publisher
+    if publisher is not None:
+        try:
+            await publisher.close()
+        except Exception as exc:  # pragma: no cover - defensive guard
+            logger.warning("Account publisher shutdown error: %s", exc)
+    _state.publisher = None
+    _state.subscription_accounts.clear()
+    _state.subscription_tags.clear()
+    _state.subscription_count = 0
+    _state.subscription_lock = None
+    set_subscription_gauge(service="account", channel="account-updates", count=0)
     logger.info("Account service shutdown complete")
 
 
@@ -1042,25 +1528,14 @@ async def get_daily_summary() -> Dict[str, Any]:
         timeout = _resolve_daily_summary_timeout()
         try:
             command_result = await request_ib_command(method, redis=client, timeout=timeout)
-        except IBCommandTimeout as exc:
-            detail = "Timed out while requesting daily summary refresh"
+        except LegacyIBCommandUnavailableError as exc:
+            detail = str(exc)
             await _record_daily_summary_metrics(
                 source=IB_COMMAND_SOURCE,
                 updated_at=None,
                 from_cache=False,
                 stale=True,
-                stale_reason="daily-summary-timeout",
-                error=detail,
-            )
-            raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail=detail) from exc
-        except IBCommandError as exc:
-            detail = f"Daily summary command {method} failed: {exc}"
-            await _record_daily_summary_metrics(
-                source=IB_COMMAND_SOURCE,
-                updated_at=None,
-                from_cache=False,
-                stale=True,
-                stale_reason="daily-summary-error",
+                stale_reason="daily-summary-unavailable",
                 error=detail,
             )
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=detail) from exc

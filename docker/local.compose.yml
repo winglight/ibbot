@@ -91,50 +91,6 @@ services:
     networks:
       - ibbot-network
 
-  ib-command:
-    <<: *app-environment
-    build:
-      context: .
-      dockerfile: docker/Dockerfile
-    image: ${IBBOT_IMAGE:-ibbot/local}
-    command: ["python", "-m", "services.ib_command.main"]
-    container_name: ibbot-ib-command
-    volumes:
-      - ./data/logs:/app/logs
-      - ./data:/app/data
-    depends_on:
-      redis:
-        condition: service_healthy
-    networks:
-      - ibbot-network
-    restart: unless-stopped
-    profiles:
-      - ib-services
-
-  ib-feed:
-    <<: *app-environment
-    build:
-      context: .
-      dockerfile: docker/Dockerfile
-    image: ${IBBOT_IMAGE:-ibbot/local}
-    command: ["python", "-m", "services.ib_feed.main"]
-    container_name: ibbot-ib-feed
-    volumes:
-      - ./data/logs:/app/logs
-      - ./data:/app/data
-    depends_on:
-      redis:
-        condition: service_healthy
-      mariadb:
-        condition: service_healthy
-      ib-gateway:
-        condition: service_started
-    networks:
-      - ibbot-network
-    restart: unless-stopped
-    profiles:
-      - ib-services
-
   connection_control:
     <<: *app-environment
     build:

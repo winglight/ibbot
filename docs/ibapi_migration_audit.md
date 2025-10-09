@@ -13,8 +13,8 @@
 
 ## 阶段一：基础设施与依赖准备
 - ✅ **依赖声明**：`requirements.txt` 只列出了官方 `ibapi` 而没有 `ib_insync`，符合迁移计划的第一步。【F:requirements.txt†L1-L26】
-- ✅ **控制器原型**：`ConnectionManager` 默认通过 `IBAPIController` 建立连接，仅在显式设置 `IBKR_ENABLE_IB_INSYNC=1` 且真实依赖存在时才会回退到旧实现，确保官方 API 成为主路径。【F:src/connection_manager.py†L145-L228】【F:src/connection_manager.py†L909-L933】
-- ✅ **测试桩**：生产代码与单元测试均改为直接构造 `ibapi` 合约对象，不再导入 `test.ib_insync_stub`，确保缺失 `ib_insync` 时仍可运行。【F:src/ibkr_client.py†L20-L122】【F:tests/unit/test_ibkr_contract_qualification.py†L1-L86】
+- ✅ **控制器原型**：`ConnectionManager` 始终通过 `IBAPIController` 建立连接，运行日志会标记 “IBKR connections handled exclusively via IBAPIController”，确认主路径完全依赖官方 API。【F:src/connection_manager.py†L120-L320】【F:src/connection_manager.py†L780-L940】
+- ✅ **测试桩**：生产代码与单元测试均改为直接构造 `ibapi` 合约对象，若需要旧接口模型则使用 `src/ib/insync_compat.py` 提供的轻量兼容类，确保缺失 `ib_insync` 时仍可运行。【F:src/ibkr_client.py†L20-L122】【F:tests/unit/test_ibkr_contract_qualification.py†L1-L86】
 
 ## 阶段二：合约与市场数据
 - ✅ **合约构建**：`IBKRClient` 默认创建 `ibapi.contract.Contract` 对象并使用控制器查询详情，对旧接口的兼容通过按需转换完成，避免了长期维护 `ib_insync` 合约容器的桥接复杂度。【F:src/ibkr_client.py†L1550-L1905】
@@ -35,9 +35,9 @@
 - ✅ **文档/部署**：README 调整为以官方 `ibapi` 控制器为核心的架构描述，并新增控制器自检步骤，指导如何在部署前验证连接与诊断脚本。【F:README.md†L31-L120】【F:README.md†L210-L236】
 
 ## 错误原因说明
-早先日志中的报错源于 `ConnectionManager` 在导入 `ib_insync` 失败时自动回退到测试 stub `test/ib_insync_stub.IB`。该 stub 会在 `connectAsync` 中直接抛出 “`ib_insync is not installed; cannot establish IBKR connection`” 的运行时异常，导致连接循环不断重试并记录相同的警告。【F:test/ib_insync_stub.py†L1-L120】
+早先日志中的报错源于 `ConnectionManager` 在导入 `ib_insync` 失败时自动回退到测试 stub。现已改为默认启用 `IBAPIController`，并在需要旧事件模型时引用 `src/ib/insync_compat.py` 中的兼容实现，避免再触发相关错误日志。【F:src/connection_manager.py†L1-L1950】【F:src/ib/insync_compat.py†L1-L175】
 
-现在连接管理器会检测这类 stub，并改为直接启用 `IBAPIController`。因此，在缺少真实 `ib_insync` 依赖的环境中将不会再触发上述错误；如需兼容旧实现，可显式设置 `IBKR_ENABLE_IB_INSYNC=1` 并确保依赖安装完成。【F:src/connection_manager.py†L1-L1900】
+现在连接管理器默认启用 `IBAPIController`，并仅在测试场景下使用 `src/ib/insync_compat.py` 中的轻量兼容类以满足旧接口所需的模型类型。生产环境不再提供 `IBKR_ENABLE_IB_INSYNC` 开关，也不会尝试加载第三方 `ib_insync` 库。【F:src/connection_manager.py†L1-L1950】【F:src/ib/insync_compat.py†L1-L175】
 
 ## 结论
 `docs/ibapi_migration_tasks.md` 中列出的迁移任务现已全部完成。项目默认通过 `IBAPIController` 驱动连接、行情、订单、账户与持仓流程，迁移文档与测试套件覆盖纯官方 API 路径，`ib_insync` 仅作为显式启用的兼容选项保留。

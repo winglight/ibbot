@@ -34,14 +34,14 @@ def test_notification_restart_plan_has_no_dependencies() -> None:
     assert plan == ["notification"]
 
 
-def test_market_data_restart_plan_includes_feed_dependency() -> None:
-    """Market data restarts must include the feed dependency first."""
+def test_market_data_restart_plan_has_no_legacy_dependency() -> None:
+    """Market data restart no longer needs the deprecated feed service."""
 
     manager = ServiceRestartManager(DummyController())
 
     plan = manager.resolve_plan("market_data")
 
-    assert plan == ["market_data_feed", "market_data"]
+    assert plan == ["market_data"]
 
 
 class StubDockerController(DockerComposeController):
@@ -71,12 +71,11 @@ def test_compose_controller_maps_service_names() -> None:
     async def _run() -> None:
         controller = StubDockerController()
 
-        await controller.restart("market_data_feed")
         await controller.restart("market_data")
         await controller.restart("queue_monitor")
 
         targets = [call[0][-1] for call in controller.calls]
-        assert targets == ["ib-feed", "market-data", "queue-monitor"]
+        assert targets == ["market-data", "queue-monitor"]
 
     asyncio.run(_run())
 

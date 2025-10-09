@@ -73,13 +73,13 @@ Mode: dry-run (no external calls were executed)
 
 ```bash
 # 自检导入（不会访问 Redis/MariaDB）
-python scripts/run_service.py ib_feed --dry-run
+python scripts/run_service.py strategy --dry-run
 
 # 启动单个服务
 python scripts/run_service.py risk
 
 # 批量启动多个服务
-python scripts/run_all.py ib_command ib_feed strategy
+python scripts/run_all.py strategy notification
 ```
 
 当某个模块缺失或依赖无法导入时，`--dry-run` 模式会提前给出友好的错误提示，便于在没有 Docker 的机器上调试依赖问题。

@@ -143,22 +143,16 @@ def test_connect_dispatches_service_command(connection_app, monkeypatch: pytest.
     assert stub_client.calls == [payload]
 
 
-def test_connect_falls_back_to_queue_when_service_unavailable(
+def test_connect_returns_503_when_service_unavailable(
     connection_app, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     app, _ = connection_app
-
-    enqueued: list[dict[str, Any]] = []
-
-    async def fake_enqueue(payload):
-        enqueued.append(dict(payload))
 
     class StubClient:
         async def connect(self, payload):  # pragma: no cover - exercised in test
             raise connection_module.ServiceClientError("connection_control", "offline")
 
     monkeypatch.setattr(connection_module, "_get_connection_control_client", lambda: StubClient())
-    monkeypatch.setattr(connection_module, "_enqueue_command", fake_enqueue)
 
     request_payload = {
         "host": "localhost",
@@ -170,18 +164,8 @@ def test_connect_falls_back_to_queue_when_service_unavailable(
     with TestClient(app) as client:
         response = client.post("/api/connect", json=request_payload)
 
-    assert response.status_code == 200
-    body = response.json()
-    assert body["success"] is True
-    assert body["service"] == "redis"
-    assert body["status"] == "queued"
-    assert body.get("fallback") is True
-    assert body.get("command_id")
-
-    assert enqueued, "expected fallback enqueue"
-    command = enqueued[0]
-    assert command["method"] == "connect"
-    assert command["metadata"]["config"]["host"] == request_payload["host"]
+    assert response.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
+    assert response.json()["detail"] == "Connection service unavailable"
 
 
 def test_disconnect_dispatches_service_command(connection_app, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -212,100 +196,63 @@ def test_disconnect_dispatches_service_command(connection_app, monkeypatch: pyte
     assert stub_client.called is True
 
 
-def test_disconnect_enqueues_command_when_service_unavailable(
+def test_disconnect_returns_503_when_service_unavailable(
     connection_app, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     app, _ = connection_app
-
-    enqueued: list[dict[str, object]] = []
-
-    async def fake_enqueue(payload):
-        enqueued.append(dict(payload))
 
     class StubClient:
         async def disconnect(self):  # pragma: no cover - exercised in test
             raise connection_module.ServiceClientError("connection_control", "offline")
 
-    monkeypatch.setattr(connection_module, "_enqueue_command", fake_enqueue)
     monkeypatch.setattr(connection_module, "_get_connection_control_client", lambda: StubClient())
 
     with TestClient(app) as client:
         response = client.post("/api/disconnect")
 
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["status"] == "queued"
-    assert payload["service"] == "redis"
-    assert payload.get("fallback") is True
-    assert enqueued and enqueued[0]["method"] == "disconnect"
+    assert response.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
+    assert response.json()["detail"] == "Connection service unavailable"
 
 
-def test_connection_status_returns_health_payload(connection_app, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_connection_status_returns_payload_from_service(
+    connection_app, monkeypatch: pytest.MonkeyPatch
+) -> None:
     app, _ = connection_app
 
-    async def fake_health():
-        return {
-            "connected": True,
-            "account_type": "Paper",
-            "last_seen": "2024-01-01T00:00:00+00:00",
-            "queue_depth": 1,
-            "last_error": None,
-            "error_code": 10147,
-            "stale": False,
-            "source": "redis",
-            "ib_connected": True,
-            "ib_connection_error": "",
-        }
+    class StubClient:
+        async def fetch_status(self):
+            return {
+                "status": "idle",
+                "connected": True,
+                "config": {"host": "localhost", "port": 4001},
+                "queue_key": "queue:ib:commands",
+                "queue_depth": 1,
+            }
 
-    monkeypatch.setattr(connection_module, "_load_ib_command_health", fake_health)
+    monkeypatch.setattr(connection_module, "_get_connection_control_client", lambda: StubClient())
 
     with TestClient(app) as client:
         response = client.get("/api/connection_status")
 
     assert response.status_code == 200
     payload = response.json()
+    assert payload["service"] == "connection_control"
     assert payload["connected"] is True
-    assert payload["account_type"] == "Paper"
-    assert payload["stale"] is False
-    assert payload["error_code"] == 10147
+    assert payload["status"] == "idle"
+    assert payload["queue"] == {"key": "queue:ib:commands", "depth": 1}
+    assert payload["config"]["host"] == "localhost"
 
 
-def test_connection_status_marks_disconnected_gateways(connection_app, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_connection_status_handles_service_failure(
+    connection_app, monkeypatch: pytest.MonkeyPatch
+) -> None:
     app, _ = connection_app
 
-    async def fake_health():
-        return {
-            "connected": False,
-            "account_type": "Paper",
-            "last_seen": "2024-01-01T00:00:00+00:00",
-            "queue_depth": 3,
-            "last_error": "gateway down",
-            "error_code": None,
-            "stale": False,
-            "source": "redis",
-            "ib_connected": False,
-            "ib_connection_error": "gateway down",
-        }
+    class StubClient:
+        async def fetch_status(self):  # pragma: no cover - exercised in test
+            raise connection_module.ServiceClientError("connection_control", "offline")
 
-    monkeypatch.setattr(connection_module, "_load_ib_command_health", fake_health)
-
-    with TestClient(app) as client:
-        response = client.get("/api/connection_status")
-
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["connected"] is False
-    assert payload["last_error"] == "gateway down"
-    assert payload["stale"] is False
-
-
-def test_connection_status_returns_default_when_unavailable(connection_app, monkeypatch: pytest.MonkeyPatch) -> None:
-    app, _ = connection_app
-
-    async def missing_health():
-        return None
-
-    monkeypatch.setattr(connection_module, "_load_ib_command_health", missing_health)
+    monkeypatch.setattr(connection_module, "_get_connection_control_client", lambda: StubClient())
     monkeypatch.setenv("IBKR_PAPER_TRADING", "false")
 
     with TestClient(app) as client:
@@ -314,7 +261,5 @@ def test_connection_status_returns_default_when_unavailable(connection_app, monk
     assert response.status_code == 200
     payload = response.json()
     assert payload["connected"] is False
-    assert payload["stale"] is True
     assert payload["account_type"] == "Live"
-    assert payload["last_error"] == "ib-command health unavailable"
-    assert payload["error_code"] is None
+    assert payload["last_error"] == "connection service unavailable"

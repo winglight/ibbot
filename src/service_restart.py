@@ -47,10 +47,10 @@ class RestartCommandResult:
 
 
 class UnknownServiceError(ValueError):
-    """Raised when attempting to restart an unknown service name."""
+    """Raised when attempting to restart an unknown or removed service."""
 
-    def __init__(self, service: str) -> None:
-        super().__init__(f"Unknown service '{service}'")
+    def __init__(self, service: str, message: str | None = None) -> None:
+        super().__init__(message or f"Unknown service '{service}'")
         self.service = service
 
 
@@ -74,10 +74,11 @@ def _default_compose_dir() -> Path:
 
 
 _DEFAULT_SERVICE_NAME_MAP: Mapping[str, str] = {
-    "market_data_feed": "ib-feed",
     "market_data": "market-data",
     "queue_monitor": "queue-monitor",
 }
+
+REMOVED_SERVICES: frozenset[str] = frozenset({"ib_command", "market_data_feed"})
 
 
 class DockerComposeController:
@@ -241,11 +242,9 @@ class LocalSupervisorController:
 
 DEFAULT_SERVICE_DEPENDENCIES: Mapping[str, Sequence[str]] = {
     "queue_monitor": (),
-    "ib_command": (),
     "account": (),
     "orders": ("account",),
-    "market_data_feed": (),
-    "market_data": ("market_data_feed",),
+    "market_data": (),
     "risk": ("orders",),
     "notification": (),
     "strategy": ("orders",),
@@ -276,6 +275,8 @@ class ServiceRestartManager:
         return tuple(self._dependencies.keys())
 
     def resolve_plan(self, service: str, *, include_dependencies: bool = True) -> list[str]:
+        if service in REMOVED_SERVICES:
+            raise UnknownServiceError(service, message=f"Service '{service}' has been removed")
         if service not in self._dependencies:
             raise UnknownServiceError(service)
         if not include_dependencies:

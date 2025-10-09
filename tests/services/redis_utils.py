@@ -6,7 +6,7 @@ import asyncio
 import json
 import time
 from collections import deque
-from typing import Any
+from typing import Any, AsyncIterator
 
 
 def _parse_stream_id(value: str | bytes | bytearray) -> tuple[int, int]:
@@ -31,15 +31,67 @@ class InMemoryRedis:
         self._streams: dict[str, list[tuple[str, dict[str, str]]]] = {}
         self._hashes: dict[str, dict[str, str]] = {}
         self._message_counter = 0
+        self._pubsub_channels: dict[str, list[asyncio.Queue[dict[str, Any]]]] = {}
+        self._pubsubs: set[InMemoryPubSub] = set()
 
     async def flushall(self) -> None:
         self._queues.clear()
         self._streams.clear()
         self._hashes.clear()
         self._message_counter = 0
+        for pubsub in list(self._pubsubs):
+            await pubsub.close()
+        self._pubsub_channels.clear()
+        self._pubsubs.clear()
 
     async def close(self) -> None:
-        return None
+        await self.flushall()
+
+    def _register_pubsub(self, pubsub: "InMemoryPubSub") -> None:
+        self._pubsubs.add(pubsub)
+
+    def _unregister_pubsub(self, pubsub: "InMemoryPubSub") -> None:
+        self._pubsubs.discard(pubsub)
+
+    def _add_channel_listener(
+        self, channel: str, queue: asyncio.Queue[dict[str, Any]]
+    ) -> None:
+        listeners = self._pubsub_channels.setdefault(channel, [])
+        if queue not in listeners:
+            listeners.append(queue)
+
+    def _remove_channel_listener(
+        self, channel: str, queue: asyncio.Queue[dict[str, Any]]
+    ) -> None:
+        listeners = self._pubsub_channels.get(channel)
+        if not listeners:
+            return
+        if queue in listeners:
+            listeners.remove(queue)
+        if not listeners:
+            self._pubsub_channels.pop(channel, None)
+
+    async def publish(self, channel: str, message: Any) -> int:
+        listeners = list(self._pubsub_channels.get(channel, []))
+        if not listeners:
+            return 0
+        payload = {
+            "type": "message",
+            "pattern": None,
+            "channel": channel,
+            "data": message,
+        }
+        for queue in listeners:
+            await queue.put(payload)
+        return len(listeners)
+
+    def pubsub(self) -> "InMemoryPubSub":
+        pubsub = InMemoryPubSub(self)
+        self._register_pubsub(pubsub)
+        return pubsub
+
+    async def ping(self) -> bool:
+        return True
 
     async def rpush(self, key: str, value: str) -> int:
         queue = self._queues.setdefault(key, deque())
@@ -178,3 +230,59 @@ class InMemoryRedis:
                 del kv[key]
                 removed += 1
         return removed
+
+
+class InMemoryPubSub:
+    """Lightweight pub/sub helper compatible with redis.asyncio APIs."""
+
+    def __init__(self, redis: InMemoryRedis) -> None:
+        self._redis = redis
+        self._queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        self._channels: set[str] = set()
+        self._closed = False
+
+    async def subscribe(self, *channels: str) -> None:
+        for channel in channels:
+            name = str(channel)
+            if name in self._channels:
+                continue
+            self._channels.add(name)
+            self._redis._add_channel_listener(name, self._queue)
+            await self._queue.put({"type": "subscribe", "channel": name, "data": 1})
+
+    async def unsubscribe(self, *channels: str) -> None:
+        targets = channels or tuple(self._channels)
+        for channel in targets:
+            name = str(channel)
+            if name not in self._channels:
+                continue
+            self._redis._remove_channel_listener(name, self._queue)
+            self._channels.discard(name)
+            await self._queue.put({"type": "unsubscribe", "channel": name, "data": 0})
+
+    async def listen(self) -> AsyncIterator[dict[str, Any]]:
+        while not self._closed:
+            message = await self._queue.get()
+            yield message
+
+    async def get_message(
+        self,
+        *,
+        ignore_subscribe_messages: bool = True,
+        timeout: float | int | None = None,
+    ) -> dict[str, Any] | None:
+        wait_timeout = None if timeout is None else float(timeout)
+        try:
+            message = await asyncio.wait_for(self._queue.get(), timeout=wait_timeout)
+        except asyncio.TimeoutError:
+            return None
+        if ignore_subscribe_messages and message.get("type") in {"subscribe", "unsubscribe"}:
+            return None
+        return message
+
+    async def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        await self.unsubscribe()
+        self._redis._unregister_pubsub(self)

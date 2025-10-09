@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Tuple
 
 __all__ = [
+    "configure_service_logger",
     "get_logger",
     "get_log_file",
     "read_log_segment",
@@ -38,6 +39,9 @@ class JsonFormatter(logging.Formatter):
             "level": record.levelname,
             "name": record.name,
             "message": record.getMessage(),
+            "service": getattr(record, "service", ""),
+            "ib_client_id": getattr(record, "ib_client_id", ""),
+            "request_id": getattr(record, "request_id", ""),
         }
 
         if record.exc_info:
@@ -59,6 +63,24 @@ def _ensure_log_dir(log_dir: Path | None = None) -> Path:
     directory = Path(log_dir) if log_dir else _DEFAULT_LOG_DIR
     directory.mkdir(parents=True, exist_ok=True)
     return directory
+
+
+class ServiceContextFilter(logging.Filter):
+    """Inject standard service metadata into each log record."""
+
+    def __init__(self, service_name: str, *, ib_client_id_env_var: str | None = None) -> None:
+        super().__init__(name="")
+        self._service_name = service_name
+        self._ib_client_env = ib_client_id_env_var
+
+    def filter(self, record: logging.LogRecord) -> bool:  # noqa: D401
+        if not getattr(record, "service", None):
+            record.service = self._service_name
+        if not getattr(record, "ib_client_id", None) and self._ib_client_env:
+            record.ib_client_id = os.getenv(self._ib_client_env, "")
+        if not hasattr(record, "request_id") or record.request_id is None:
+            record.request_id = ""
+        return True
 
 
 def _get_formatter(format_type: str | None) -> logging.Formatter:
@@ -146,6 +168,33 @@ def get_logger(
 
         logger._ibbot_handlers = handlers  # type: ignore[attr-defined]
 
+    return logger
+
+
+def configure_service_logger(
+    logger_name: str,
+    *,
+    service_name: str,
+    ib_client_id_env_var: str | None = None,
+    level: int = logging.INFO,
+    log_dir: Path | None = None,
+) -> logging.Logger:
+    """Return a logger configured for service runtime usage."""
+
+    logger = get_logger(
+        logger_name,
+        level=level,
+        format_type="json",
+        log_dir=log_dir,
+    )
+    has_filter = any(isinstance(flt, ServiceContextFilter) for flt in logger.filters)
+    if not has_filter:
+        logger.addFilter(
+            ServiceContextFilter(
+                service_name,
+                ib_client_id_env_var=ib_client_id_env_var,
+            )
+        )
     return logger
 
 

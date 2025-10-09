@@ -5,13 +5,15 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from importlib import import_module
-from typing import Any, Callable, Iterable, Mapping, MutableMapping, Sequence
+from typing import Any, AsyncIterator, Callable, Iterable, Mapping, MutableMapping, Sequence
 
+from services.strategy.base import StrategyEventStream
 from src.ibbot import update_service_health
 from src.ibbot.logging import get_logger
-from src.ibbot.redis import enqueue_ib_command
+from src.routes.service_clients import OrdersServiceClient, ServiceClientError
 
 
 class StrategyError(Exception):
@@ -33,6 +35,10 @@ class StrategyDefinition:
     name: str
     factory: Callable[[Mapping[str, Any]], Any]
     config: MutableMapping[str, Any] = field(default_factory=dict)
+    required_channels: tuple[str, ...] = ()
+    channel_map: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
+    latency_budget_ms: float | None = None
+    use_delayed_data: bool = False
 
 
 class MarketDataFacade:
@@ -58,10 +64,24 @@ class MarketDataFacade:
 class StrategyContext:
     """Provide utilities exposed to strategy implementations."""
 
-    def __init__(self, market_data: MarketDataFacade, *, task_id: str) -> None:
+    def __init__(
+        self,
+        market_data: MarketDataFacade,
+        *,
+        task_id: str,
+        event_stream: StrategyEventStream | None = None,
+        channel_aliases: Mapping[str, Mapping[str, str]] | None = None,
+        use_delayed_data: bool = False,
+    ) -> None:
         self._market_data = market_data
         self._task_id = task_id
         self._signals: list[Mapping[str, Any]] = []
+        self._event_stream = event_stream
+        self._channel_aliases = {
+            str(symbol): {str(kind): str(channel) for kind, channel in mapping.items()}
+            for symbol, mapping in (channel_aliases or {}).items()
+        }
+        self._use_delayed_data = bool(use_delayed_data)
 
     async def get_snapshot(self, symbol: str) -> Mapping[str, Any]:
         """Return the market snapshot for *symbol*."""
@@ -95,6 +115,62 @@ class StrategyContext:
 
         return tuple(self._signals)
 
+    def _require_event_stream(self) -> StrategyEventStream:
+        if self._event_stream is None:
+            raise StrategyExecutionError("strategy was not configured for streaming market data")
+        return self._event_stream
+
+    def _resolve_channel(self, symbol: str, kind: str) -> str:
+        mapping = self._channel_aliases.get(symbol)
+        if not mapping:
+            raise StrategyExecutionError(
+                f"no channel mapping configured for symbol '{symbol}'"
+            )
+        channel = mapping.get(kind)
+        if not channel:
+            raise StrategyExecutionError(
+                f"channel type '{kind}' missing for symbol '{symbol}'"
+            )
+        return channel
+
+    async def next_event(
+        self, channel: str, *, timeout: float | None = None
+    ) -> Mapping[str, Any]:
+        """Return the next payload published on *channel*."""
+
+        stream = self._require_event_stream()
+        return await stream.next_event(channel, timeout=timeout)
+
+    def stream_channel(self, channel: str) -> AsyncIterator[Mapping[str, Any]]:
+        """Yield an iterator streaming payloads from *channel*."""
+
+        stream = self._require_event_stream()
+        return stream.iter_channel(channel)
+
+    def stream_quotes(self, symbol: str) -> AsyncIterator[Mapping[str, Any]]:
+        """Return an iterator yielding quote ticks for *symbol*."""
+
+        channel = self._resolve_channel(symbol, "quotes")
+        return self.stream_channel(channel)
+
+    def stream_dom(self, symbol: str) -> AsyncIterator[Mapping[str, Any]]:
+        """Return an iterator yielding DOM updates for *symbol*."""
+
+        channel = self._resolve_channel(symbol, "dom")
+        return self.stream_channel(channel)
+
+    def latest_event(self, channel: str) -> Mapping[str, Any] | None:
+        """Return the most recent cached payload for *channel*."""
+
+        stream = self._require_event_stream()
+        return stream.latest_event(channel)
+
+    @property
+    def use_delayed_data(self) -> bool:
+        """Return whether delayed market data is allowed for the strategy."""
+
+        return self._use_delayed_data
+
 
 def _resolve_factory(spec: Any) -> Callable[[Mapping[str, Any]], Any]:
     if callable(spec):
@@ -116,16 +192,97 @@ def _resolve_factory(spec: Any) -> Callable[[Mapping[str, Any]], Any]:
     return factory
 
 
-def _normalise_strategies(definitions: Mapping[str, Any]) -> dict[str, StrategyDefinition]:
+def _normalise_strategies(
+    definitions: Mapping[str, Any],
+    *,
+    default_required_channels: Iterable[str] | None = None,
+    default_channel_map: Mapping[str, Mapping[str, str]] | None = None,
+    default_latency_budget_ms: float | None = None,
+    default_use_delayed_data: bool | None = None,
+) -> dict[str, StrategyDefinition]:
+    def _normalise_channel_map(mapping: Mapping[str, Any]) -> dict[str, dict[str, str]]:
+        normalised: dict[str, dict[str, str]] = {}
+        for symbol, raw in mapping.items():
+            if not isinstance(raw, Mapping):
+                continue
+            normalised[str(symbol)] = {
+                str(kind): str(value)
+                for kind, value in raw.items()
+                if isinstance(value, (str, bytes))
+            }
+        return normalised
+
+    default_channel_map_norm = _normalise_channel_map(default_channel_map or {})
+    default_required = tuple(
+        str(channel)
+        for channel in default_required_channels
+        if isinstance(channel, (str, bytes))
+    ) if default_required_channels else ()
     resolved: dict[str, StrategyDefinition] = {}
     for name, spec in definitions.items():
         params: Mapping[str, Any] = {}
         factory_spec: Any = spec
+        required_channels: tuple[str, ...] = ()
+        channel_map: dict[str, dict[str, str]] = {}
+        latency_budget_ms: float | None = None
         if isinstance(spec, Mapping):
             factory_spec = spec.get("strategy_type") or spec.get("callable")
             params = spec.get("params") or spec.get("config") or {}
+            raw_channels = spec.get("required_channels")
+            if isinstance(raw_channels, Iterable) and not isinstance(raw_channels, (str, bytes)):
+                required_channels = tuple(str(channel) for channel in raw_channels)
+            raw_channel_map = spec.get("symbol_to_channel_map") or {}
+            if isinstance(raw_channel_map, Mapping):
+                channel_map = _normalise_channel_map(raw_channel_map)
+            raw_latency = spec.get("latency_budget_ms")
+            if isinstance(raw_latency, (int, float)):
+                latency_budget_ms = float(raw_latency)
         factory = _resolve_factory(factory_spec)
-        resolved[name] = StrategyDefinition(name=name, factory=factory, config=dict(params))
+        runtime_config = dict(params)
+
+        merged_channel_map: dict[str, dict[str, str]] = {
+            symbol: dict(mapping)
+            for symbol, mapping in default_channel_map_norm.items()
+        }
+        for symbol, mapping in channel_map.items():
+            target = merged_channel_map.setdefault(symbol, {})
+            target.update(mapping)
+
+        merged_required = list(default_required)
+        merged_required.extend(required_channels)
+        for mapping in merged_channel_map.values():
+            merged_required.extend(mapping.values())
+        seen = {}
+        deduped_required = tuple(seen.setdefault(channel, channel) for channel in merged_required if channel not in seen)
+
+        effective_latency = latency_budget_ms
+        if effective_latency is None and default_latency_budget_ms is not None:
+            effective_latency = float(default_latency_budget_ms)
+
+        if deduped_required and "required_channels" not in runtime_config:
+            runtime_config["required_channels"] = list(deduped_required)
+        if merged_channel_map and "symbol_to_channel_map" not in runtime_config:
+            runtime_config["symbol_to_channel_map"] = merged_channel_map
+        if effective_latency is not None and "latency_budget_ms" not in runtime_config:
+            runtime_config["latency_budget_ms"] = effective_latency
+
+        use_delayed_data = runtime_config.get("use_delayed_data")
+        if not isinstance(use_delayed_data, bool):
+            if default_use_delayed_data is not None:
+                use_delayed_data = bool(default_use_delayed_data)
+                runtime_config.setdefault("use_delayed_data", use_delayed_data)
+            else:
+                use_delayed_data = False
+
+        resolved[name] = StrategyDefinition(
+            name=name,
+            factory=factory,
+            config=runtime_config,
+            required_channels=deduped_required,
+            channel_map=merged_channel_map,
+            latency_budget_ms=effective_latency,
+            use_delayed_data=bool(use_delayed_data),
+        )
     return resolved
 
 
@@ -141,16 +298,48 @@ class StrategyAdapter:
         event_stream: str,
         snapshot_prefix: str = "hash:market:snapshot",
         logger_name: str = "ibbot.services.strategy.adapter",
+        orders_client: OrdersServiceClient | None = None,
+        default_required_channels: Iterable[str] | None = None,
+        default_channel_map: Mapping[str, Mapping[str, str]] | None = None,
+        default_latency_budget_ms: float | None = None,
+        use_delayed_data: bool | None = None,
     ) -> None:
         if not strategies:
             raise StrategyExecutionError("no strategies configured")
 
         self._redis = redis_client
-        self._definitions = _normalise_strategies(strategies)
+        self._definitions = _normalise_strategies(
+            strategies,
+            default_required_channels=default_required_channels,
+            default_channel_map=default_channel_map,
+            default_latency_budget_ms=default_latency_budget_ms,
+            default_use_delayed_data=use_delayed_data,
+        )
         self._command_queue = command_queue
         self._event_stream = event_stream
         self._market = MarketDataFacade(redis_client, snapshot_prefix=snapshot_prefix)
         self._logger = get_logger(logger_name)
+        self._orders_client = orders_client or OrdersServiceClient()
+        self._default_channel_map = {
+            str(symbol): {str(kind): str(channel) for kind, channel in mapping.items()}
+            for symbol, mapping in (default_channel_map or {}).items()
+            if isinstance(mapping, Mapping)
+        }
+        self._default_required_channels = (
+            tuple(
+                str(channel)
+                for channel in default_required_channels
+                if isinstance(channel, (str, bytes))
+            )
+            if default_required_channels
+            else ()
+        )
+        self._default_latency_budget_ms = (
+            float(default_latency_budget_ms)
+            if isinstance(default_latency_budget_ms, (int, float))
+            else None
+        )
+        self._default_use_delayed_data = bool(use_delayed_data) if use_delayed_data is not None else False
 
     async def execute_task(self, task: Mapping[str, Any]) -> None:
         """Execute a single strategy task and emit lifecycle events."""
@@ -175,22 +364,81 @@ class StrategyAdapter:
         if isinstance(task_params, Mapping):
             strategy_config.update(task_params)
 
-        context = StrategyContext(self._market, task_id=task_id)
-        try:
-            handler = definition.factory(strategy_config)
-            result = await self._invoke_handler(handler, context, task, strategy_config)
-        except StrategyError as exc:
-            await self._emit_event("failed", {**base_event, "error": str(exc)})
-            raise
-        except Exception as exc:
-            self._logger.exception(
-                "Strategy execution failed for task %s (%s)",
-                task_id,
-                strategy_name,
-                extra={"task_id": task_id, "strategy": strategy_name},
+        channel_aliases: dict[str, dict[str, str]] = {
+            symbol: dict(mapping) for symbol, mapping in self._default_channel_map.items()
+        }
+        for symbol, mapping in definition.channel_map.items():
+            target = channel_aliases.setdefault(symbol, {})
+            target.update(mapping)
+        runtime_channel_map = strategy_config.get("symbol_to_channel_map")
+        if isinstance(runtime_channel_map, Mapping):
+            for symbol, mapping in runtime_channel_map.items():
+                if not isinstance(mapping, Mapping):
+                    continue
+                channel_aliases[str(symbol)] = {
+                    str(kind): str(channel)
+                    for kind, channel in mapping.items()
+                    if isinstance(channel, (str, bytes))
+                }
+
+        required_channels = set(self._default_required_channels)
+        required_channels.update(definition.required_channels)
+        runtime_required = strategy_config.get("required_channels")
+        if isinstance(runtime_required, Iterable) and not isinstance(runtime_required, (str, bytes)):
+            required_channels.update(str(channel) for channel in runtime_required)
+        for mapping in channel_aliases.values():
+            required_channels.update(mapping.values())
+
+        latency_budget_ms = definition.latency_budget_ms
+        if latency_budget_ms is None and self._default_latency_budget_ms is not None:
+            latency_budget_ms = self._default_latency_budget_ms
+        runtime_latency = strategy_config.get("latency_budget_ms")
+        if isinstance(runtime_latency, (int, float)):
+            latency_budget_ms = float(runtime_latency)
+        timeout_seconds = max(0.1, (latency_budget_ms or 1000.0) / 1000.0)
+
+        use_delayed_data = definition.use_delayed_data or self._default_use_delayed_data
+        runtime_delayed_flag = strategy_config.get("use_delayed_data")
+        if isinstance(runtime_delayed_flag, bool):
+            use_delayed_data = runtime_delayed_flag
+
+        async with AsyncExitStack() as stack:
+            event_stream: StrategyEventStream | None = None
+            if required_channels:
+                event_stream = StrategyEventStream(
+                    self._redis,
+                    channels=sorted(required_channels),
+                )
+                await stack.enter_async_context(event_stream)
+                try:
+                    await event_stream.wait_until_ready(timeout=timeout_seconds)
+                except RuntimeError as exc:
+                    await self._emit_event("failed", {**base_event, "error": str(exc)})
+                    raise StrategyExecutionError(str(exc)) from exc
+
+            context = StrategyContext(
+                self._market,
+                task_id=task_id,
+                event_stream=event_stream,
+                channel_aliases=channel_aliases,
+                use_delayed_data=use_delayed_data,
             )
-            await self._emit_event("failed", {**base_event, "error": str(exc)})
-            raise StrategyExecutionError(str(exc)) from exc
+
+            try:
+                handler = definition.factory(strategy_config)
+                result = await self._invoke_handler(handler, context, task, strategy_config)
+            except StrategyError as exc:
+                await self._emit_event("failed", {**base_event, "error": str(exc)})
+                raise
+            except Exception as exc:
+                self._logger.exception(
+                    "Strategy execution failed for task %s (%s)",
+                    task_id,
+                    strategy_name,
+                    extra={"task_id": task_id, "strategy": strategy_name},
+                )
+                await self._emit_event("failed", {**base_event, "error": str(exc)})
+                raise StrategyExecutionError(str(exc)) from exc
 
         orders = await self._dispatch_orders(task_id, strategy_name, result)
         signals = await self._collect_signals(context, result)
@@ -243,19 +491,42 @@ class StrategyAdapter:
         result: Mapping[str, Any] | Sequence[Mapping[str, Any]] | None,
     ) -> list[Mapping[str, Any]]:
         orders: list[Mapping[str, Any]] = []
+        order_payload: Iterable[Mapping[str, Any]] | None
         if isinstance(result, Mapping):
-            order_payload = result.get("orders")
+            raw_orders = result.get("orders")
+            if raw_orders is None:
+                return orders
+            if isinstance(raw_orders, Mapping):
+                order_payload = [raw_orders]
+            elif isinstance(raw_orders, Iterable) and not isinstance(raw_orders, (str, bytes)):
+                order_payload = [dict(entry) for entry in raw_orders if isinstance(entry, Mapping)]
+            else:
+                raise StrategyExecutionError("orders payload must be a mapping or iterable")
         else:
-            order_payload = None
-        if order_payload is None:
             return orders
 
-        for order in order_payload:
-            payload = dict(order)
-            payload.setdefault("task_id", task_id)
-            payload.setdefault("strategy", strategy_name)
-            await enqueue_ib_command(payload, redis=self._redis, queue_key=self._command_queue)
-            orders.append(payload)
+        for entry in order_payload:
+            contract = entry.get("contract")
+            order_details = entry.get("order")
+            if not isinstance(contract, Mapping) or not isinstance(order_details, Mapping):
+                raise StrategyExecutionError("strategy order missing contract/order payload")
+            submission = {
+                "contract": dict(contract),
+                "order": dict(order_details),
+            }
+            metadata = submission["order"].get("metadata")
+            if isinstance(metadata, Mapping):
+                metadata = dict(metadata)
+            else:
+                metadata = {}
+            metadata.setdefault("task_id", task_id)
+            metadata.setdefault("strategy", strategy_name)
+            submission["order"]["metadata"] = metadata
+            try:
+                response = await self._orders_client.place_order(submission)
+            except ServiceClientError as exc:
+                raise StrategyExecutionError(f"failed to place order: {exc}") from exc
+            orders.append({"request": submission, "response": response})
         return orders
 
     async def _collect_signals(

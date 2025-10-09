@@ -1,352 +1,222 @@
 import asyncio
-import json
-from datetime import datetime, timedelta, timezone
-from typing import Any, Awaitable, Callable, Mapping
+import threading
+from decimal import Decimal
+from typing import Any
 
 import pytest
-from httpx import ASGITransport, AsyncClient
+from fastapi.testclient import TestClient
 
-from services.orders.main import OrderSubmission, OrdersRuntime, create_app
-from tests.services.redis_utils import InMemoryRedis
+from services.orders.main import app, _state
+from src.ib.events import ExecutionEvent, OrderStatusEvent
 
 
-class RecordingRepository:
+class _StubPublisher:
     def __init__(self) -> None:
-        self.insert_calls = 0
-        self.update_calls = 0
-        self.fetch_recent_calls = 0
-        self.paginate_calls: list[dict[str, Any]] = []
-        self.fetch_order_calls: list[str] = []
+        self.messages: list[tuple[str, Any]] = []
+        self.signal = threading.Event()
         self.closed = False
-        self._rows: dict[int, dict[str, Any]] = {}
-        self._next_id = 1
-
-    async def insert_order(self, payload: Mapping[str, Any]) -> int:
-        self.insert_calls += 1
-        record = dict(payload)
-        record_id = self._next_id
-        self._next_id += 1
-        record.setdefault("id", record_id)
-        self._rows[record_id] = record
-        return record_id
-
-    async def update_order(self, payload: Mapping[str, Any]) -> None:
-        self.update_calls += 1
-        record = dict(payload)
-        identifier = str(record.get("command_id") or record.get("id") or "").strip()
-        if not identifier:
-            raise ValueError("missing identifier")
-        for existing in self._rows.values():
-            candidates = {
-                str(existing.get("command_id") or ""),
-                str(existing.get("id") or ""),
-                str(existing.get("order_id") or ""),
-            }
-            if identifier in candidates:
-                existing.update(record)
-                return
-        raise ValueError("order not found")
-
-    async def fetch_recent_orders(self, *, limit: int) -> list[Mapping[str, Any]]:
-        self.fetch_recent_calls += 1
-        records = sorted(
-            (dict(record) for record in self._rows.values()),
-            key=lambda item: item.get("updated_at") or item.get("timestamp") or "",
-            reverse=True,
-        )
-        if limit >= 0:
-            return records[:limit]
-        return records
-
-    async def paginate_orders(
-        self,
-        *,
-        offset: int,
-        limit: int,
-        start_date: datetime | None = None,
-    ) -> tuple[list[Mapping[str, Any]], int]:
-        self.paginate_calls.append({"offset": offset, "limit": limit, "start_date": start_date})
-        records = sorted(
-            (dict(record) for record in self._rows.values()),
-            key=lambda item: item.get("updated_at") or item.get("timestamp") or "",
-            reverse=True,
-        )
-        if start_date is not None:
-            filtered: list[dict[str, Any]] = []
-            for record in records:
-                updated = record.get("updated_at") or record.get("timestamp")
-                if isinstance(updated, str):
-                    try:
-                        updated_dt = datetime.fromisoformat(updated)
-                    except Exception:
-                        filtered.append(record)
-                        continue
-                    if updated_dt >= start_date:
-                        filtered.append(record)
-                else:
-                    filtered.append(record)
-            records = filtered
-        total = len(records)
-        if limit >= 0:
-            return records[offset : offset + limit], total
-        return records[offset:], total
-
-    async def fetch_order(self, identifier: str) -> Mapping[str, Any] | None:
-        text = str(identifier or "").strip()
-        if not text:
-            return None
-        self.fetch_order_calls.append(text)
-        for record in self._rows.values():
-            candidates = {
-                str(record.get("command_id") or ""),
-                str(record.get("order_id") or ""),
-                str(record.get("id") or ""),
-            }
-            if text in candidates:
-                return dict(record)
-        return None
 
     async def close(self) -> None:
         self.closed = True
 
 
-async def _create_runtime(
-    *,
-    order_repository_factory: Callable[[], Awaitable[Any] | Any] | None = None,
-    repository: RecordingRepository | None = None,
-    **runtime_kwargs: Any,
-) -> tuple[OrdersRuntime, InMemoryRedis, RecordingRepository]:
-    redis = InMemoryRedis()
+class _StubOrdersClient:
+    def __init__(self) -> None:
+        self.callback_queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
+        self.loop: asyncio.AbstractEventLoop | None = None
+        self.connected = False
+        self.place_calls: list[tuple[Any, Any]] = []
+        self.cancel_calls: list[int] = []
+        self.open_calls: list[bool] = []
+        self.completed_calls: list[int] = []
+        self.execution_filters: list[dict[str, Any] | None] = []
+        self.disconnect_calls = 0
 
-    async def redis_factory() -> InMemoryRedis:
-        return redis
+    async def connect(self) -> None:
+        self.loop = asyncio.get_running_loop()
+        self.connected = True
 
-    repo = repository or RecordingRepository()
+    def isConnected(self) -> bool:  # noqa: N802 - matches ibapi naming
+        return self.connected
 
-    async def default_repo_factory() -> RecordingRepository:
-        return repo
+    async def wait_until_ready(self) -> None:
+        return None
 
-    kwargs: dict[str, Any] = {
-        "redis_factory": redis_factory,
-        "order_repository_factory": order_repository_factory or default_repo_factory,
-        "stream_poll_interval": 0.0,
-        "health_interval": 0.0,
-    }
-    kwargs.update(runtime_kwargs)
-    runtime = OrdersRuntime(**kwargs)
-    await runtime.start()
-    return runtime, redis, repo
+    async def disconnect(self) -> None:
+        self.connected = False
+        self.disconnect_calls += 1
 
-
-@pytest.mark.asyncio
-async def test_runtime_start_hydrates_from_repository() -> None:
-    repository = RecordingRepository()
-    now = datetime.now(timezone.utc)
-    repository._rows = {
-        1: {
-            "id": 1,
-            "command_id": "cmd-1",
-            "symbol": "AAPL",
-            "status": "Submitted",
-            "updated_at": now.isoformat(),
-        },
-        2: {
-            "id": 2,
-            "command_id": "cmd-2",
-            "symbol": "MSFT",
-            "status": "Filled",
-            "updated_at": (now - timedelta(minutes=5)).isoformat(),
-        },
-    }
-
-    runtime, redis, repo = await _create_runtime(repository=repository)
-    try:
-        result = await runtime.list_orders()
-        assert result["total"] == 2
-        symbols = {order["symbol"] for order in result["orders"]}
-        assert {"AAPL", "MSFT"} <= symbols
-        async with runtime._lock:
-            identifier = runtime._command_to_order.get("cmd-1")
-            assert identifier is not None
-            assert runtime._active_orders.get(identifier, {}).get("command_id") == "cmd-1"
-            assert any(entry.get("command_id") == "cmd-2" for entry in runtime._history)
-    finally:
-        await runtime.stop()
-
-
-@pytest.mark.asyncio
-async def test_list_orders_uses_repository_pagination() -> None:
-    repository = RecordingRepository()
-    now = datetime.now(timezone.utc)
-    repository._rows = {
-        1: {"id": 1, "command_id": "cmd-1", "symbol": "AAPL", "status": "Submitted", "updated_at": now.isoformat()},
-        2: {"id": 2, "command_id": "cmd-2", "symbol": "MSFT", "status": "Filled", "updated_at": (now - timedelta(minutes=1)).isoformat()},
-        3: {"id": 3, "command_id": "cmd-3", "symbol": "TSLA", "status": "Filled", "updated_at": (now - timedelta(minutes=2)).isoformat()},
-    }
-
-    runtime, redis, repo = await _create_runtime(repository=repository)
-    try:
-        result = await runtime.list_orders(limit=1, offset=1)
-        assert result["total"] == 3
-        assert result["orders"]
-        assert repo.paginate_calls
-        call = repo.paginate_calls[-1]
-        assert call["offset"] == 1
-        assert call["limit"] == 1
-    finally:
-        await runtime.stop()
-
-
-@pytest.mark.asyncio
-async def test_runtime_skips_existing_stream_entries_on_start() -> None:
-    repository = RecordingRepository()
-    redis = InMemoryRedis()
-    await redis.xadd(
-        "stream:ib:results",
-        {"type": "order_event", "detail": "legacy"},
-    )
-
-    async def redis_factory() -> InMemoryRedis:
-        return redis
-
-    async def repository_factory() -> RecordingRepository:
-        return repository
-
-    runtime = OrdersRuntime(
-        redis_factory=redis_factory,
-        order_repository_factory=repository_factory,
-        stream_poll_interval=0.0,
-        health_interval=0.0,
-    )
-    await runtime.start()
-    try:
-        # The runtime should seed the stream cursor to the last existing entry.
-        assert runtime._last_message_id == "1-0"
-        processed_initial = await runtime.poll_stream_once()
-        assert processed_initial == 0
-
-        await redis.xadd(
-            "stream:ib:results",
-            {"type": "order_event", "detail": "new"},
+    async def place_order(self, contract: Any, order: Any) -> OrderStatusEvent:
+        self.place_calls.append((contract, order))
+        return OrderStatusEvent(
+            order_id=1,
+            status="Submitted",
+            filled=Decimal("0"),
+            remaining=Decimal("1"),
+            avg_fill_price=Decimal("0"),
         )
-        processed_after = await runtime.poll_stream_once()
-        assert processed_after == 1
-        assert runtime._last_message_id == "2-0"
-    finally:
-        await runtime.stop()
 
+    async def cancel_order(self, order_id: int) -> OrderStatusEvent:
+        self.cancel_calls.append(order_id)
+        return OrderStatusEvent(
+            order_id=order_id,
+            status="Cancelled",
+            filled=Decimal("0"),
+            remaining=Decimal("1"),
+            avg_fill_price=Decimal("0"),
+        )
 
-@pytest.mark.asyncio
-async def test_runtime_ignores_non_order_command_results() -> None:
-    runtime, redis, repo = await _create_runtime()
-    try:
-        await redis.xadd(
-            "stream:ib:results",
+    async def fetch_open_orders(self, *, include_all_accounts: bool) -> list[dict[str, Any]]:
+        self.open_calls.append(include_all_accounts)
+        return [
+            {"order_id": 1, "symbol": "AAPL", "state": {"status": "Submitted"}},
+        ]
+
+    async def fetch_completed_orders(self, days_back: int) -> list[dict[str, Any]]:
+        self.completed_calls.append(days_back)
+        return [
+            {"order_id": 2, "symbol": "MSFT", "state": {"completed_status": "filled"}},
+        ]
+
+    async def fetch_executions(self, filters: dict[str, Any] | None) -> list[dict[str, Any]]:
+        self.execution_filters.append(filters)
+        return [
             {
-                "command_id": "cmd-non-order",
-                "status": "success",
-                "result": json.dumps({"message": "pong"}),
+                "execution": ExecutionEvent(
+                    exec_id="1",
+                    order_id=1,
+                    client_id=123,
+                    perm_id=999,
+                    symbol="AAPL",
+                    security_type="STK",
+                    exchange="SMART",
+                    side="BUY",
+                    shares=Decimal("1"),
+                    price=Decimal("150"),
+                    cumulative_quantity=Decimal("1"),
+                    average_price=Decimal("150"),
+                )
+            }
+        ]
+
+
+@pytest.fixture(autouse=True)
+def _reset_state() -> None:
+    _state.redis = None
+    _state.ib_client = None
+    _state.publisher = None
+    _state.event_task = None
+    _state.shutdown_event = None
+    _state.subscription_lock = None
+    _state.subscription_count = 0
+    _state.last_error = None
+
+
+@pytest.fixture()
+def _stub_environment(monkeypatch: pytest.MonkeyPatch) -> _StubOrdersClient:
+    stub_client = _StubOrdersClient()
+    stub_publisher = _StubPublisher()
+
+    async def _fake_get_redis_client(*_: Any, **__: Any) -> Any:
+        return object()
+
+    async def _fake_update_service_health(*_: Any, **__: Any) -> None:
+        return None
+
+    monkeypatch.setattr("services.orders.main.get_redis_client", _fake_get_redis_client)
+    monkeypatch.setattr("services.orders.main.update_service_health", _fake_update_service_health)
+    monkeypatch.setattr("services.orders.main.RedisPublisher", lambda *args, **kwargs: stub_publisher)
+    monkeypatch.setattr("services.orders.main.ServiceIBClient", lambda: stub_client)
+    monkeypatch.setattr("services.orders.main._ibapi_available", lambda: False)
+    monkeypatch.setattr("services.orders.main._build_contract", lambda payload: payload.model_dump())
+    monkeypatch.setattr("services.orders.main._build_order", lambda payload: payload.model_dump())
+
+    return stub_client
+
+
+def test_orders_subscription_flow(_stub_environment: _StubOrdersClient) -> None:
+    stub_client = _stub_environment
+
+    async def _fake_publish_order_event(publisher: _StubPublisher, payload: Any) -> None:
+        publisher.messages.append(("orders", payload))
+        publisher.signal.set()
+
+    async def _fake_publish_execution_event(publisher: _StubPublisher, payload: Any) -> None:
+        publisher.messages.append(("executions", payload))
+        publisher.signal.set()
+
+    from services.orders import main as orders_main
+
+    orders_main.publish_order_event = _fake_publish_order_event
+    orders_main.publish_execution_event = _fake_publish_execution_event
+
+    with TestClient(app) as client:
+        response = client.post("/subscriptions/orders", json={})
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["subscription_count"] == 1
+
+        assert stub_client.loop is not None
+        status_event = OrderStatusEvent(
+            order_id=1,
+            status="Submitted",
+            filled=Decimal("0"),
+            remaining=Decimal("1"),
+            avg_fill_price=Decimal("0"),
+        )
+        future = asyncio.run_coroutine_threadsafe(
+            stub_client.callback_queue.put(("order_status", status_event)),
+            stub_client.loop,
+        )
+        future.result(timeout=1)
+        assert orders_main._state.publisher is not None
+        stub_publisher = orders_main._state.publisher  # type: ignore[assignment]
+        assert stub_publisher.signal.wait(timeout=1)
+        assert stub_publisher.messages
+        channel, message = stub_publisher.messages[0]
+        assert channel == "orders"
+        assert isinstance(message, OrderStatusEvent)
+
+        response = client.delete("/subscriptions/orders")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["subscription_count"] == 0
+        assert stub_client.disconnect_calls == 1
+
+
+def test_order_endpoints_cover_core_flows(_stub_environment: _StubOrdersClient) -> None:
+    stub_client = _stub_environment
+
+    with TestClient(app) as client:
+        place_response = client.post(
+            "/orders",
+            json={
+                "contract": {"symbol": "AAPL", "secType": "STK", "exchange": "SMART"},
+                "order": {"action": "BUY", "totalQuantity": 1, "orderType": "MARKET"},
             },
         )
-        processed = await runtime.poll_stream_once()
-        assert processed == 1
-        async with runtime._lock:
-            assert not runtime._active_orders
-            assert "cmd-non-order" not in runtime._command_to_order
-        assert repo.insert_calls == 0
-        assert repo.update_calls == 0
-    finally:
-        await runtime.stop()
+        assert place_response.status_code == 201
+        assert stub_client.place_calls
 
+        cancel_response = client.delete("/orders/1")
+        assert cancel_response.status_code == 200
+        assert stub_client.cancel_calls == [1]
 
-@pytest.mark.asyncio
-async def test_get_order_fetches_from_repository_when_missing() -> None:
-    repository = RecordingRepository()
-    runtime, redis, repo = await _create_runtime(repository=repository)
-    try:
-        now = datetime.now(timezone.utc)
-        repo._rows[1] = {
-            "id": 1,
-            "command_id": "cmd-99",
-            "symbol": "AMZN",
-            "status": "Submitted",
-            "updated_at": now.isoformat(),
-        }
-        payload = await runtime.get_order("cmd-99")
-        assert payload["order"]["command_id"] == "cmd-99"
-        assert repo.fetch_order_calls[-1] == "cmd-99"
-        async with runtime._lock:
-            identifier = runtime._command_to_order.get("cmd-99")
-            assert identifier is not None
-            assert runtime._active_orders.get(identifier, {}).get("command_id") == "cmd-99"
-    finally:
-        await runtime.stop()
+        open_response = client.get("/orders/open", params={"include_all_accounts": True})
+        assert open_response.status_code == 200
+        assert stub_client.open_calls == [True]
 
+        completed_response = client.get("/orders/completed", params={"days_back": 5})
+        assert completed_response.status_code == 200
+        assert stub_client.completed_calls == [5]
 
-@pytest.mark.asyncio
-async def test_update_fill_metrics_persists_and_updates_runtime() -> None:
-    repository = RecordingRepository()
-    runtime, redis, repo = await _create_runtime(repository=repository)
-    try:
-        submission = OrderSubmission(symbol="AAPL", quantity=10, action="BUY")
-        command_id = await runtime.submit_order(submission)
-        repo._rows[1]["command_id"] = command_id
-        await runtime.update_fill_metrics(
-            command_id,
-            {
-                "filled_quantity": 10,
-                "remaining_quantity": 0,
-                "avg_fill_price": 150.0,
-            },
+        executions_response = client.get(
+            "/orders/executions",
+            params={"acctCode": "DU1", "symbol": "AAPL", "side": "BUY"},
         )
-        assert repo.update_calls >= 1
-        order = await runtime.get_order(command_id)
-        assert order["order"]["filled_quantity"] == 10
-        assert order["order"]["remaining_quantity"] == 0
-    finally:
-        await runtime.stop()
-
-
-@pytest.mark.asyncio
-async def test_submit_order_persists_to_repository_and_enqueues_command() -> None:
-    repository = RecordingRepository()
-    runtime, redis, repo = await _create_runtime(repository=repository)
-    try:
-        submission = OrderSubmission(symbol="MSFT", quantity=5, action="SELL")
-        command_id = await runtime.submit_order(submission)
-        assert command_id
-        assert repo.insert_calls == 1
-        queued = await redis.blpop(runtime.command_queue, timeout=0)
-        assert queued is not None
-        _, raw_payload = queued
-        payload = json.loads(raw_payload)
-        assert payload["method"] == "place_order"
-        assert payload["kwargs"]["symbol"] == "MSFT"
-    finally:
-        await runtime.stop()
-
-
-@pytest.mark.asyncio
-async def test_orders_http_endpoint_returns_runtime_orders() -> None:
-    repository = RecordingRepository()
-    now = datetime.now(timezone.utc)
-    repository._rows = {
-        1: {
-            "id": 1,
-            "command_id": "cmd-1",
+        assert executions_response.status_code == 200
+        assert stub_client.execution_filters[-1] == {
+            "acctCode": "DU1",
             "symbol": "AAPL",
-            "status": "Submitted",
-            "updated_at": now.isoformat(),
+            "side": "BUY",
         }
-    }
-    runtime, redis, repo = await _create_runtime(repository=repository)
-    app = create_app(runtime=runtime)
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.get("/orders")
-    await runtime.stop()
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["orders"]
-    assert payload["orders"][0]["symbol"] == "AAPL"
-    assert payload["total"] == 1

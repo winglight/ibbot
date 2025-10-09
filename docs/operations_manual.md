@@ -122,10 +122,10 @@
 
 - **现象**：前端行情卡片不刷新、策略无触发。
 - **定位**：
-  1. 检查 `redis-cli PUBSUB CHANNELS "pubsub:ib:price*"` 是否存在频道；若无，确认 `services/ib_feed` 是否运行且订阅列表正确。
+  1. 检查 `redis-cli PUBSUB CHANNELS "pubsub:ib:price*"` 是否存在频道；若无，确认 `services/market_data` 是否运行且订阅列表正确（`ib_feed` 已下线）。
   2. 使用上文的 Parquet 检查命令确认行情文件在最近 5 分钟内有更新。
-  3. 查看 `services/ib_feed` 日志（`docker logs` 或 `tail -f data/logs/ib-feed.log`）。
-- **恢复**：更新配置（数据库 `config` 表中 `ib-feed:` 前缀的订阅列表），重启 `ib-feed` 与 `market-data`。
+  3. 查看 `services/market_data` 日志（`docker logs` 或 `tail -f data/logs/market-data.log`）。
+- **恢复**：更新配置（数据库 `config` 表中订阅列表），重启 `market-data` 服务。
 
 ### 3.3 队列/流堆积
 
@@ -180,7 +180,7 @@
   `data/market_data/dom/{SYMBOL}/YYYYMMDD.parquet`，K 线数据位于
   `data/market_data/candles/{interval}/{SYMBOL}/YYYYMMDD.parquet`。文件按 UTC 日期划分，字段包含
   `timestamp/timestamp_ns` 与原始 DOM 层级或 OHLCV 指标，便于下游按同一 Schema 消费。
-- **写入机制**：`services/ib_feed` 在 DOM 事件落地时直接调用 Parquet Writer，`data_layer`
+- **写入机制**：`services/market_data` 在 DOM 事件落地时直接调用 Parquet Writer，`data_layer`
   在生成 K 线事件时同样追加写入；若缓存命中失败，会从对应 Parquet 文件回填历史，确保服务重启后仍可快速恢复。
 - **压缩与轮换**：提供 `scripts/market_data_rotate.py` 脚本，默认 7 天后将日度 Parquet 文件压缩为
   `.parquet.gz`，30 天后删除归档。可通过 `--base-dir`、`--compress-after-days`、`--delete-after-days`

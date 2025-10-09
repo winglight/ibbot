@@ -22,9 +22,6 @@ class _DummyController:
 async def test_controller_is_default_path(monkeypatch: pytest.MonkeyPatch) -> None:
     """Ensure the connection manager prefers the IBAPI controller."""
 
-    monkeypatch.delenv("IBKR_ENABLE_IB_INSYNC", raising=False)
-    monkeypatch.setattr("src.connection_manager.IB", None, raising=False)
-    monkeypatch.setattr("src.connection_manager._IB_IMPORT_IS_STUB", False, raising=False)
     monkeypatch.setattr("src.connection_manager.IBAPIController", _DummyController, raising=False)
 
     manager = ConnectionManager()
@@ -53,12 +50,10 @@ async def test_controller_is_default_path(monkeypatch: pytest.MonkeyPatch) -> No
         loop.close()
 
 
-def test_legacy_opt_in_requires_real_ib(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Opting into ib_insync should be ignored when the package is missing."""
+def test_legacy_flag_is_no_op(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Even when the legacy flag is set we continue to use the controller."""
 
     monkeypatch.setenv("IBKR_ENABLE_IB_INSYNC", "1")
-    monkeypatch.setattr("src.connection_manager.IB", None, raising=False)
-    monkeypatch.setattr("src.connection_manager._IB_IMPORT_IS_STUB", False, raising=False)
 
     manager = ConnectionManager()
 

@@ -142,14 +142,6 @@ def test_service_status_endpoint_returns_registry_order(service_status_app: Fast
     assert market_entry.get("status") == "running"
     assert (market_entry.get("payload") or {}).get("price_updates") == "5"
 
-    feed_entry = next(
-        (item for item in services if item.get("service") == "market_data_feed"),
-        None,
-    )
-    assert feed_entry is not None
-    assert feed_entry.get("status") == "running"
-    assert (feed_entry.get("payload") or {}).get("price_updates_total") == "12"
-
     notification_entry = next(
         (item for item in services if item.get("service") == "notification"),
         None,

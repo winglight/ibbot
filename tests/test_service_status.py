@@ -70,14 +70,6 @@ def test_gather_service_statuses_normalises_payloads(monkeypatch: pytest.MonkeyP
                 "price_throughput": "3.5",
                 "price_latency_avg_ms": "18.2",
             },
-            "hash:service:health:ib-feed": {
-                "status": "running",
-                "last_seen": recent,
-                "price_updates_total": "24",
-                "price_updates_delta": "6",
-                "subscriptions": "3",
-                "active": "true",
-            },
             "hash:service:health:connection_control": None,
             "hash:service:health:notification": {
                 "healthy": "true",
@@ -105,8 +97,7 @@ def test_gather_service_statuses_normalises_payloads(monkeypatch: pytest.MonkeyP
         assert status_map["risk"].status == "running"
         assert status_map["strategy"].status == "unhealthy"
         assert status_map["connection_control"].status == "unhealthy"
-        assert status_map["ib_command"].status == "running"
-        assert status_map["market_data_feed"].status == "running"
+        assert status_map["ib_command"].status == "removed"
         assert status_map["market_data"].status == "running"
         notification_status = status_map["notification"]
         assert notification_status.status == "running"
@@ -118,10 +109,6 @@ def test_gather_service_statuses_normalises_payloads(monkeypatch: pytest.MonkeyP
         assert market_payload.get("price_updates") == "12"
         assert market_payload.get("price_latency_avg_ms") == "18.2"
 
-        feed_payload = status_map["market_data_feed"].payload or {}
-        assert feed_payload.get("price_updates_total") == "24"
-        assert feed_payload.get("price_updates_delta") == "6"
-        assert feed_payload.get("subscriptions") == "3"
 
         account_payload = status_map["account"].payload or {}
         assert "readiness" in account_payload

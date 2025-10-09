@@ -1,40 +1,20 @@
 from __future__ import annotations
 
-from typing import Any, Callable, Coroutine, Dict, Optional, TYPE_CHECKING
+from typing import Any, Callable, Coroutine, Dict, Optional
 from datetime import datetime
 from dataclasses import dataclass
 
-if TYPE_CHECKING:  # pragma: no cover - typing helper
-    from ib_insync import IB as IBClient  # type: ignore
-else:
-    IBClient = Any  # type: ignore[assignment]
-
-_IB_IMPORT_MODULE: str | None = None
-_IB_IMPORT_IS_STUB = False
-
-try:  # pragma: no cover - exercised indirectly when ib_insync is missing
-    from ib_insync import IB as _ImportedIB
-except ImportError:  # pragma: no cover - gracefully handle missing optional dependency
-    _ImportedIB = None  # type: ignore[assignment]
-else:
-    _IB_IMPORT_MODULE = getattr(_ImportedIB, "__module__", None)
-    if isinstance(_IB_IMPORT_MODULE, str) and "ib_insync_stub" in _IB_IMPORT_MODULE:
-        _IB_IMPORT_IS_STUB = True
-        _ImportedIB = None  # type: ignore[assignment]
-
-IB: type[IBClient] | None = _ImportedIB  # type: ignore[assignment]
 from loguru import logger
+
+from src.ib.insync_compat import DOMLevel, IB as IBClient, MktDepthData
+
+IB = IBClient
 
 from .utils import now_local
 from .restart_utils import restart_program
 
 # 为connection模块创建专用logger
 connection_logger = logger.bind(module="connection", request_id="-")
-
-if _IB_IMPORT_IS_STUB:
-    connection_logger.info(
-        "Detected ib_insync stub import; routing connections through IBAPIController"
-    )
 import os
 import threading
 import asyncio
@@ -144,7 +124,6 @@ class ConnectionManager:
     
     def __init__(self):
         self.ib: Optional[IBClient] = None
-        self._ib_import_is_stub = _IB_IMPORT_IS_STUB
         self._ibapi_controller: Optional[IBAPIController] = None
         self._controller_events_task: Optional[asyncio.Task] = None
         self._controller_events_stop: Optional[asyncio.Event] = None
@@ -212,20 +191,8 @@ class ConnectionManager:
         self._next_client_id_hint = self._normalize_client_id(self.config.client_id)
         self.config.client_id = self._next_client_id_hint
         self._client_id_conflict_detected: bool = False
-        self._allow_legacy_ib = _get_env_bool("IBKR_ENABLE_IB_INSYNC", False)
-        if self._allow_legacy_ib and IB is None:
-            connection_logger.warning(
-                "IBKR_ENABLE_IB_INSYNC is set but ib_insync is unavailable; falling back to IBAPIController",
-            )
-            self._allow_legacy_ib = False
-        if self._allow_legacy_ib:
-            connection_logger.info(
-                "Legacy ib_insync connection path enabled via IBKR_ENABLE_IB_INSYNC",
-            )
-        else:
-            connection_logger.info(
-                "Defaulting IBKR connections to IBAPIController; set IBKR_ENABLE_IB_INSYNC=1 to opt into ib_insync",
-            )
+        connection_logger.info("IBKR connections handled exclusively via IBAPIController")
+        self._allow_legacy_ib = False
 
     # ------------------------------------------------------------------
     # IBAPI controller helpers
@@ -233,13 +200,7 @@ class ConnectionManager:
     def _should_use_legacy_ib_client(self) -> bool:
         """Return ``True`` when the legacy ``ib_insync`` client should be used."""
 
-        if self._ib_import_is_stub:
-            return False
-
-        if IB is None:
-            return False
-
-        return self._allow_legacy_ib
+        return False
 
     def _ensure_ibapi_controller(self, loop: asyncio.AbstractEventLoop) -> IBAPIController:
         """Return an ``IBAPIController`` bound to ``loop``."""
@@ -574,12 +535,6 @@ class ConnectionManager:
 
         update_method = getattr(wrapper.updateMktDepthL2, "__func__", wrapper.updateMktDepthL2)
         if getattr(update_method, "__ibbot_depth_guard__", False):
-            return
-
-        try:
-            from ib_insync.objects import DOMLevel, MktDepthData
-        except Exception as exc:  # pragma: no cover - defensive guard
-            connection_logger.debug(f"Skipping depth guard patch (missing DOM classes): {exc}")
             return
 
         orig_update = wrapper.updateMktDepthL2
@@ -929,7 +884,7 @@ class ConnectionManager:
 
                 # 创建新的IB实例
                 if IB is None:
-                    raise RuntimeError("ib_insync is not available; cannot honour IBKR_ENABLE_IB_INSYNC")
+                    raise RuntimeError("Legacy ib_insync path is disabled; IBAPIController is mandatory")
                 self.ib = IB()
                 self._patch_wrapper_depth_guard(self.ib.wrapper)
                 self._ensure_error_handler_installed(self.ib.wrapper)

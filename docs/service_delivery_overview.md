@@ -8,7 +8,7 @@
 | --- | --- | --- | --- |
 | 阶段 0：准备 | 初始化仓库后 | `.env.example` 模板、`data/logs` 目录、README 基础结构 | `README.md` 的“快速开始”、`data/.gitkeep` 保留目录结构 |
 | 阶段 1：基础能力库 | 基础依赖可被脚本消费 | 统一配置加载、Redis/MariaDB 封装、日志管理、诊断脚本 | `src/ibbot/{config,redis,db,logging}`、`scripts/diagnose_foundation.py` 可独立运行 |
-| 阶段 2：独立服务 | 微服务容器可启动并协同 | 指令执行（`ib_command`）、行情采集（`ib_feed`）、行情聚合（`market_data`）、风险引擎、策略调度、通知下发、队列监控、优化器 | 对应 `services/*` 目录均包含 `main.py` 与运行时逻辑；`docker/local.compose.yml` 暴露各容器 |
+| 阶段 2：Legacy 服务下线 | 微服务容器可启动并协同 | 指令执行/行情采集通过各业务服务本地 IB 客户端完成（`ib_command`、`ib_feed` 已下线） | 账户、订单、行情、风险、策略、通知、队列监控、优化器 |
 | 阶段 3：主程序改造 | 主应用对接新增服务 | FastAPI 路由整合、监控仪表盘、Redis 指标查询接口、UI 更新 | `main.py`、`src/routes/monitoring.py`、`static/index.html` 中的监控面板 |
 | 阶段 4：联调与回归 | 交付前验收 | Docker Compose 全量联调、端到端/性能/故障注入测试覆盖、CI 冒烟 | `tests/{e2e,perf,failover}`、`scripts/perf/run_benchmark.py`、`.github/workflows/ci.yml`（如存在） |
 
@@ -16,8 +16,8 @@
 
 | 服务 | 入口 | 核心功能 | 依赖 | 可观测性/指标 |
 | --- | --- | --- | --- | --- |
-| IB Command (`ib_command`) | `services/ib_command/main.py` | 消费 Redis 队列、调用 `IBKRClient` 执行指令、写入结果流 | Redis 队列（`DEFAULT_COMMAND_QUEUE`）、可选 IBKR 客户端 | Redis 健康键 `hash:service:health:ib-command`、结果流 `stream:ib:results` |
-| IB Feed (`ib_feed`) | `services/ib_feed/main.py` | 订阅 IB 行情、发布价格/DOM 快照、落地 Redis/Parquet 快照 | IBKR 客户端、Redis、磁盘 Parquet 存储 | Pub/Sub 频道 `pubsub:ib:price:*`、`pubsub:ib:dom:*`，Parquet `data/market-data` 目录最近写入 |
+| IB Command (`ib_command`) | — | （已下线）指令执行迁移至账户/订单服务 | — | Redis 健康键 `hash:service:health:ib-command`（保留只读） |
+| IB Feed (`ib_feed`) | — | （已下线）改由 `services/market_data` 本地 IB 客户端负责订阅与发布 | — | — |
 | Market Data (`market_data`) | `services/market_data/main.py` | 汇总行情快照、提供 REST/WebSocket、写入服务指标 | Redis Pub/Sub、MariaDB | WebSocket `/ws/market`、Redis Stream `stream:market-service`、Redis 指标集合（metric=`price-throughput`、`price-latency` 等，保留 24h） |
 | Queue Monitor (`queue_monitor`) | `services/queue_monitor/main.py` | 统计队列/Stream 长度、滞留时间，广播指标 | Redis | Redis 哈希 `hash:service:queue-monitor`、Redis 指标集合（metric=`queue-*`，保留 24h） |
 | Risk Service (`risk`) | `services/risk/main.py` & `runtime.py` | 消费行情/执行结果、运行 `RiskEngine`、触发平仓、写入事件 | Redis Streams（`stream:market-service`、`stream:ib:results`）、命令队列、MariaDB | Redis 指标集合与本地日志目录（`log_dir`） |

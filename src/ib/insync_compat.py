@@ -1,49 +1,38 @@
-"""Lightweight fallbacks for the optional :mod:`ib_insync` dependency.
+"""Lightweight compatibility shims that replace :mod:`ib_insync` usage.
 
-This project primarily targets Interactive Brokers via the third-party
-``ib_insync`` package.  The full client is sizeable and not always available
-in constrained environments such as CI or development containers.  When the
-real dependency is missing we still want the FastAPI application to boot so
-that HTTP endpoints (which mostly gate on the connection status) can be
-tested.  Importing the real package would normally raise :class:`ImportError`
-and abort start-up.
+The legacy codebase historically reached for the ``ib_insync`` convenience
+wrapper on top of the official TWS API.  As part of the refactor we want the
+runtime to depend exclusively on ``ibapi`` while still keeping the handful of
+helpers (``Contract`` containers, ``Order`` data classes, simple event hooks)
+that higher level modules interact with.  Re-implementing the tiny subset of
+behaviour we rely on keeps those call sites stable without importing the third
+party dependency.
 
-To keep the application responsive we provide a collection of minimal stub
-implementations that mimic the handful of attributes accessed by the web
-API.  The stubs intentionally avoid any real network activity – every method
-either returns a harmless default or raises a descriptive runtime error.  The
-goal is merely to let routes query the connection state (which will always be
-``False``) and respond with the expected "Not connected" messages used in the
-test-suite.
-
-These classes are *not* complete replacements for ``ib_insync``; they only
-cover the narrow surface used by our offline tests.  The real dependency will
-be used automatically whenever it is installed.
+None of the classes below attempt to be drop in replacements for the real
+library; they merely satisfy the attribute access patterns exercised by the
+application and unit tests.  Anything that would have triggered real network
+traffic either raises a descriptive ``RuntimeError`` or returns harmless
+defaults so the surrounding logic can continue operating in offline mode.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import Any, Iterable, List
+from typing import Any, Callable, List, Optional
 
 
-class _DummyEvent:
-    """Very small stand-in for ``ib_insync.eventkit.Event``.
-
-    The real ``Event`` type behaves like a set of callables and supports the
-    ``+=``/``-=`` operators.  We only need enough behaviour so that attaching
-    and removing handlers in the connection manager does not crash.
-    """
+class _Event:
+    """Very small stand-in for :class:`ib_insync.eventkit.Event`."""
 
     def __init__(self) -> None:
-        self._handlers: List[Any] = []
+        self._handlers: List[Callable[..., Any]] = []
 
-    def __iadd__(self, handler):
+    def __iadd__(self, handler: Callable[..., Any]):
         self._handlers.append(handler)
         return self
 
-    def __isub__(self, handler):  # pragma: no cover - defensive, rarely used
+    def __isub__(self, handler: Callable[..., Any]):  # pragma: no cover - defensive
         try:
             self._handlers.remove(handler)
         except ValueError:
@@ -58,14 +47,13 @@ class _DummyEvent:
             try:
                 handler(*args, **kwargs)
             except Exception:
-                # Handlers in the real implementation swallow exceptions; we
-                # follow the same philosophy for the stub to avoid secondary
-                # crashes during testing.
+                # ``ib_insync`` swallows handler exceptions; keeping the same
+                # behaviour avoids secondary crashes during cleanup paths.
                 pass
 
 
-class _DummyClient:
-    """Mimic the ``ib_insync.client.Client`` constants used by the app."""
+class _Client:
+    """Subset of :class:`ib_insync.client.Client` used for connection tracking."""
 
     DISCONNECTED = 0
     CONNECTING = 1
@@ -73,23 +61,27 @@ class _DummyClient:
 
     def __init__(self) -> None:
         self.connState = self.DISCONNECTED
+        self.host: Optional[str] = None
+        self.port: Optional[int] = None
 
 
 class IB:
-    """Simplified ``IB`` session that always reports as disconnected."""
+    """Compatibility wrapper that mimics ``ib_insync.IB`` interactions."""
 
     def __init__(self) -> None:
-        self.client = _DummyClient()
+        self.client = _Client()
         self.wrapper = SimpleNamespace(
             error=lambda *args, **kwargs: None,
             completedOrder=lambda *args, **kwargs: None,
         )
-        self.orderStatusEvent = _DummyEvent()
-        self.execDetailsEvent = _DummyEvent()
-        self.commissionReportEvent = _DummyEvent()
+        self.orderStatusEvent = _Event()
+        self.execDetailsEvent = _Event()
+        self.commissionReportEvent = _Event()
 
     async def connectAsync(self, *args: Any, **kwargs: Any) -> bool:
-        raise RuntimeError("ib_insync is not installed; cannot establish IBKR connection")
+        raise RuntimeError(
+            "ib_insync compatibility mode does not provide network connections"
+        )
 
     def disconnect(self) -> None:
         self.client.connState = self.client.DISCONNECTED
@@ -107,13 +99,11 @@ class IB:
         return []
 
     def placeOrder(self, contract: Any, order: Any) -> Any:
-        # Return a very small object with the attribute access pattern that the
-        # production code expects (``trade.order.orderId``).
         return SimpleNamespace(order=SimpleNamespace(orderId=-1), contract=contract)
 
 
 class ExecutionFilter:
-    """Placeholder mirroring the constructor signature of the real type."""
+    """Placeholder mirroring :class:`ib_insync.client.ExecutionFilter`."""
 
     def __init__(self, **kwargs: Any) -> None:
         for key, value in kwargs.items():
@@ -121,12 +111,11 @@ class ExecutionFilter:
 
 
 class Contract:
-    """Base contract storing attributes passed to the constructor."""
+    """Lightweight contract container."""
 
     def __init__(self, **kwargs: Any) -> None:
         for key, value in kwargs.items():
             setattr(self, key, value)
-        # Ensure the common attributes exist so attribute access never fails.
         self.secType = getattr(self, "secType", None)
         self.symbol = getattr(self, "symbol", None)
         self.exchange = getattr(self, "exchange", None)
@@ -145,8 +134,6 @@ class Future(Contract):
 
 @dataclass
 class Order:
-    """Data container roughly matching ``ib_insync.order.Order``."""
-
     action: str
     totalQuantity: int
     orderType: str
@@ -168,9 +155,27 @@ class LimitOrder(Order):
         )
 
 
-# ``util`` is only used for its ``startLoop`` helper in our code-base.  Using a
-# simple namespace keeps the call-sites intact without pulling additional
-# dependencies.
+@dataclass
+class DOMLevel:
+    """Minimal representation of ``ib_insync.objects.DOMLevel``."""
+
+    price: float
+    size: float
+    marketMaker: str | None = None
+
+
+@dataclass
+class MktDepthData:
+    """Compatibility container for depth snapshots."""
+
+    position: int
+    marketMaker: str
+    operation: int
+    side: int
+    price: float
+    size: float
+
+
 util = SimpleNamespace(startLoop=lambda *args, **kwargs: None)
 
 
@@ -183,6 +188,8 @@ __all__ = [
     "MarketOrder",
     "LimitOrder",
     "ExecutionFilter",
+    "DOMLevel",
+    "MktDepthData",
     "util",
 ]
 

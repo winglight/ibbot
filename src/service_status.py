@@ -336,38 +336,12 @@ def _build_status_from_payload(
 
 
 async def _build_ib_command_status(redis: Any) -> ServiceStatus:
-    try:
-        raw = await _load_hash(redis, IB_COMMAND_HEALTH_KEY) or {}
-    except RedisUnavailableError as exc:
-        return _build_redis_unavailable_status("ib_command", reason=str(exc))
-    payload = build_ib_connection_health_payload(
-        raw,
-        stale_after=float(IB_COMMAND_HEALTH_STALE_AFTER_SEC or 30),
-    )
-    connected = bool(payload.get("connected"))
-    stale = bool(payload.get("stale"))
-    queue_depth = payload.get("queue_depth")
-    last_error = payload.get("last_error")
-    last_seen = payload.get("last_seen")
-
-    if connected:
-        status = "running"
-        detail = f"队列深度 {queue_depth}" if queue_depth is not None else "队列健康"
-    elif stale:
-        status = "unhealthy"
-        detail = "健康数据已过期"
-    else:
-        status = "unhealthy"
-        detail = last_error or "连接状态异常"
-
-    if last_error and status == "running":
-        detail = f"最近错误：{last_error}"
-
+    payload = build_ib_connection_health_payload({}, stale_after=float(IB_COMMAND_HEALTH_STALE_AFTER_SEC or 30))
     return ServiceStatus(
         service="ib_command",
-        status=status,
-        detail=detail,
-        last_reported=last_seen,
+        status="removed",
+        detail="Legacy ib_command 服务已下线，功能迁移至各业务服务",
+        last_reported=None,
         payload=payload,
     )
 

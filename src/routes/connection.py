@@ -1,5 +1,4 @@
 import os
-import uuid
 from typing import Any, Dict, Mapping, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -7,13 +6,7 @@ from loguru import logger
 
 import core
 from src.connection_manager import ConnectionConfig
-from src.ibbot.redis import DEFAULT_COMMAND_QUEUE, enqueue_ib_command
-from src.ib_command_health import (
-    IB_COMMAND_HEALTH_KEY,
-    IB_COMMAND_HEALTH_STALE_AFTER_SEC,
-    build_ib_connection_health_payload,
-    resolve_ib_account_type,
-)
+from src.ib_command_health import resolve_ib_account_type
 from .service_clients import ConnectionControlClient, ServiceClientError
 from .auth import audit_log_failure, audit_log_success, get_current_user, require_roles
 
@@ -21,88 +14,7 @@ router = APIRouter()
 
 
 _CONNECTION_CONTROL_CLIENT = ConnectionControlClient()
-_COMMAND_QUEUE_OVERRIDE = os.getenv("IB_COMMAND_QUEUE_KEY", "").strip() or None
 _CONNECTION_CONFIG_MODULE = "ib-connection"
-
-
-def _build_connect_command(payload: Mapping[str, Any], user: str | None) -> tuple[str, dict[str, Any]]:
-    command_id = uuid.uuid4().hex
-    command = {
-        "command_id": command_id,
-        "method": "connect",
-        "args": [],
-        "kwargs": {},
-        "metadata": {
-            "source": "api.connect",
-            "submitted_by": user or "anonymous",
-            "config": dict(payload),
-        },
-    }
-    return command_id, command
-
-
-def _build_disconnect_command(user: str | None) -> tuple[str, dict[str, Any]]:
-    command_id = uuid.uuid4().hex
-    command = {
-        "command_id": command_id,
-        "method": "disconnect",
-        "args": [],
-        "kwargs": {},
-        "metadata": {
-            "source": "api.disconnect",
-            "submitted_by": user or "anonymous",
-        },
-    }
-    return command_id, command
-
-
-def _decode_redis_mapping(raw: Dict[Any, Any]) -> Dict[str, str]:
-    """Convert Redis hash payload into a plain string dictionary."""
-
-    result: Dict[str, str] = {}
-    for key, value in raw.items():
-        if key is None:
-            continue
-        if isinstance(key, (bytes, bytearray)):
-            key = key.decode("utf-8", errors="ignore")
-        else:
-            key = str(key)
-        if isinstance(value, (bytes, bytearray)):
-            value = value.decode("utf-8", errors="ignore")
-        elif value is None:
-            value = ""
-        else:
-            value = str(value)
-        result[key] = value
-    return result
-
-
-async def _load_ib_command_health() -> Dict[str, Any] | None:
-    """Load ib-command service health details from Redis if available."""
-
-    container = core.get_container()
-    redis_client = getattr(container, "redis_client", None) if container else None
-    if redis_client is None:
-        return None
-
-    try:
-        raw = await redis_client.hgetall(IB_COMMAND_HEALTH_KEY)
-    except Exception as exc:  # pragma: no cover - redis access errors
-        logger.debug("Failed to load ib-command health from Redis: {}", exc)
-        return None
-
-    if not raw:
-        return None
-
-    stale_after = (
-        IB_COMMAND_HEALTH_STALE_AFTER_SEC
-        if IB_COMMAND_HEALTH_STALE_AFTER_SEC > 0
-        else 30.0
-    )
-    return build_ib_connection_health_payload(
-        _decode_redis_mapping(raw),
-        stale_after=stale_after,
-    )
 
 
 def _get_connection_control_client() -> ConnectionControlClient:
@@ -223,32 +135,6 @@ async def _load_connection_config() -> Dict[str, Any]:
     return _normalise_connection_config(fallback)
 
 
-async def _resolve_command_queue_key() -> str:
-    if _COMMAND_QUEUE_OVERRIDE:
-        return _COMMAND_QUEUE_OVERRIDE
-
-    provider = _get_config_provider()
-    if provider is None:
-        return DEFAULT_COMMAND_QUEUE
-
-    try:
-        queue_key = await provider.get(
-            "ib-command",
-            "queue_key",
-            default=DEFAULT_COMMAND_QUEUE,
-        )
-    except Exception:  # pragma: no cover - config lookup failure
-        return DEFAULT_COMMAND_QUEUE
-
-    queue_key_str = str(queue_key or "").strip()
-    return queue_key_str or DEFAULT_COMMAND_QUEUE
-
-
-async def _enqueue_command(payload: Mapping[str, Any]) -> None:
-    queue_key = await _resolve_command_queue_key()
-    await enqueue_ib_command(payload, queue_key=queue_key)
-
-
 @router.get("/api/connection_config")
 async def get_connection_config():
     try:
@@ -280,33 +166,12 @@ async def connect_ibkr(
         await audit_log_failure(
             request,
             detail="failed to dispatch connect command via service",
-            extra={"service": "connection_control", "fallback": "redis"},
+            extra={"service": "connection_control", "error": str(exc)},
         )
-
-        command_id, command = _build_connect_command(payload, user)
-        try:
-            await _enqueue_command(command)
-        except Exception as queue_exc:
-            logger.error("Failed to enqueue connect command via fallback: {}", queue_exc)
-            raise HTTPException(status_code=503, detail="Failed to enqueue connect command") from queue_exc
-
-        await audit_log_success(
-            request,
-            detail="connect command enqueued via fallback",
-            extra={
-                "paper_trading": bool(config.paper_trading),
-                "service": "redis",
-                "command_id": command_id,
-            },
-        )
-
-        return {
-            "success": True,
-            "status": "queued",
-            "service": "redis",
-            "command_id": command_id,
-            "fallback": True,
-        }
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Connection service unavailable",
+        ) from exc
 
     await audit_log_success(
         request,
@@ -341,30 +206,12 @@ async def disconnect_ibkr(
         await audit_log_failure(
             request,
             detail="failed to dispatch disconnect command via service",
-            extra={"service": "connection_control", "fallback": "redis"},
+            extra={"service": "connection_control", "error": str(exc)},
         )
-
-        command_id, command = _build_disconnect_command(user)
-        try:
-            await _enqueue_command(command)
-        except Exception as queue_exc:
-            logger.error("Failed to enqueue disconnect command: {}", queue_exc)
-            await audit_log_failure(request, detail="failed to enqueue disconnect command")
-            raise HTTPException(status_code=503, detail="Failed to enqueue disconnect command") from queue_exc
-
-        await audit_log_success(
-            request,
-            detail="disconnect command enqueued via fallback",
-            extra={"command_id": command_id, "service": "redis"},
-        )
-
-        return {
-            "success": True,
-            "status": "queued",
-            "service": "redis",
-            "command_id": command_id,
-            "fallback": True,
-        }
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Connection service unavailable",
+        ) from exc
 
     await audit_log_success(
         request,
@@ -384,23 +231,52 @@ async def disconnect_ibkr(
 
 @router.get("/api/connection_status")
 async def get_connection_status(user: Optional[str] = Depends(get_current_user)):
-    """Return the current IBKR connection status based on ib-command health."""
+    """Return the current IBKR connection status via the connection control service."""
 
+    client = _get_connection_control_client()
     try:
-        redis_health = await _load_ib_command_health()
-        if redis_health:
-            return redis_health
-
+        payload = await client.fetch_status()
+    except ServiceClientError as exc:
+        logger.warning("Connection service unavailable for status: {}", exc)
         return {
+            "service": "connection_control",
             "connected": False,
             "account_type": resolve_ib_account_type(),
-            "last_seen": None,
-            "queue_depth": None,
-            "last_error": "ib-command health unavailable",
-            "error_code": None,
-            "stale": True,
-            "source": "http",
+            "last_error": "connection service unavailable",
+            "queue": None,
+            "config": None,
         }
-    except Exception as exc:
-        logger.error("Failed to get connection status: {}", exc)
-        raise HTTPException(status_code=500, detail="Failed to get connection status") from exc
+
+    if not isinstance(payload, Mapping):
+        return {
+            "service": "connection_control",
+            "connected": False,
+            "account_type": resolve_ib_account_type(),
+            "last_error": "invalid status payload",
+            "queue": None,
+            "config": None,
+        }
+
+    response: Dict[str, Any] = {
+        "service": "connection_control",
+        "account_type": resolve_ib_account_type(),
+        "connected": bool(payload.get("connected", False)),
+        "status": payload.get("status"),
+        "last_error": payload.get("last_error"),
+        "config": None,
+        "queue": None,
+    }
+
+    config = payload.get("config")
+    if isinstance(config, Mapping):
+        response["config"] = dict(config)
+
+    queue_key = payload.get("queue_key")
+    queue_depth = payload.get("queue_depth")
+    if queue_key is not None or queue_depth is not None:
+        response["queue"] = {
+            "key": queue_key,
+            "depth": queue_depth,
+        }
+
+    return response

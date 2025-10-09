@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
-import json
 import sys
 from pathlib import Path
 from typing import Any, Mapping
@@ -49,9 +48,17 @@ class DemoStrategy:
         return {
             "orders": [
                 {
-                    "command_id": f"{task['task_id']}-order",
-                    "method": "placeOrder",
-                    "args": [symbol, size, price],
+                    "contract": {
+                        "symbol": symbol,
+                        "exchange": "SMART",
+                        "currency": "USD",
+                    },
+                    "order": {
+                        "action": "BUY",
+                        "total_quantity": size,
+                        "order_type": "LIMIT",
+                        "lmt_price": float(price),
+                    },
                 }
             ],
             "signals": [
@@ -62,6 +69,15 @@ class DemoStrategy:
 
 def demo_strategy_factory(config: Mapping[str, Any]) -> DemoStrategy:
     return DemoStrategy(config)
+
+
+class StubOrdersClient:
+    def __init__(self) -> None:
+        self.requests: list[Mapping[str, Any]] = []
+
+    async def place_order(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
+        self.requests.append(dict(payload))
+        return {"order_id": f"order-{len(self.requests)}", "status": "accepted"}
 
 
 @pytest.fixture
@@ -82,6 +98,7 @@ def test_strategy_adapter_enqueues_orders_and_events(redis_client: InMemoryRedis
 async def _run_adapter_test(redis_client: InMemoryRedis) -> None:
     await redis_client.hset("hash:market:snapshot:TEST", mapping={"price": "101.5"})
 
+    orders_client = StubOrdersClient()
     adapter = StrategyAdapter(
         redis_client,
         strategies={
@@ -92,17 +109,19 @@ async def _run_adapter_test(redis_client: InMemoryRedis) -> None:
         },
         command_queue="queue:test:commands",
         event_stream="stream:test:strategy",
+        orders_client=orders_client,
     )
 
     task = {"task_id": "task-1", "strategy": "demo", "symbol": "TEST", "params": {"quantity": 3}}
     await adapter.execute_task(task)
 
-    queued_orders = await redis_client.lrange("queue:test:commands", 0, -1)
-    assert len(queued_orders) == 1
-    order_payload = json.loads(queued_orders[0])
-    assert order_payload["strategy"] == "demo"
-    assert order_payload["task_id"] == "task-1"
-    assert order_payload["args"][1] == 3
+    assert len(orders_client.requests) == 1
+    placed_order = orders_client.requests[0]
+    assert placed_order["contract"]["symbol"] == "TEST"
+    assert placed_order["order"]["total_quantity"] == 3
+    metadata = placed_order["order"].get("metadata")
+    assert metadata and metadata["task_id"] == "task-1"
+    assert metadata["strategy"] == "demo"
 
     stream_entries = await redis_client.xrange("stream:test:strategy")
     statuses = [entry[1]["status"] for entry in stream_entries]

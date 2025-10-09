@@ -18,8 +18,7 @@ from .account_snapshot_cache import (
 from .utils import now_local, to_local_iso
 from src.ibbot import update_service_health
 from src.ibbot.redis import (
-    IBCommandExecutionError,
-    IBCommandTimeout,
+    LegacyIBCommandUnavailableError,
     get_redis_client,
     request_ib_command,
 )
@@ -625,61 +624,32 @@ class AccountSnapshotService:
                 kwargs=keyword_arguments,
                 timeout=self._request_timeout_seconds,
             )
-        except IBCommandTimeout as exc:
+        except LegacyIBCommandUnavailableError as exc:
             duration = time.perf_counter() - started
+            message = str(exc)
             snapshot_service_logger.warning(
-                "IB command {} timed out (command_id={}, duration={:.3f}s)",
+                "Legacy ib_command pipeline unavailable for method %s (duration=%.3fs)",
                 method,
-                exc.command_id,
                 duration,
             )
-            await mark_all_snapshots_stale("ib-command-timeout")
+            await mark_all_snapshots_stale("ib-command-removed")
             await self._update_health(
                 healthy=False,
-                last_error="timeout",
+                last_error=message,
                 extra_metrics={
                     "reason": reason,
                     "scope": scope,
-                    "command_id": exc.command_id,
+                    "command_id": None,
                     "source": IB_COMMAND_SOURCE,
                     "duration": f"{duration:.3f}",
-                    "state": "timeout",
+                    "state": "unavailable",
                 },
             )
             return {
-                "status": "timeout",
-                "command_id": exc.command_id,
+                "status": "unavailable",
+                "command_id": None,
                 "result": None,
-                "error": "timeout",
-                "duration": duration,
-            }
-        except IBCommandExecutionError as exc:
-            duration = time.perf_counter() - started
-            error_message = str(exc.payload.get("error") or str(exc))
-            snapshot_service_logger.warning(
-                "IB command {} failed (command_id={}, duration={:.3f}s, error={})",
-                method,
-                exc.command_id,
-                duration,
-                error_message,
-            )
-            await self._update_health(
-                healthy=False,
-                last_error=error_message,
-                extra_metrics={
-                    "reason": reason,
-                    "scope": scope,
-                    "command_id": exc.command_id,
-                    "source": IB_COMMAND_SOURCE,
-                    "duration": f"{duration:.3f}",
-                    "state": "error",
-                },
-            )
-            return {
-                "status": "error",
-                "command_id": exc.command_id,
-                "result": None,
-                "error": error_message,
+                "error": message,
                 "duration": duration,
             }
         except Exception as exc:
