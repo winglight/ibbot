@@ -256,7 +256,7 @@ class IBAsyncAdapter:
             
             try:
                 await self._invoke(
-                    ("connect", "connectAsync"),
+                    ("connectAsync", "connect_async", "connect"),
                     host,
                     port,
                     clientId=client_id,
@@ -531,7 +531,12 @@ class IBAsyncAdapter:
         
         try:
             # First try the high-level accountSummary method (no parameters needed)
-            method_names = ("account_summary", "accountSummary")
+            method_names = (
+                "accountSummaryAsync",
+                "account_summary_async",
+                "account_summary",
+                "accountSummary",
+            )
             if account is None:
                 return await self._invoke(method_names)
             return await self._invoke(method_names, account)
@@ -539,7 +544,12 @@ class IBAsyncAdapter:
             # If high-level method fails, try alternative approaches
             try:
                 # Try accountValues() method which is more commonly available
-                method_names = ("account_values", "accountValues")
+                method_names = (
+                    "accountValuesAsync",
+                    "account_values_async",
+                    "account_values",
+                    "accountValues",
+                )
                 if account is None:
                     return await self._invoke(method_names)
                 return await self._invoke(method_names, account)
@@ -560,7 +570,17 @@ class IBAsyncAdapter:
                         return await self._invoke(("reqAccountSummary",))
                     else:
                         # Final fallback - try any available account-related methods
-                        fallback_methods = ("portfolio", "positions", "reqPositions")
+                        fallback_methods = (
+                            "portfolioAsync",
+                            "portfolio_async",
+                            "portfolio",
+                            "positionsAsync",
+                            "positions_async",
+                            "positions",
+                            "reqPositionsAsync",
+                            "req_positions_async",
+                            "reqPositions",
+                        )
                         return await self._invoke(fallback_methods)
                         
                 except Exception as inner_e:
@@ -620,13 +640,19 @@ class IBAsyncAdapter:
         if not targets:
             raise RuntimeError(f"Native ib_async client does not expose {method_names!r}")
 
-        last_error = None
+        last_error: Optional[BaseException] = None
+        loop_running = False
+        try:
+            loop_running = asyncio.get_running_loop().is_running()
+        except RuntimeError:
+            loop_running = False
+
         for index, target in enumerate(targets):
             try:
                 # Check if the target method expects specific number of arguments
                 import inspect
                 sig = inspect.signature(target)
-                param_count = len([p for p in sig.parameters.values() 
+                param_count = len([p for p in sig.parameters.values()
                                  if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)])
                 
                 # Adjust arguments based on method signature
@@ -665,49 +691,59 @@ class IBAsyncAdapter:
                 last_error = e
                 continue
             except RuntimeError as e:
+                import inspect
                 error_msg = str(e).lower()
                 if "event loop is closed" in error_msg:
-                    # Log the recovery attempt but don't try to fix it here
-                    # The connection manager should handle this at a higher level
-                    print(f"尝试使用新的事件循环恢复: {method_names}")
-                    
-                    # Check if this is the last target to try
-                    if index == len(targets) - 1:
-                        # Don't re-raise, just log and return None to prevent cascading failures
-                        import logging
-                        logging.warning(f"Event loop is closed in ib_async method {method_names}: {e}")
-                        return None
-                    # Otherwise, try the next target
                     last_error = e
-                    continue
-                elif "this event loop is already running" in error_msg:
-                    # Handle the "event loop already running" error
-                    import logging
-                    logging.warning(f"Event loop already running for {method_names}: {e}")
                     if index == len(targets) - 1:
-                        # Don't re-raise, return None to prevent cascading failures
-                        return None
-                    last_error = e
+                        raise RuntimeError(
+                            f"Event loop is closed when invoking {method_names}: {e}"
+                        ) from e
                     continue
-                # Re-raise other RuntimeErrors
+                if "this event loop is already running" in error_msg:
+                    fallback_exception: Optional[BaseException] = None
+                    if loop_running and not inspect.iscoroutinefunction(target):
+                        try:
+                            result = await asyncio.to_thread(target, *args, **kwargs)
+                            if result is not None or index == len(targets) - 1:
+                                return result
+                            continue
+                        except Exception as thread_error:  # pragma: no cover - defensive
+                            fallback_exception = thread_error
+                    last_error = fallback_exception or e
+                    if index == len(targets) - 1:
+                        raise RuntimeError(
+                            f"Event loop already running when invoking {method_names}: {last_error}"
+                        ) from last_error
+                    continue
                 last_error = e
                 raise
             except Exception as e:
                 # For non-RuntimeError exceptions, check if it's event loop related
                 error_msg = str(e).lower()
                 if "event loop is closed" in error_msg:
-                    if index == len(targets) - 1:
-                        import logging
-                        logging.warning(f"Event loop is closed in ib_async method {method_names}: {e}")
-                        return None
                     last_error = e
+                    if index == len(targets) - 1:
+                        raise RuntimeError(
+                            f"Event loop is closed when invoking {method_names}: {e}"
+                        ) from e
                     continue
-                elif "this event loop is already running" in error_msg:
+                if "this event loop is already running" in error_msg:
+                    import inspect
+                    fallback_exception: Optional[BaseException] = None
+                    if loop_running and not inspect.iscoroutinefunction(target):
+                        try:
+                            result = await asyncio.to_thread(target, *args, **kwargs)
+                            if result is not None or index == len(targets) - 1:
+                                return result
+                            continue
+                        except Exception as thread_error:  # pragma: no cover - defensive
+                            fallback_exception = thread_error
+                    last_error = fallback_exception or e
                     if index == len(targets) - 1:
-                        import logging
-                        logging.warning(f"Event loop already running for {method_names}: {e}")
-                        return None
-                    last_error = e
+                        raise RuntimeError(
+                            f"Event loop already running when invoking {method_names}: {last_error}"
+                        ) from last_error
                     continue
                 # For other exceptions, continue to next target if available
                 last_error = e
