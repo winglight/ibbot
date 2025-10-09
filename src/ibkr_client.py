@@ -3543,9 +3543,9 @@ class IBKRClient:
                     return []
 
                 def _portfolio_snapshot():
-                    positions = ib.positions()
-                    if positions:
-                        return positions
+                    # positions = ib.positions()
+                    # if positions:
+                    #     return positions
                     return ib.portfolio()
 
                 portfolio_items = await asyncio.to_thread(
