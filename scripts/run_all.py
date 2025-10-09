@@ -11,6 +11,7 @@ import socket
 import subprocess
 import sys
 from contextlib import closing
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
 from urllib.parse import urlparse, urlsplit, urlunsplit
@@ -61,7 +62,15 @@ _SERVICE_REDIS_ENV: dict[str, str] = {
 _SERVICE_REDIS_FALLBACK: dict[str, tuple[str, ...]] = {}
 
 
-def _build_service_command(service: str) -> tuple[list[str], str]:
+@dataclass(frozen=True)
+class ServiceCommand:
+    args: list[str]
+    label: str
+    host: str | None = None
+    port: int | None = None
+
+
+def _build_service_command(service: str) -> ServiceCommand:
     """Return the command used to start *service* and a descriptive label."""
 
     if service in LEGACY_SERVICES:
@@ -71,6 +80,14 @@ def _build_service_command(service: str) -> tuple[list[str], str]:
 
     canonical = SERVICE_ALIASES.get(service, service)
     host = os.getenv("SERVICE_HOST", "0.0.0.0")
+
+    def _int_port(value: str | int | None) -> int | None:
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Invalid port value for service '{service}': {value}") from exc
 
     if canonical == "account":
         port = os.getenv("ACCOUNT_SERVICE_PORT", "8020")
@@ -84,6 +101,7 @@ def _build_service_command(service: str) -> tuple[list[str], str]:
             "--port",
             str(port),
         ]
+        return ServiceCommand(cmd, shlex.join(cmd), host, _int_port(port))
     elif canonical == "orders":
         port = os.getenv("ORDERS_SERVICE_PORT", "8050")
         cmd = [
@@ -96,6 +114,7 @@ def _build_service_command(service: str) -> tuple[list[str], str]:
             "--port",
             str(port),
         ]
+        return ServiceCommand(cmd, shlex.join(cmd), host, _int_port(port))
     elif canonical == "risk":
         port = os.getenv("RISK_SERVICE_PORT", "8030")
         app_path = os.getenv("RISK_SERVICE_APP", "services.risk.http:app")
@@ -109,6 +128,7 @@ def _build_service_command(service: str) -> tuple[list[str], str]:
             "--port",
             str(port),
         ]
+        return ServiceCommand(cmd, shlex.join(cmd), host, _int_port(port))
     elif canonical == "strategy":
         port = os.getenv("STRATEGY_SERVICE_PORT", "8045")
         app_path = os.getenv("STRATEGY_SERVICE_APP", "services.strategy.http:app")
@@ -122,6 +142,7 @@ def _build_service_command(service: str) -> tuple[list[str], str]:
             "--port",
             str(port),
         ]
+        return ServiceCommand(cmd, shlex.join(cmd), host, _int_port(port))
     elif canonical == "connection_control":
         port = os.getenv("CONNECTION_CONTROL_PORT", "8056")
         app_path = "services.connection_control.main:create_app"
@@ -136,6 +157,7 @@ def _build_service_command(service: str) -> tuple[list[str], str]:
             "--port",
             str(port),
         ]
+        return ServiceCommand(cmd, shlex.join(cmd), host, _int_port(port))
     elif canonical == "market_data":
         port = os.getenv("MARKET_DATA_PORT", "8010")
         app_path = "services.market_data.main:create_app"
@@ -150,6 +172,7 @@ def _build_service_command(service: str) -> tuple[list[str], str]:
             "--port",
             str(port),
         ]
+        return ServiceCommand(cmd, shlex.join(cmd), host, _int_port(port))
     elif canonical == "queue_monitor":
         port = os.getenv("QUEUE_MONITOR_PORT", "8011")
         app_path = "services.queue_monitor.main:create_app"
@@ -164,6 +187,7 @@ def _build_service_command(service: str) -> tuple[list[str], str]:
             "--port",
             str(port),
         ]
+        return ServiceCommand(cmd, shlex.join(cmd), host, _int_port(port))
     elif canonical == "notification":
         port = os.getenv("NOTIFICATION_SERVICE_PORT", "8055")
         app_path = "services.notification.main:app"
@@ -177,6 +201,7 @@ def _build_service_command(service: str) -> tuple[list[str], str]:
             "--port",
             str(port),
         ]
+        return ServiceCommand(cmd, shlex.join(cmd), host, _int_port(port))
     elif canonical == "optimizer":
         port = os.getenv("OPTIMIZER_PORT", "8001")
         app_path = "services.optimizer.main:create_app"
@@ -191,13 +216,13 @@ def _build_service_command(service: str) -> tuple[list[str], str]:
             "--port",
             str(port),
         ]
+        return ServiceCommand(cmd, shlex.join(cmd), host, _int_port(port))
     elif canonical == "ib_gateway":
         module = "services.ib_gateway.main"
         cmd = [sys.executable, "-m", module]
+        return ServiceCommand(cmd, shlex.join(cmd))
     else:
         raise ValueError(f"Unknown service: {service}")
-
-    return cmd, shlex.join(cmd)
 
 
 def _redact_url_secret(value: str) -> str:
@@ -365,6 +390,23 @@ def _ensure_redis_available(services: Sequence[str]) -> tuple[bool, list[str]]:
     return not errors, errors
 
 
+def _is_port_available(host: str, port: int) -> bool:
+    """Return ``True`` if *host:port* can be bound, ``False`` otherwise."""
+
+    hosts_to_check = [host]
+    if host in {"0.0.0.0", ""}:
+        hosts_to_check = ["127.0.0.1", "0.0.0.0"]
+
+    for bind_host in hosts_to_check:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                sock.bind((bind_host, port))
+        except OSError:
+            return False
+    return True
+
+
 def run_services(
     services: Sequence[str],
     dry_run: bool = False,
@@ -410,19 +452,41 @@ def run_services(
             )
             return 3
 
+    commands: list[tuple[str, ServiceCommand]] = []
+    for service in services:
+        try:
+            command = _build_service_command(service)
+        except ValueError as exc:
+            print(f"[ERROR] {exc}", file=sys.stderr)
+            return 2
+        commands.append((service, command))
+
+    if not dry_run:
+        port_conflicts: list[str] = []
+        for service, command in commands:
+            if command.port is None:
+                continue
+            host = command.host or "127.0.0.1"
+            if not _is_port_available(host, command.port):
+                port_conflicts.append(f"{service}: {host}:{command.port}")
+
+        if port_conflicts:
+            print(
+                "[ERROR] 以下服务端口已被占用，请先停止相关进程或调整端口配置：",
+                file=sys.stderr,
+            )
+            for conflict in port_conflicts:
+                print(f"        {conflict}", file=sys.stderr)
+            return 4
+
     if dry_run:
         message = [
             "[OK] 所有服务模块均可导入。",
             f"环境变量来源：{env_source.relative_to(PROJECT_ROOT) if env_source else '未找到 .env.local/.env'}",
             "启动命令示例：",
         ]
-        for service in services:
-            try:
-                _, label = _build_service_command(service)
-            except ValueError as exc:
-                print(f"[ERROR] {exc}", file=sys.stderr)
-                return 2
-            message.append(f"  {label}")
+        for _, command in commands:
+            message.append(f"  {command.label}")
         print("\n".join(message))
         return 0
 
@@ -430,15 +494,10 @@ def run_services(
     env = os.environ.copy()
 
     try:
-        for service in services:
-            try:
-                cmd, label = _build_service_command(service)
-            except ValueError as exc:
-                print(f"[ERROR] {exc}", file=sys.stderr)
-                return 2
-            print(f"[INFO] 启动 {service}: {label}")
-            process = subprocess.Popen(cmd, cwd=PROJECT_ROOT, env=env)
-            processes.append((service, process, label))
+        for service, command in commands:
+            print(f"[INFO] 启动 {service}: {command.label}")
+            process = subprocess.Popen(command.args, cwd=PROJECT_ROOT, env=env)
+            processes.append((service, process, command.label))
 
         exit_code = 0
         for service, process, label in processes:
