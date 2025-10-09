@@ -89,6 +89,21 @@ class MarketDataServiceState:
 _state = MarketDataServiceState()
 
 
+def _reset_service_state(
+    *,
+    max_subscriptions: int | None = None,
+    delayed_fallback_enabled: bool | None = None,
+) -> None:
+    """Reset runtime state to its defaults while preserving references."""
+
+    defaults = MarketDataServiceState()
+    _state.__dict__.update(defaults.__dict__)
+    if max_subscriptions is not None:
+        _state.max_subscriptions = max(1, max_subscriptions)
+    if delayed_fallback_enabled is not None:
+        _state.delayed_fallback_enabled = delayed_fallback_enabled
+
+
 class ContractPayload(BaseModel):
     con_id: int = Field(validation_alias=AliasChoices("conId", "con_id"))
     symbol: str | None = None
@@ -649,6 +664,20 @@ async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(title="Market Data Service", lifespan=_lifespan)
 app.include_router(build_metrics_router())
+
+
+def create_app(
+    *,
+    max_subscriptions: int | None = None,
+    delayed_fallback_enabled: bool | None = None,
+) -> FastAPI:
+    """Application factory used by ``uvicorn --factory``."""
+
+    _reset_service_state(
+        max_subscriptions=max_subscriptions,
+        delayed_fallback_enabled=delayed_fallback_enabled,
+    )
+    return app
 
 
 @app.post("/subscriptions/quotes")
