@@ -303,9 +303,9 @@ class ConnectionManager:
                                 host=self.config.host,
                                 port=self.config.port,
                                 clientId=try_client_id,
-                                timeout=8  # 减少内部超时
+                                timeout=15  # 减少内部超时
                             ),
-                            timeout=10  # 外部超时保护
+                            timeout=17  # 外部超时保护
                         )
                                 # 验证连接是否真正建立
                         if self.ib.isConnected():
