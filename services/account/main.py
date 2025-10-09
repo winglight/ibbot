@@ -569,7 +569,7 @@ async def delete_account_subscription() -> Dict[str, Any]:
                 logger.warning("Account client unsubscribe failed: %s", exc)
             await _stop_event_consumer()
             try:
-                await client.disconnect()
+                await client.async_disconnect()
             except Exception as exc:  # pragma: no cover - defensive guard
                 logger.warning("Account client disconnect failed: %s", exc)
         _state.subscription_accounts.clear()
@@ -1172,7 +1172,7 @@ async def _shutdown() -> None:
                 "Account client unsubscribe during shutdown failed: %s", exc
             )
         try:
-            await client.disconnect()
+            await client.async_disconnect()
         except Exception as exc:  # pragma: no cover - defensive guard
             logger.warning("Account client disconnect failed during shutdown: %s", exc)
     _state.ib_client = None

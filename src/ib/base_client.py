@@ -111,10 +111,13 @@ class BaseServiceIBClient(EWrapper, EClient):
             await self._wait_for_ready(timeout or self.DEFAULT_TIMEOUT)
         except Exception:
             logger.exception("%s connection handshake timed out", self._service_name)
-            await self.disconnect()
+            await self.async_disconnect()
             raise
 
-    async def disconnect(self) -> None:
+    async def async_disconnect(self) -> None:
+        await asyncio.to_thread(self.disconnect)
+
+    def disconnect(self) -> None:  # type: ignore[override]
         if self._connection_ready is None:
             return
 
@@ -134,7 +137,7 @@ class BaseServiceIBClient(EWrapper, EClient):
         except Exception:
             logger.exception("%s error during disconnect", self._service_name)
 
-        await asyncio.to_thread(self._join_threads)
+        self._join_threads()
 
         self._connection_ready = None
         self._callback_queue = None

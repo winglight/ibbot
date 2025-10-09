@@ -156,9 +156,9 @@ class ServiceIBClient(BaseServiceIBClient):
         self._commission_cache: dict[str, dict[str, Any]] = {}
         self._commission_lock = threading.Lock()
 
-    async def disconnect(self) -> None:  # type: ignore[override]
+    async def async_disconnect(self) -> None:
         self._cancel_pending()
-        await super().disconnect()
+        await super().async_disconnect()
 
     async def place_order(self, contract: Any, order: Any) -> OrderStatusEvent:
         if not self.isConnected():

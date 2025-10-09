@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import os
 import threading
 from dataclasses import dataclass, field
@@ -152,7 +153,10 @@ class IBClientRegistry:
                 disconnect = getattr(client, "disconnect", None)
                 if callable(disconnect):
                     try:
-                        await asyncio.to_thread(disconnect)
+                        if inspect.iscoroutinefunction(disconnect):
+                            await disconnect()
+                        else:
+                            await asyncio.to_thread(disconnect)
                     except Exception:
                         pass
 
