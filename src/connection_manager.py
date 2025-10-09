@@ -1825,22 +1825,61 @@ class ConnectionManager:
                 connection_logger.warning("Connection event loop is not running")
                 return None
 
-            import concurrent.futures
-            try:
-                future = asyncio.run_coroutine_threadsafe(coro, loop)
-                return future.result(timeout=timeout)
-            except RuntimeError as e:
-                if "no current event loop" in str(e).lower():
-                    connection_logger.error(f"No current event loop in thread: {e}")
+            # 检查当前线程是否就是连接线程
+            if threading.current_thread() == self._connection_thread:
+                # 如果已经在连接线程中，直接运行协程而不使用 run_coroutine_threadsafe
+                try:
+                    # 检查是否已经有运行中的事件循环
+                    try:
+                        current_loop = asyncio.get_running_loop()
+                        if current_loop == loop:
+                            # 在同一个事件循环中，直接创建任务
+                            task = loop.create_task(coro)
+                            return asyncio.run_coroutine_threadsafe(task, loop).result(timeout=timeout)
+                    except RuntimeError:
+                        # 没有运行中的事件循环，这是正常情况
+                        pass
+                    
+                    # 使用 asyncio.wait_for 来处理超时
+                    return asyncio.run_coroutine_threadsafe(
+                        asyncio.wait_for(coro, timeout=timeout), 
+                        loop
+                    ).result(timeout=timeout + 1)  # 给额外1秒的缓冲时间
+                except RuntimeError as e:
+                    error_msg = str(e).lower()
+                    if "this event loop is already running" in error_msg:
+                        connection_logger.warning(f"Event loop already running, trying alternative approach: {e}")
+                        # 尝试使用 ensure_future 而不是直接运行
+                        try:
+                            future = asyncio.ensure_future(coro, loop=loop)
+                            return asyncio.run_coroutine_threadsafe(future, loop).result(timeout=timeout)
+                        except Exception as inner_e:
+                            connection_logger.error(f"Alternative approach also failed: {inner_e}")
+                            return None
+                    else:
+                        raise
+            else:
+                # 从其他线程调用，使用标准的 run_coroutine_threadsafe
+                import concurrent.futures
+                try:
+                    future = asyncio.run_coroutine_threadsafe(coro, loop)
+                    return future.result(timeout=timeout)
+                except RuntimeError as e:
+                    error_msg = str(e).lower()
+                    if "no current event loop" in error_msg:
+                        connection_logger.error(f"No current event loop in thread: {e}")
+                        return None
+                    elif "this event loop is already running" in error_msg:
+                        connection_logger.warning(f"Event loop already running from external thread: {e}")
+                        return None
+                    else:
+                        raise
+                except concurrent.futures.TimeoutError:
+                    connection_logger.error(f"Execution in connection thread timed out after {timeout} seconds")
                     return None
-                else:
+                except Exception as e:
+                    connection_logger.error(f"Execution in connection thread raised error: {e}")
                     raise
-            except concurrent.futures.TimeoutError:
-                connection_logger.error(f"Execution in connection thread timed out after {timeout} seconds")
-                return None
-            except Exception as e:
-                connection_logger.error(f"Execution in connection thread raised error: {e}")
-                raise
         except Exception as e:
             connection_logger.error(f"Failed to execute coroutine in connection thread: {e}")
             return None

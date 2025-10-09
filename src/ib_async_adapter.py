@@ -513,33 +513,39 @@ class IBAsyncAdapter:
                 return await self._invoke(method_names)
             return await self._invoke(method_names, account)
         except Exception as e:
-            # If high-level method fails, try the low-level reqAccountSummary
-            # with proper parameters
+            # If high-level method fails, try alternative approaches
             try:
-                import ib_async
-                if hasattr(self._client, 'client') and hasattr(self._client.client, 'reqAccountSummary'):
-                    # Use low-level client method with required parameters
-                    req_id = self._client.client.getReqId()
-                    group_name = "All" if account is None else account
-                    tags = "TotalCashValue,NetLiquidation,UnrealizedPnL,RealizedPnL,GrossPositionValue"
+                # Try accountValues() method which is more commonly available
+                method_names = ("account_values", "accountValues")
+                if account is None:
+                    return await self._invoke(method_names)
+                return await self._invoke(method_names, account)
+            except Exception as values_e:
+                # If accountValues also fails, try the low-level reqAccountSummary
+                # but handle it more carefully
+                try:
+                    import ib_async
+                    client = self._client
                     
-                    return await self._invoke(
-                        ("reqAccountSummary",), 
-                        req_id, 
-                        group_name, 
-                        tags
-                    )
-                else:
-                    # Fallback to original behavior
-                    method_names = ("account_summary", "accountSummary", "reqAccountSummary")
-                    if account is None:
-                        return await self._invoke(method_names)
-                    return await self._invoke(method_names, account)
-            except Exception as inner_e:
-                # Log both errors and re-raise the original
-                import logging
-                logging.error(f"Failed to request account updates: original error: {e}, fallback error: {inner_e}")
-                raise e
+                    # Check if we can access the low-level client
+                    if hasattr(client, 'client') and hasattr(client.client, 'reqAccountSummary'):
+                        # For reqAccountSummary, we need to call it without parameters
+                        # and let ib_async handle the internal parameter management
+                        return await self._invoke(("reqAccountSummary",))
+                    elif hasattr(client, 'reqAccountSummary'):
+                        # Direct access to reqAccountSummary method
+                        return await self._invoke(("reqAccountSummary",))
+                    else:
+                        # Final fallback - try any available account-related methods
+                        fallback_methods = ("portfolio", "positions", "reqPositions")
+                        return await self._invoke(fallback_methods)
+                        
+                except Exception as inner_e:
+                    # Log all errors for debugging
+                    import logging
+                    logging.error(f"Failed to request account updates: original error: {e}, accountValues error: {values_e}, fallback error: {inner_e}")
+                    # Return empty list instead of raising to prevent cascading failures
+                    return []
 
     async def request_portfolio(self) -> Sequence[Any]:
         """Return the current portfolio positions."""
@@ -591,13 +597,50 @@ class IBAsyncAdapter:
         if not targets:
             raise RuntimeError(f"Native ib_async client does not expose {method_names!r}")
 
+        last_error = None
         for index, target in enumerate(targets):
             try:
-                result = target(*args, **kwargs)
+                # Check if the target method expects specific number of arguments
+                import inspect
+                sig = inspect.signature(target)
+                param_count = len([p for p in sig.parameters.values() 
+                                 if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)])
+                
+                # Adjust arguments based on method signature
+                if len(args) > param_count and param_count > 0:
+                    # Too many arguments, try with fewer
+                    adjusted_args = args[:param_count] if param_count > 0 else ()
+                    result = target(*adjusted_args, **kwargs)
+                else:
+                    result = target(*args, **kwargs)
+                    
                 if inspect.isawaitable(result):
                     result = await result
                 if result is not None or index == len(targets) - 1:
                     return result
+            except TypeError as e:
+                # Handle argument mismatch errors
+                error_msg = str(e).lower()
+                if "takes" in error_msg and "positional argument" in error_msg:
+                    # Try calling with no arguments for methods that don't expect any
+                    try:
+                        result = target()
+                        if inspect.isawaitable(result):
+                            result = await result
+                        if result is not None:
+                            return result
+                    except Exception:
+                        pass
+                    
+                    # If this is the last target, log the error but don't raise
+                    if index == len(targets) - 1:
+                        import logging
+                        logging.warning(f"Method signature mismatch for {method_names}: {e}")
+                        last_error = e
+                        continue
+                # Continue to next target
+                last_error = e
+                continue
             except RuntimeError as e:
                 error_msg = str(e).lower()
                 if "event loop is closed" in error_msg:
@@ -607,31 +650,53 @@ class IBAsyncAdapter:
                     
                     # Check if this is the last target to try
                     if index == len(targets) - 1:
-                        # Re-raise the event loop error for upstream handling
-                        raise RuntimeError(f"Event loop is closed in ib_async method {method_names}: {e}") from e
+                        # Don't re-raise, just log and return None to prevent cascading failures
+                        import logging
+                        logging.warning(f"Event loop is closed in ib_async method {method_names}: {e}")
+                        return None
                     # Otherwise, try the next target
+                    last_error = e
                     continue
                 elif "this event loop is already running" in error_msg:
                     # Handle the "event loop already running" error
+                    import logging
+                    logging.warning(f"Event loop already running for {method_names}: {e}")
                     if index == len(targets) - 1:
-                        raise RuntimeError(f"This event loop is already running: {e}") from e
+                        # Don't re-raise, return None to prevent cascading failures
+                        return None
+                    last_error = e
                     continue
                 # Re-raise other RuntimeErrors
+                last_error = e
                 raise
             except Exception as e:
                 # For non-RuntimeError exceptions, check if it's event loop related
                 error_msg = str(e).lower()
                 if "event loop is closed" in error_msg:
                     if index == len(targets) - 1:
-                        raise RuntimeError(f"Event loop is closed in ib_async method {method_names}: {e}") from e
+                        import logging
+                        logging.warning(f"Event loop is closed in ib_async method {method_names}: {e}")
+                        return None
+                    last_error = e
                     continue
                 elif "this event loop is already running" in error_msg:
                     if index == len(targets) - 1:
-                        raise RuntimeError(f"This event loop is already running: {e}") from e
+                        import logging
+                        logging.warning(f"Event loop already running for {method_names}: {e}")
+                        return None
+                    last_error = e
                     continue
-                # Re-raise other exceptions
-                raise
+                # For other exceptions, continue to next target if available
+                last_error = e
+                if index == len(targets) - 1:
+                    # This is the last target, log the error but don't raise to prevent cascading failures
+                    import logging
+                    logging.error(f"All methods failed for {method_names}, last error: {e}")
+                    return None
+                continue
 
+        # If we get here, all targets failed but we didn't raise an exception
+        # Return None to indicate failure without causing cascading errors
         return None
 
     def _iter_targets(self, client: Any, method_names: Sequence[str]) -> Iterable[Callable[..., Any]]:
