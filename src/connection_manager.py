@@ -4,10 +4,18 @@ from typing import Any, Callable, Coroutine, Dict, Optional
 from datetime import datetime
 from dataclasses import dataclass
 
-try:  # pragma: no cover - exercised indirectly when ib_insync is missing
-    from ib_insync import IB, util, ExecutionFilter
-except ImportError:  # pragma: no cover - fallback for test environments
-    from test.ib_insync_stub import IB, util, ExecutionFilter
+try:  # pragma: no cover - optional dependency during migration
+    from ib_async import IB as NativeIB
+except ImportError:  # pragma: no cover - exercised in CI where ib_async is absent
+    NativeIB = None  # type: ignore[assignment]
+
+try:  # pragma: no cover - lightweight stub for environments without ib_async
+    from test.ib_insync_stub import IB as StubIB
+except Exception:  # pragma: no cover - defensive guard, stub should always exist
+    StubIB = None  # type: ignore[assignment]
+
+from src.ib_async_adapter import IBAsyncAdapter
+from .ib_async_types import DOMLevel, MktDepthData
 from loguru import logger
 
 from .utils import now_local
@@ -122,7 +130,18 @@ class ConnectionManager:
     """统一的IBKR连接管理器"""
     
     def __init__(self):
-        self.ib: Optional[IB] = None
+        self._client_factory: Optional[Callable[[], Any]] = None
+        if NativeIB is not None:
+            self._client_factory = NativeIB
+        elif StubIB is not None:
+            self._client_factory = StubIB
+        if self._client_factory is None:  # pragma: no cover - enforced by test harness
+            raise RuntimeError(
+                "Neither ib_async nor the fallback stub is available; cannot initialise ConnectionManager",
+            )
+
+        self._adapter: Optional[IBAsyncAdapter] = None
+        self.ib: Optional[Any] = None
         self.config: ConnectionConfig = ConnectionConfig.from_env()
         self.connected: bool = False
         self._connection_thread_alive: bool = False
@@ -403,11 +422,25 @@ class ConnectionManager:
             source=source,
         )
 
-        try:
-            if self.ib and self.ib.isConnected():
-                self.ib.disconnect()
-        except Exception:
-            pass
+        adapter = self._adapter
+        if adapter and adapter.is_connected():
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+
+            try:
+                if loop and loop.is_running():
+                    loop.create_task(adapter.disconnect())
+                else:
+                    try:
+                        alt_loop = asyncio.get_running_loop()
+                    except RuntimeError:
+                        asyncio.run(adapter.disconnect())
+                    else:
+                        alt_loop.create_task(adapter.disconnect())
+            except Exception:
+                pass
 
         self.connected = False
 
@@ -453,7 +486,7 @@ class ConnectionManager:
         connection_logger.info(f"Connection config updated: {config.to_dict()}")
 
     def _patch_wrapper_depth_guard(self, wrapper: Any) -> None:
-        """防止ib_insync深度更新触发IndexError导致崩溃"""
+        """防止深度更新触发 IndexError 导致崩溃"""
 
         if not wrapper or not hasattr(wrapper, "updateMktDepthL2"):
             return
@@ -462,10 +495,8 @@ class ConnectionManager:
         if getattr(update_method, "__ibbot_depth_guard__", False):
             return
 
-        try:
-            from ib_insync.objects import DOMLevel, MktDepthData
-        except Exception as exc:  # pragma: no cover - defensive guard
-            connection_logger.debug(f"Skipping depth guard patch (missing DOM classes): {exc}")
+        if DOMLevel is None or MktDepthData is None:  # pragma: no cover - defensive guard
+            connection_logger.debug("Skipping depth guard patch (DOM classes unavailable)")
             return
 
         orig_update = wrapper.updateMktDepthL2
@@ -541,7 +572,7 @@ class ConnectionManager:
             wrapper.updateMktDepth.__func__.__ibbot_depth_guard__ = True  # type: ignore[attr-defined]
         except Exception:
             pass
-        connection_logger.debug("Patched ib_insync wrapper.updateMktDepthL2 to guard DOM depth indexes")
+        connection_logger.debug("Patched depth wrapper.updateMktDepthL2 to guard DOM indexes")
 
     def _ensure_error_handler_installed(self, wrapper: Any) -> None:
         """Install enhanced error handler once to capture client ID conflicts early."""
@@ -668,6 +699,19 @@ class ConnectionManager:
                 except Exception:
                     pass
 
+        register = getattr(wrapper, "register_error_handler", None)
+        if callable(register):
+            def _adapter_handler(*args: Any, **kwargs: Any) -> None:
+                try:
+                    error_handler(wrapper, *args, **kwargs)
+                except Exception:
+                    pass
+
+            register(_adapter_handler)
+            setattr(wrapper, "_ibbot_error_handler_installed", True)
+            connection_logger.debug("Registered adapter-based IBKR error handler")
+            return
+
         wrapper.error = types.MethodType(error_handler, wrapper)
         setattr(wrapper, "_ibbot_error_handler_installed", True)
         connection_logger.debug("Added IBKR error handler for order rejection detection")
@@ -683,29 +727,38 @@ class ConnectionManager:
 
     def _connect_in_thread(self) -> bool:
         """在独立线程中连接到IBKR服务器"""
-        self._connect_result_event = threading.Event()
-        async def connect_worker():
-            try:
-                # 获取当前事件循环
-                loop = asyncio.get_event_loop()
-                
-                # 断开现有连接
-                if self.ib:
-                    try:
-                        self.ib.disconnect()
-                    except:
-                        pass
-                
-                # 创建新的IB实例
-                self.ib = IB()
-                self._patch_wrapper_depth_guard(self.ib.wrapper)
-                self._ensure_error_handler_installed(self.ib.wrapper)
 
-                # 尝试连接，如果客户端ID冲突则自动尝试其他ID
+        self._connect_result_event = threading.Event()
+
+        async def connect_worker() -> None:
+            adapter = self._adapter
+            disconnect_reason = "connect-error"
+            connection_announced = False
+
+            try:
+                if adapter is not None:
+                    try:
+                        await adapter.disconnect()
+                    except Exception:
+                        pass
+
+                adapter = IBAsyncAdapter(client_factory=self._client_factory)
+                self._adapter = adapter
+                self.ib = None
+
+                try:
+                    self._ensure_error_handler_installed(adapter.wrapper)
+                except Exception as exc:
+                    connection_logger.debug(
+                        "Failed to register adapter error handler before connect",
+                        error=str(exc),
+                    )
+
                 connected = False
                 attempts = 0
-                attempted_ids = set()
+                attempted_ids: set[int] = set()
                 try_client_id = self._normalize_client_id(self._next_client_id_hint)
+                loop = asyncio.get_running_loop()
 
                 while attempts < self._client_id_retry_limit:
                     self._client_id_conflict_detected = False
@@ -714,60 +767,31 @@ class ConnectionManager:
                     attempted_ids.add(try_client_id)
                     attempts += 1
                     self.config.client_id = try_client_id
+
+                    connection_logger.info(
+                        "尝试连接IBKR，客户端ID: {client_id}",
+                        client_id=try_client_id,
+                    )
+
+                    connect_timeout = max(self._connect_async_timeout_sec, 1.0)
+                    grace_deadline = (
+                        loop.time() + self._connect_handshake_grace_sec
+                        if self._connect_handshake_grace_sec > 0
+                        else None
+                    )
+
                     try:
-                        connection_logger.info(f"尝试连接IBKR，客户端ID: {try_client_id}")
-                        connect_timeout = max(self._connect_async_timeout_sec, 1.0)
-                        grace_deadline = (
-                            loop.time() + self._connect_handshake_grace_sec
-                            if self._connect_handshake_grace_sec > 0
-                            else None
+                        await adapter.connect(
+                            host=self.config.host,
+                            port=self.config.port,
+                            client_id=try_client_id,
+                            timeout=connect_timeout,
                         )
-
-                        try:
-                            await self.ib.connectAsync(
-                                host=self.config.host,
-                                port=self.config.port,
-                                clientId=try_client_id,
-                                timeout=connect_timeout,
-                            )
-                        except asyncio.TimeoutError:
-                            connection_logger.warning(
-                                "connectAsync timed out; entering handshake grace period",
-                                client_id=try_client_id,
-                                timeout_sec=round(connect_timeout, 1),
-                            )
-
-                        if not self.ib.isConnected() and grace_deadline is not None:
-                            last_state: Optional[int] = None
-                            while loop.time() < grace_deadline:
-                                client = getattr(self.ib, "client", None)
-                                conn_state = getattr(client, "connState", None)
-                                if conn_state != last_state:
-                                    last_state = conn_state
-                                    connection_logger.debug(
-                                        "Waiting for IBKR handshake to complete",
-                                        client_id=try_client_id,
-                                        conn_state=conn_state,
-                                        grace_remaining=round(grace_deadline - loop.time(), 1),
-                                    )
-                                if self.ib.isConnected():
-                                    break
-                                await asyncio.sleep(self._connect_handshake_poll_interval_sec)
-
-                        if self.ib.isConnected():
-                            connected = True
-                            self._last_connect_error = None
-                            self._next_client_id_hint = try_client_id
-                            connection_logger.info(f"成功连接IBKR，使用客户端ID: {try_client_id}")
-                            break
-
-                        if grace_deadline is not None:
-                            raise TimeoutError(
-                                f"IBKR handshake timed out after {self._connect_handshake_grace_sec:.1f}s"
-                            )
-
-                        raise Exception(
-                            f"连接建立失败 - 端口 {self.config.port} 不可达或TWS/Gateway未运行"
+                    except asyncio.TimeoutError:
+                        connection_logger.warning(
+                            "connect timeout; entering handshake grace period",
+                            client_id=try_client_id,
+                            timeout_sec=round(connect_timeout, 1),
                         )
                     except Exception as conn_error:
                         if self._client_id_conflict_detected:
@@ -778,6 +802,7 @@ class ConnectionManager:
                                 next_client_id=try_client_id,
                             )
                             continue
+
                         error_msg = str(conn_error)
                         lower_error = error_msg.lower()
                         client_id_in_use_signals = (
@@ -788,6 +813,7 @@ class ConnectionManager:
                             "peer closed connection",
                             "error 326",
                         )
+
                         if any(signal in lower_error for signal in client_id_in_use_signals):
                             next_id = self._handle_client_id_conflict(
                                 try_client_id,
@@ -796,142 +822,117 @@ class ConnectionManager:
                             )
                             try_client_id = next_id
                             continue
-                        elif (
-                            "TimeoutError" in error_msg
+
+                        if (
+                            "timeouterror" in lower_error
                             or "timeout" in lower_error
                             or "timed out" in lower_error
                         ):
-                            self._last_connect_error = f"连接超时 - 请检查TWS/Gateway是否启用API连接 (端口: {self.config.port})"
-                            raise Exception(self._last_connect_error)
-                        elif "ConnectionRefusedError" in error_msg or "refused" in error_msg.lower():
-                            self._last_connect_error = f"连接被拒绝 - TWS/Gateway可能未运行或端口错误 (端口: {self.config.port})"
-                            raise Exception(self._last_connect_error)
-                        else:
-                            if attempts >= self._client_id_retry_limit:
-                                self._last_connect_error = f"连接失败: {error_msg}"
-                                raise Exception(self._last_connect_error)
-                            connection_logger.warning(f"客户端ID {try_client_id} 连接失败: {error_msg}，尝试下一个ID")
+                            self._last_connect_error = (
+                                f"连接超时 - 请检查TWS/Gateway是否启用API连接 (端口: {self.config.port})"
+                            )
+                            raise Exception(self._last_connect_error) from conn_error
+
+                        if "connectionrefusederror" in lower_error or "refused" in lower_error:
+                            self._last_connect_error = (
+                                f"连接被拒绝 - TWS/Gateway可能未运行或端口错误 (端口: {self.config.port})"
+                            )
+                            raise Exception(self._last_connect_error) from conn_error
+
+                        if attempts >= self._client_id_retry_limit:
+                            self._last_connect_error = f"连接失败: {error_msg}"
+                            raise Exception(self._last_connect_error) from conn_error
+
+                        connection_logger.warning(
+                            "客户端ID {client_id} 连接失败: {error}，尝试下一个ID",
+                            client_id=try_client_id,
+                            error=error_msg,
+                        )
+                        try_client_id = self._compute_next_client_id(try_client_id)
+                        self._next_client_id_hint = try_client_id
+                        continue
+
+                    if not adapter.is_connected() and grace_deadline is not None:
+                        last_logged_state: Optional[Any] = None
+                        while loop.time() < grace_deadline:
+                            if adapter.is_connected():
+                                break
+                            native_client = adapter.native_client
+                            state_value = getattr(
+                                getattr(native_client, "client", native_client),
+                                "connState",
+                                None,
+                            )
+                            if state_value != last_logged_state:
+                                last_logged_state = state_value
+                                connection_logger.debug(
+                                    "Waiting for IBKR handshake to complete",
+                                    client_id=try_client_id,
+                                    conn_state=state_value,
+                                    grace_remaining=round(grace_deadline - loop.time(), 1),
+                                )
+                            await asyncio.sleep(self._connect_handshake_poll_interval_sec)
+
+                    if adapter.is_connected():
+                        connected = True
+                        self._last_connect_error = None
+                        self._next_client_id_hint = try_client_id
+                        connection_logger.info(
+                            "成功连接IBKR，使用客户端ID: {client_id}",
+                            client_id=try_client_id,
+                        )
+                        break
+
+                    if grace_deadline is not None:
+                        raise TimeoutError(
+                            f"IBKR handshake timed out after {self._connect_handshake_grace_sec:.1f}s",
+                        )
+
+                    raise Exception(
+                        f"连接建立失败 - 端口 {self.config.port} 不可达或TWS/Gateway未运行",
+                    )
 
                     try_client_id = self._compute_next_client_id(try_client_id)
                     self._next_client_id_hint = try_client_id
 
                 if not connected:
-                    attempted_list = ", ".join(str(cid) for cid in sorted(attempted_ids)) or str(self.config.client_id)
-                    self._last_connect_error = f"无法找到可用的客户端ID (尝试了 {attempted_list})"
+                    attempted_list = ", ".join(
+                        str(cid) for cid in sorted(attempted_ids)
+                    ) or str(self.config.client_id)
+                    self._last_connect_error = (
+                        f"无法找到可用的客户端ID (尝试了 {attempted_list})"
+                    )
                     raise Exception(self._last_connect_error)
-                
-                # 连接后设置默认市场数据类型，避免无权限时报 10197
+
+                native_client = adapter.native_client
+                self.ib = native_client
+
                 try:
-                    default_mkt_data_type = _get_env_int('IBKR_MARKET_DATA_TYPE', 3)  # 1=实时,2=冻结,3=延迟,4=延迟冻结
-                    self.ib.reqMarketDataType(default_mkt_data_type)
-                    connection_logger.info(f"Set default IBKR market data type to {default_mkt_data_type}")
-                except Exception as e:
-                    connection_logger.debug(f"Failed to set default market data type: {e}")
-                
-                # 在连接建立后为 completedOrder 事件做安全防护，避免 KeyError: 'completedOrders'
-                try:
-                    w = self.ib.wrapper
-                    orig_completedOrder = w.completedOrder
-                    def safe_completedOrder(self_wrapped, c, o, st):
-                        try:
-                            # 确保结果字典中有 completedOrders 键
-                            try:
-                                _ = self_wrapped._results['completedOrders']
-                            except KeyError:
-                                self_wrapped._results['completedOrders'] = []
-                        except Exception:
-                            # 某些实现 _results 可能不是普通 dict，尽力处理
-                            try:
-                                if hasattr(self_wrapped._results, 'get') and self_wrapped._results.get('completedOrders') is None:
-                                    self_wrapped._results['completedOrders'] = []
-                            except Exception:
-                                pass
-                        return orig_completedOrder(c, o, st)
-                    # 绑定成实例方法
-                    w.completedOrder = types.MethodType(safe_completedOrder, w)
-                    # 预置一次键，进一步降低风险
-                    try:
-                        w._results['completedOrders'] = []
-                    except Exception:
-                        pass
-                    connection_logger.debug("Patched ib_insync wrapper.completedOrder to guard 'completedOrders' key")
-                except Exception as e:
-                    connection_logger.debug(f"Failed to patch wrapper.completedOrder: {e}")
-                
-                # 添加错误处理机制来捕获IBKR错误（幂等安装）
-                try:
-                    self._ensure_error_handler_installed(self.ib.wrapper)
+                    default_mkt_data_type = _get_env_int("IBKR_MARKET_DATA_TYPE", 3)
+                    await adapter.set_market_data_type(default_mkt_data_type)
+                    connection_logger.info(
+                        "Set default IBKR market data type to {data_type}",
+                        data_type=default_mkt_data_type,
+                    )
                 except Exception as exc:
-                    connection_logger.debug(f"Failed to install error handler after connect: {exc}")
+                    connection_logger.debug(
+                        "Failed to set default market data type",
+                        error=str(exc),
+                    )
 
-                # 添加订单状态变化事件监听器
-                def order_status_handler(trade):
-                    """处理订单状态变化事件"""
-
-                    async def _process_order_status():
-                        try:
-                            order_id = str(trade.order.orderId)
-                            status = trade.orderStatus.status
-                            connection_logger.info(f"Order status update: {order_id} -> {status}")
-
-                            connection_logger.debug(
-                                "Order state updates forwarded to orders service",
-                                order_id=order_id,
-                                status=status,
-                            )
-
-                            # 如果订单已成交，处理佣金和PnL
-                            if status == 'Filled':
-                                import core
-                                asyncio.create_task(core.ibkr_client._handle_order_filled(trade))
-                        except Exception as e:
-                            connection_logger.error(f"Error in order status handler: {e}")
-
-                        asyncio.create_task(_process_order_status())
-
-                    # 添加成交细节事件监听器（ib_insync: execDetailsEvent）
-                    def exec_details_handler(trade, fill):
-                        """处理订单成交明细事件（不含佣金报告）"""
-                        try:
-                            order_id = str(trade.order.orderId)
-                            connection_logger.info(f"Order fill event: {order_id}, fill: {fill}")
-                        except Exception as e:
-                            connection_logger.error(f"Error in exec details handler: {e}")
-                    
-                    # 添加佣金报告事件监听器（ib_insync: commissionReportEvent）
-                    def commission_report_handler(trade, fill, report):
-                        """处理成交后的佣金与已实现盈亏报告"""
-                        try:
-                            order_id = str(trade.order.orderId)
-                            commission = getattr(report, 'commission', None)
-                            pnl = getattr(report, 'realizedPNL', None)
-                            connection_logger.info(
-                                f"Commission report for order {order_id}: commission={commission}, pnl={pnl}"
-                            )
-                            # 异步更新订单的佣金和PnL
-                            import core
-                            asyncio.create_task(core.ibkr_client._update_order_commission_pnl(order_id, commission, pnl))
-                        except Exception as e:
-                            connection_logger.error(f"Error in commission report handler: {e}")
-                    
-                    # 绑定事件监听器（兼容性检测）
-                    if hasattr(self.ib, 'orderStatusEvent'):
-                        self.ib.orderStatusEvent += order_status_handler
-                    if hasattr(self.ib, 'execDetailsEvent'):
-                        self.ib.execDetailsEvent += exec_details_handler
-                    if hasattr(self.ib, 'commissionReportEvent'):
-                        self.ib.commissionReportEvent += commission_report_handler
-                    connection_logger.debug("Added order status, exec details and commission report event handlers")
-                    
                 self.connected = True
                 account_type = "Paper" if self.config.paper_trading else "Live"
-                connection_logger.info(f"Connected to IBKR {account_type} account at {self.config.host}:{self.config.port}")
+                connection_logger.info(
+                    "Connected to IBKR {account_type} account at {host}:{port}",
+                    account_type=account_type,
+                    host=self.config.host,
+                    port=self.config.port,
+                )
 
                 self._notify_connect_waiters()
 
                 self._request_account_refresh("connection_established")
 
-                # 保存事件循环引用
                 self._loop = loop
                 self._connection_thread_alive = True
                 self._loop_timeout_warning_suppressed = 0
@@ -942,6 +943,7 @@ class ConnectionManager:
                 except Exception:
                     external = True
                 self._notify_ibkr_client_connected(external=external)
+                connection_announced = True
 
                 disconnect_reason = "stop-request"
                 disconnect_event = asyncio.Event()
@@ -953,25 +955,26 @@ class ConnectionManager:
                     except Exception:
                         pass
 
-                registered_handlers: list[tuple[str, Any]] = []
-                for attr in ("disconnectedEvent", "connectionClosed"):
-                    event = getattr(self.ib, attr, None)
-                    if event is None:
-                        continue
-                    try:
-                        event += _signal_disconnect
-                    except Exception as exc:
-                        connection_logger.debug(
-                            "Failed to register %s handler on IB client", attr=attr, error=str(exc)
-                        )
-                        continue
-                    registered_handlers.append((attr, _signal_disconnect))
+                registered_handlers: list[tuple[Any, Callable[..., Any]]] = []
+                if native_client is not None:
+                    for attr in ("disconnectedEvent", "connectionClosed", "disconnected_event"):
+                        event = getattr(native_client, attr, None)
+                        if event is None:
+                            continue
+                        try:
+                            event += _signal_disconnect  # type: ignore[operator]
+                        except Exception as exc:
+                            connection_logger.debug(
+                                "Failed to register %s handler on IB client",
+                                attr=attr,
+                                error=str(exc),
+                            )
+                            continue
+                        registered_handlers.append((event, _signal_disconnect))
 
-                # 保持事件循环运行，直到明确要求断开连接
                 try:
                     while self._connection_thread_alive:
-                        current_ib = self.ib
-                        if not current_ib or not current_ib.isConnected():
+                        if not adapter.is_connected():
                             disconnect_reason = "connection-health-check"
                             break
 
@@ -983,135 +986,142 @@ class ConnectionManager:
                             disconnect_reason = "ib-event"
                             break
                         except asyncio.TimeoutError:
-                            if not current_ib.isConnected():
-                                connection_logger.warning(
-                                    "IBKR connection lost during health check window"
-                                )
-                                disconnect_reason = "connection-health-check"
-                                break
                             continue
-                        except RuntimeError as e:
-                            if "Event loop stopped before Future completed" in str(e):
+                        except RuntimeError as exc:
+                            if "Event loop stopped before Future completed" in str(exc):
                                 connection_logger.debug("Event loop stopped signal received")
                                 disconnect_reason = "loop-stopped"
                                 break
                             raise
-                        except Exception as e:
-                            connection_logger.warning(f"Unexpected error in connection loop: {e}")
-                            if "cannot be called from a running event loop" in str(e):
+                        except Exception as exc:
+                            connection_logger.warning(
+                                "Unexpected error in connection loop: {error}",
+                                error=str(exc),
+                            )
+                            if "cannot be called from a running event loop" in str(exc):
                                 disconnect_reason = "loop-error"
                                 break
                 finally:
-                    for attr, handler in registered_handlers:
-                        event = getattr(self.ib, attr, None)
-                        if event is None:
-                            continue
+                    for event, handler in registered_handlers:
                         try:
-                            event -= handler
+                            event -= handler  # type: ignore[operator]
                         except Exception:
                             pass
-                    self._disconnect_wait_event = None
 
-                    # 确保连接状态正确设置
-                    if self.ib and self.ib.isConnected():
-                        try:
-                            self.ib.disconnect()
-                        except Exception as e:
-                            connection_logger.debug(f"Error during cleanup disconnect: {e}")
-                    self.connected = False
+                    self._disconnect_wait_event = None
                     self._connection_thread_alive = False
-                    connection_logger.info("IBKR connection loop ended", reason=disconnect_reason)
-                    try:
-                        self._notify_ibkr_client_disconnected(trigger=disconnect_reason)
-                    except Exception:
-                        pass
-            
-            except Exception as e:
-                connection_logger.error(f"Failed to connect to IBKR: {e}")
+
+                connection_logger.info(
+                    "IBKR connection loop ended",
+                    reason=disconnect_reason,
+                )
+
+            except Exception as exc:
+                connection_logger.error(
+                    "Failed to connect to IBKR: {error}",
+                    error=str(exc),
+                )
                 self.connected = False
-                # 标记错误以便主线程快速返回
                 try:
-                    self._last_connect_error = str(e)
+                    self._last_connect_error = str(exc)
                 except Exception:
                     self._last_connect_error = "Unknown connection error"
                 self._notify_connect_waiters()
-                     
-                 
-        
-        def run_worker():
-            # 在新线程中创建新的事件循环
+            finally:
+                try:
+                    if adapter is not None:
+                        await adapter.disconnect()
+                except Exception as exc:
+                    connection_logger.debug(
+                        "Adapter disconnect during cleanup failed",
+                        error=str(exc),
+                    )
+
+                self.ib = None
+                self.connected = False
+
+                if connection_announced:
+                    try:
+                        self._notify_ibkr_client_disconnected(trigger=disconnect_reason)
+                    except Exception as exc:
+                        connection_logger.debug(
+                            "IBKR client notification after disconnect failed",
+                            error=str(exc),
+                        )
+
+        def run_worker() -> None:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            
-            # 立即保存事件循环引用，确保其他线程能够使用
             self._loop = loop
-            
-            task = None
+
+            task: Optional[asyncio.Task[Any]] = None
             try:
-                # 在事件循环中创建任务并运行整个事件循环，避免 run_until_complete 在停止时抛错
                 task = loop.create_task(connect_worker())
-                
-                # 设置事件循环超时，防止无限运行
-                def stop_loop_on_timeout():
+
+                def stop_loop_on_timeout() -> None:
                     if not loop.is_running():
                         return
-                    # 如果连接线程已经进入稳定运行状态，则不要强制停止事件循环
                     if self._connection_thread_alive or self.connected:
                         connection_logger.debug(
-                            "Event loop timeout guard triggered but connection thread is healthy; skipping stop"
+                            "Event loop timeout guard triggered but connection thread is healthy; skipping stop",
                         )
                         return
-                    connection_logger.warning("Event loop timeout while waiting for connection; stopping loop")
+                    connection_logger.warning(
+                        "Event loop timeout while waiting for connection; stopping loop",
+                    )
                     loop.call_soon_threadsafe(loop.stop)
-                
-                # 30秒后强制停止事件循环（如果还在运行）
+
                 timeout_timer = threading.Timer(30.0, stop_loop_on_timeout)
                 timeout_timer.start()
-                
+
                 try:
                     loop.run_forever()
                 finally:
                     timeout_timer.cancel()
-                    
-            except Exception as e:
-                connection_logger.error(f"Event loop error: {e}")
-                # 设置错误状态，让主线程知道出现了问题
-                self._last_connect_error = f"Event loop error: {e}"
+
+            except Exception as exc:
+                connection_logger.error(
+                    "Event loop error: {error}",
+                    error=str(exc),
+                )
+                self._last_connect_error = f"Event loop error: {exc}"
                 self._notify_connect_waiters()
             finally:
-                # 确保任务能够正确完成，避免 "Task was destroyed but it is pending" 警告
                 try:
                     if task and not task.done():
                         task.cancel()
-                        # 给任务一点时间来响应取消
                         try:
                             loop.run_until_complete(asyncio.wait_for(task, timeout=1.0))
                         except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
-                            # 任务被取消或超时是正常的
                             pass
-                except Exception as e:
-                    connection_logger.debug(f"Error during task cleanup: {e}")
+                except Exception as exc:
+                    connection_logger.debug(
+                        "Error during task cleanup",
+                        error=str(exc),
+                    )
                 finally:
                     try:
-                        # 确保所有待处理的任务都被取消
                         pending_tasks = [t for t in asyncio.all_tasks(loop) if not t.done()]
                         if pending_tasks:
-                            connection_logger.debug(f"Cancelling {len(pending_tasks)} pending tasks")
-                            for task in pending_tasks:
-                                task.cancel()
-                        
+                            connection_logger.debug(
+                                "Cancelling {count} pending tasks",
+                                count=len(pending_tasks),
+                            )
+                            for pending in pending_tasks:
+                                pending.cancel()
+
                         if not loop.is_closed():
                             loop.close()
-                    except Exception as e:
-                        connection_logger.debug(f"Error closing loop: {e}")
+                    except Exception as exc:
+                        connection_logger.debug(
+                            "Error closing loop",
+                            error=str(exc),
+                        )
                     finally:
-                        # 清理循环引用
                         self._loop = None
-        
-        # 重置最近错误
+
         self._last_connect_error = None
-        
-        # 使用守护线程而不是线程池，确保线程能够持续运行
+
         self._connection_thread = threading.Thread(target=run_worker, daemon=True)
         self._connection_thread.start()
 
@@ -1134,17 +1144,22 @@ class ConnectionManager:
                 return True
 
             if self._last_connect_error:
-                connection_logger.error(f"IBKR connection failed fast: {self._last_connect_error}")
+                connection_logger.error(
+                    "IBKR connection failed fast: {error}",
+                    error=self._last_connect_error,
+                )
                 self._force_stop_connection_thread()
                 return False
 
-            if not self._connection_thread or not self._connection_thread.is_alive():
+            thread = self._connection_thread
+            if not thread or not thread.is_alive():
                 connection_logger.error("Connection thread died unexpectedly")
                 self._last_connect_error = "Connection thread terminated unexpectedly"
                 return False
 
         connection_logger.error(
-            f"IBKR connection timeout after {self._connect_result_timeout_sec} seconds"
+            "IBKR connection timeout after {seconds} seconds",
+            seconds=self._connect_result_timeout_sec,
         )
         self._last_connect_error = (
             f"Connection timeout after {self._connect_result_timeout_sec} seconds"
@@ -1275,22 +1290,19 @@ class ConnectionManager:
 
     def connect(self) -> bool:
         """连接到IBKR服务器"""
-        # 检查当前连接是否使用相同配置
-        if self.connected and self.ib and self.ib.isConnected():
-            # ``ib_insync.IB`` 在不同版本中对主机/端口信息的暴露方式并不一致。
-            # 某些版本只在 ``IB.client`` 上保存这些字段，直接访问 ``IB.host``
-            # 会得到 ``None``，从而被误判为配置已经变更并触发重复的重连流程。
-            current_host = getattr(self.ib, "host", None)
-            current_port = getattr(self.ib, "port", None)
+        adapter = self._adapter
+        if adapter and adapter.is_connected():
+            native_client = adapter.native_client
+            current_host = getattr(native_client, "host", None)
+            current_port = getattr(native_client, "port", None)
 
-            client = getattr(self.ib, "client", None)
+            client = getattr(native_client, "client", None)
             if client is not None:
                 if not current_host:
                     current_host = getattr(client, "host", current_host)
                 if current_port in (None, 0):
                     current_port = getattr(client, "port", current_port)
 
-            # 兜底使用当前配置，确保缺失字段不会导致误判
             if current_host is None:
                 current_host = self.config.host
 
@@ -1323,7 +1335,8 @@ class ConnectionManager:
                     wait_logged = True
 
                 # 如果等待期间连接已经建立，则直接返回
-                if self.connected and self.ib and self.ib.isConnected():
+                adapter = self._adapter
+                if adapter and adapter.is_connected():
                     connection_logger.info("IBKR connection became available while waiting for existing attempt")
                     self._record_connect_result(True)
                     return True
@@ -1357,7 +1370,8 @@ class ConnectionManager:
                 self._connect_state_cond.wait(timeout=1.0)
 
             # 等待结束后再次检查连接状态，避免重复启动连接
-            if self.connected and self.ib and self.ib.isConnected():
+            adapter = self._adapter
+            if adapter and adapter.is_connected():
                 connection_logger.info("IBKR connection completed while waiting")
                 self._record_connect_result(True)
                 return True
@@ -1407,14 +1421,25 @@ class ConnectionManager:
             except Exception:
                 pass
 
-        if self.ib:
+        adapter = self._adapter
+        if adapter:
             try:
-                self.ib.disconnect()
+                if loop and not loop.is_closed():
+                    future = asyncio.run_coroutine_threadsafe(adapter.disconnect(), loop)
+                    future.result(timeout=1.0)
+                else:
+                    try:
+                        alt_loop = asyncio.get_running_loop()
+                    except RuntimeError:
+                        asyncio.run(adapter.disconnect())
+                    else:
+                        alt_loop.create_task(adapter.disconnect())
             except Exception:
                 pass
 
         self.connected = False
         self.ib = None
+        self._adapter = None
         self._loop = None
         self._connection_thread = None
         self._notify_connect_waiters()
@@ -1434,10 +1459,19 @@ class ConnectionManager:
                     if loop.is_running():
                         event.set()
 
-            # 安全断开 IB
-            if self.ib and self.ib.isConnected():
+            adapter = self._adapter
+            if adapter and adapter.is_connected():
                 try:
-                    self.ib.disconnect()
+                    if loop and not loop.is_closed():
+                        future = asyncio.run_coroutine_threadsafe(adapter.disconnect(), loop)
+                        future.result(timeout=2.0)
+                    else:
+                        try:
+                            alt_loop = asyncio.get_running_loop()
+                        except RuntimeError:
+                            asyncio.run(adapter.disconnect())
+                        else:
+                            alt_loop.create_task(adapter.disconnect())
                     connection_logger.info("Disconnected from IBKR")
                 except Exception as e:
                     connection_logger.warning(f"Error while disconnecting IB: {e}")
@@ -1461,6 +1495,7 @@ class ConnectionManager:
             # 清理状态
             self.connected = False
             self.ib = None
+            self._adapter = None
             self._loop = None
             self._connection_thread = None
 
@@ -1470,48 +1505,12 @@ class ConnectionManager:
 
     def is_connected(self) -> bool:
         """检查连接状态"""
-        if not self.ib:
-            self.connected = False
-            return False
+        adapter = self._adapter
+        if adapter and adapter.is_connected():
+            self.connected = True
+            return True
 
-        try:
-            # 优先使用 ib_insync 提供的 isConnected 方法，避免 connState 出现短暂不同步导致误判
-            if hasattr(self.ib, "isConnected") and self.ib.isConnected():
-                self.connected = True
-                return True
-        except Exception as exc:  # pragma: no cover - 容错保护
-            connection_logger.debug(f"ib.isConnected() check failed: {exc}")
-
-        try:
-            # 直接检查client的连接状态，避免调用可能阻塞的方法
-            # ib_insync的client对象有connState属性：DISCONNECTED=0, CONNECTING=1, CONNECTED=2
-            client = getattr(self.ib, "client", None)
-            if client:
-                conn_state = getattr(client, "connState", 0)
-                connected_state = getattr(client, "CONNECTED", 2)
-                if conn_state == connected_state:  # CONNECTED = 2
-                    self.connected = True
-                    return True
-
-                # 如果处于连接中状态且之前判定为已连接，则保持连接状态，减少抖动
-                connecting_state = getattr(client, "CONNECTING", 1)
-                if conn_state == connecting_state and self.connected:
-                    return True
-
-                disconnected_state = getattr(client, "DISCONNECTED", 0)
-                if conn_state == disconnected_state:
-                    self.connected = False
-                    return False
-
-            # client 不存在时视为未连接
-            self.connected = False
-
-        except Exception as e:
-            connection_logger.warning(f"Connection check failed: {e}")
-            # 如果之前判定为已连接，保持结果，避免短暂错误导致的误判
-            if self.connected:
-                return True
-            self.connected = False
+        self.connected = False
         return False
 
     def is_connecting(self) -> bool:
@@ -1524,7 +1523,8 @@ class ConnectionManager:
         deadline = time.monotonic() + (timeout if timeout is not None else self._connect_wait_limit_sec)
         with self._connect_state_cond:
             while True:
-                if self.connected and self.ib and self.ib.isConnected():
+                adapter = self._adapter
+                if adapter and adapter.is_connected():
                     return True
                 if not self._connect_in_progress:
                     return False
@@ -1542,7 +1542,7 @@ class ConnectionManager:
         except Exception:
             return None
     
-    def get_ib_instance(self) -> Optional[IB]:
+    def get_ib_instance(self) -> Optional[Any]:
         """获取IB实例"""
         if self.is_connected():
             return self.ib
@@ -1571,7 +1571,8 @@ class ConnectionManager:
             if not loop or loop.is_closed():
                 connection_logger.warning("Connection event loop not available")
                 return None
-            if not self.ib or not self.ib.isConnected():
+            adapter = self._adapter
+            if not adapter or not adapter.is_connected():
                 connection_logger.warning("IBKR connection not available")
                 return None
 
@@ -1655,7 +1656,8 @@ class ConnectionManager:
             if not loop or loop.is_closed():
                 connection_logger.warning("Connection event loop not available")
                 return None
-            if not self.ib or not self.ib.isConnected():
+            adapter = self._adapter
+            if not adapter or not adapter.is_connected():
                 connection_logger.warning("IBKR connection not available")
                 return None
 

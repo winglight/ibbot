@@ -63,6 +63,26 @@ def check_required_env():
     print("✅ 所有必需的环境变量都已设置")
     return True
 
+def check_ib_async_dependency():
+    """确认 ib_async 依赖或本地 stub 可用"""
+    try:
+        import ib_async  # type: ignore  # noqa: F401
+    except ImportError:
+        try:
+            from test import ib_insync_stub  # type: ignore
+        except ImportError:
+            print("❌ 未检测到 ib_async，也无法加载 test.ib_insync_stub。请先安装 ib-async 或保留测试 stub。")
+            return False
+        else:
+            if hasattr(ib_insync_stub, "IBAsyncStub") or hasattr(ib_insync_stub, "IB"):
+                print("⚠️ 未安装 ib_async，将使用 test.ib_insync_stub 中的异步 stub 进行本地模拟。")
+                return True
+            print("⚠️ 找到 test.ib_insync_stub，但缺少兼容的异步 stub。请升级仓库或安装 ib-async。")
+            return False
+    else:
+        print("✅ 检测到 ib_async 库，可直接连接 IBKR。")
+        return True
+
 def show_env_info():
     """显示关键环境变量信息"""
     print("\n📋 关键环境变量:")
@@ -113,7 +133,11 @@ def main():
     
     # 显示环境变量信息
     show_env_info()
-    
+
+    # 检查 ib_async 依赖
+    if not check_ib_async_dependency():
+        sys.exit(1)
+
     # 启动服务
     service_name = sys.argv[1] if len(sys.argv) > 1 else None
     start_service(service_name)

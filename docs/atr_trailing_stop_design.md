@@ -31,7 +31,7 @@
 ### 3.1 行情订阅 Price/Volume
 1. 新增 `src/market_data_stream.py`，封装:
    - `class PriceVolumeStream`：按符号管理 IBKR 订阅 ID，调用 `ib.reqRealTimeBars(contract, whatToShow='TRADES', useRTH=False)`。
-   - 使用 `ib_insync` 的事件回调 `ib.pendingTickersEvent` 或 `ib.reqRealTimeBars` 返回的 async queue 获取 `RealTimeBar`。
+   - 使用 `ib_async` 的 `real_time_bars` 异步流或 `IBAsyncAdapter` 暴露的事件回调获取 `RealTimeBar`。
    - 允许调用方指定下采样间隔 `interval_seconds`。若 IBKR 只允许 5 秒数据，则通过内部节流器（例如只保留每 `interval_seconds/5` 个 bar）。
 
 2. 对于每个 `symbol`，维护:

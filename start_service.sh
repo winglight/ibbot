@@ -64,6 +64,21 @@ check_env_files() {
     fi
 }
 
+check_ib_async() {
+    if python -c "import ib_async" >/dev/null 2>&1; then
+        echo -e "${GREEN}✅ 检测到 ib_async 库，可直接连接 IBKR${NC}"
+        return 0
+    fi
+
+    if python -c "from test.ib_insync_stub import IB" >/dev/null 2>&1; then
+        echo -e "${YELLOW}⚠️  未检测到 ib_async，将使用 test.ib_insync_stub.IB 进行本地模拟${NC}"
+        return 0
+    fi
+
+    echo -e "${RED}❌ 未找到 ib_async 库或兼容的测试 stub，请先运行 pip install -r requirements.txt${NC}"
+    return 1
+}
+
 # 启动服务
 start_service() {
     local service_name="$1"
@@ -94,6 +109,13 @@ start_service() {
     # 检查环境文件
     if ! check_env_files; then
         exit 1
+    fi
+
+    # 检查 ib_async 依赖（允许主函数预先标记已完成）
+    if [[ -z "${IBBOT_IB_ASYNC_CHECKED:-}" ]]; then
+        if ! check_ib_async; then
+            exit 1
+        fi
     fi
     
     # 获取服务配置
@@ -141,7 +163,13 @@ main() {
         echo -e "${YELLOW}⚠️  python-dotenv 未安装，正在安装...${NC}"
         pip install python-dotenv
     fi
-    
+
+    if ! check_ib_async; then
+        exit 1
+    fi
+
+    export IBBOT_IB_ASYNC_CHECKED=1
+
     start_service "$1" "$2"
 }
 

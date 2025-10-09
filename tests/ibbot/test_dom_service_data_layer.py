@@ -75,7 +75,6 @@ def dom_service_setup(monkeypatch: pytest.MonkeyPatch) -> Tuple[dom_service_modu
 
     monkeypatch.setattr(manager.event_bus, "unsubscribe", _capture_unsubscribe)
 
-    monkeypatch.setattr(dom_service_module, "connection_manager", _DummyConnectionManager())
     monkeypatch.setattr(dom_service_module, "get_data_source_manager", lambda: manager)
 
     service = dom_service_module.DOMService()

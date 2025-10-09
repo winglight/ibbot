@@ -167,7 +167,7 @@ Consumers: DOMService, StrategyManager, WebSocket, Alerts, Optimizer
 
 ## Testing Strategy
 - 单元测试覆盖：EventBus（并发、退订）、SubscriptionRegistry（引用计数、断线恢复）、IntervalTransformer（聚合准确性）。
-- 集成测试：基于 `ib_insync` stub 模拟 tick/DOM 流，验证 Redis 快照、Parquet 写入、订阅去重。
+- 集成测试：基于 `ib_async` stub 模拟 tick/DOM 流，验证 Redis 快照、Parquet 写入、订阅去重。
 - 回归测试：沿用现有 DOM pipeline tests，新增 `dual` 模式比较脚本。
 - 性能测试：模拟高频 tick（>500 msg/s）与多 topic 订阅，评估延迟与资源占用。
 
