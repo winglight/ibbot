@@ -65,7 +65,8 @@ class BaseServiceIBClient(EWrapper, EClient):
 
         loop = asyncio.get_running_loop()
         self._loop = loop
-        self._connection_ready = asyncio.Event()
+        ready_event = asyncio.Event()
+        self._connection_ready = ready_event
         self._callback_queue = asyncio.Queue()
         self._async_request_lock = asyncio.Lock()
         self._stop_event.clear()
@@ -108,7 +109,7 @@ class BaseServiceIBClient(EWrapper, EClient):
         self._run_thread.start()
 
         try:
-            await self._wait_for_ready(timeout or self.DEFAULT_TIMEOUT)
+            await self._wait_for_ready(ready_event, timeout or self.DEFAULT_TIMEOUT)
         except Exception:
             logger.exception("%s connection handshake timed out", self._service_name)
             await self.async_disconnect()
@@ -160,10 +161,7 @@ class BaseServiceIBClient(EWrapper, EClient):
             if thread and thread.is_alive():
                 thread.join(timeout=2.0)
 
-    async def _wait_for_ready(self, timeout: float) -> None:
-        event = self._connection_ready
-        if event is None:
-            raise RuntimeError("Client connection not initialised")
+    async def _wait_for_ready(self, event: asyncio.Event, timeout: float) -> None:
         await asyncio.wait_for(event.wait(), timeout)
 
     def nextValidId(self, orderId: int) -> None:  # noqa: N802 - IB API signature
@@ -178,7 +176,7 @@ class BaseServiceIBClient(EWrapper, EClient):
             self._async_request_waiters.clear()
         loop = self._loop
         event = self._connection_ready
-        if loop and event:
+        if loop and event is not None:
             loop.call_soon_threadsafe(event.set)
             for future in waiters:
                 loop.call_soon_threadsafe(self._resolve_future, future, orderId)
@@ -217,7 +215,7 @@ class BaseServiceIBClient(EWrapper, EClient):
         finally:
             self._stop_event.set()
             loop = self._loop
-            if loop and self._connection_ready:
+            if loop and self._connection_ready is not None:
                 loop.call_soon_threadsafe(self._connection_ready.set)
 
     def _cancel_waiters(self) -> None:
@@ -256,7 +254,7 @@ class BaseServiceIBClient(EWrapper, EClient):
 
     async def wait_until_ready(self, timeout: float | None = None) -> None:
         event = self._connection_ready
-        if not event:
+        if event is None:
             raise RuntimeError("Client not connected")
         await asyncio.wait_for(
             event.wait(),
