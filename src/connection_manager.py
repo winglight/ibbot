@@ -805,6 +805,14 @@ class ConnectionManager:
 
                         error_msg = str(conn_error)
                         lower_error = error_msg.lower()
+                        if "event loop is closed" in lower_error:
+                            self._last_connect_error = "连接失败: Event loop 已关闭"
+                            connection_logger.error(
+                                "Event loop became unavailable during connect attempt",
+                                client_id=try_client_id,
+                            )
+                            raise RuntimeError(self._last_connect_error) from conn_error
+
                         client_id_in_use_signals = (
                             "already connected",
                             "duplicate",
