@@ -38,7 +38,6 @@ DEFAULT_SERVICES: tuple[str, ...] = (
     "connection_control",
     "account",
     "orders",
-    "ib_gateway",
     "strategy",
     "risk",
     "notification",
@@ -51,7 +50,6 @@ DEFAULT_SERVICES: tuple[str, ...] = (
 # If a service is not listed here it falls back to ``IBBOT_REDIS_URL``.
 _SERVICE_REDIS_ENV: dict[str, str] = {
     "connection_control": "CONNECTION_CONTROL_REDIS_URL",
-    "ib_gateway": "IB_GATEWAY_REDIS_URL",
     "strategy": "STRATEGY_REDIS_URL",
     "risk": "RISK_REDIS_URL",
     "notification": "NOTIFICATION_REDIS_URL",
