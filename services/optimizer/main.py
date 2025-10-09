@@ -11,6 +11,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable, Mapping, Sequence
 
+try:
+    from src.event_loop_manager import setup_event_loop_policy
+    _event_loop_manager_available = True
+except ImportError:
+    _event_loop_manager_available = False
+
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -330,6 +336,15 @@ def configure_logging() -> None:
 def main() -> None:
     args = parse_args()
     configure_logging()
+    
+    # 设置事件循环策略以提高兼容性
+    if _event_loop_manager_available:
+        try:
+            setup_event_loop_policy()
+            logger.info("Optimizer service: 事件循环策略设置成功")
+        except Exception as e:
+            logger.warning(f"Optimizer service: 事件循环策略设置失败: {e}")
+    
     logger.info(
         "Starting optimizer service on http://{}:{} (reload={})",
         args.host,

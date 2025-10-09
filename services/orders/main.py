@@ -1573,6 +1573,36 @@ class OrdersRuntime:
         if response_mapping is not None:
             parsed_payload["response"] = response_mapping
 
+        # Early check: ensure this is actually an order-related message
+        has_order_markers = _payload_has_order_markers(
+            parsed_payload, result_mapping, response_mapping
+        )
+        
+        # Check for order-related method names in the payload
+        method_name = _coerce_str(parsed_payload.get("method", ""))
+        method_name_lower = method_name.lower() if method_name else ""
+        is_order_method = any(order_keyword in method_name_lower for order_keyword in [
+            "order", "place", "cancel", "fill", "trade", "position"
+        ])
+        
+        # Check for order-related event types or categories
+        descriptor = _coerce_str(
+            parsed_payload.get("type")
+            or parsed_payload.get("category")
+            or parsed_payload.get("event")
+            or parsed_payload.get("event_type")
+            or parsed_payload.get("topic")
+            or parsed_payload.get("event_name")
+        )
+        descriptor_lower = descriptor.lower() if descriptor else ""
+        is_order_descriptor = any(order_keyword in descriptor_lower for order_keyword in [
+            "order", "trade", "fill", "position", "execution"
+        ])
+        
+        # If none of the order indicators are present, skip this message
+        if not (has_order_markers or is_order_method or is_order_descriptor):
+            return False
+
         command_candidates: list[str] = []
         for candidate in (
             payload.get("command_id"),
@@ -1593,26 +1623,18 @@ class OrdersRuntime:
                     command_candidates.append(text)
         command_id = command_candidates[0] if command_candidates else ""
 
-        has_order_markers = _payload_has_order_markers(
-            parsed_payload, result_mapping, response_mapping
-        )
         order_id = self._extract_order_id(parsed_payload, result_mapping, command_id)
         if order_id and order_id != command_id:
             has_order_markers = True
         status = self._extract_status(parsed_payload, result_mapping)
+        
+        # Additional check: if we have a command_id but it's not in our tracking and no order markers, skip
         if command_id and command_id not in self._command_to_order and not has_order_markers:
             return False
+            
+        # Final check: ensure we have some form of identifier
         if not (command_id or order_id):
-            descriptor = _coerce_str(
-                parsed_payload.get("type")
-                or parsed_payload.get("category")
-                or parsed_payload.get("event")
-                or parsed_payload.get("event_type")
-                or parsed_payload.get("topic")
-            )
-            descriptor_lower = descriptor.lower() if descriptor else ""
-            if "order" not in descriptor_lower:
-                return False
+            return False
         identifier = order_id or command_id
         if not identifier:
             return False

@@ -8,6 +8,12 @@ import signal
 from contextlib import AsyncExitStack, suppress
 from typing import Any
 
+try:
+    from src.event_loop_manager import setup_event_loop_policy
+    _event_loop_manager_available = True
+except ImportError:
+    _event_loop_manager_available = False
+
 from services.strategy import StrategyAdapter, StrategyTaskConsumer
 from src.ibbot import update_service_health
 from src.ibbot.config import ConfigProvider
@@ -188,6 +194,14 @@ async def run_service() -> None:
 
 def main() -> None:
     """Run the service until interrupted."""
+    
+    # 设置事件循环策略以提高兼容性
+    if _event_loop_manager_available:
+        try:
+            setup_event_loop_policy()
+            print("Strategy service: 事件循环策略设置成功")
+        except Exception as e:
+            print(f"Strategy service: 事件循环策略设置失败: {e}")
 
     asyncio.run(run_service())
 

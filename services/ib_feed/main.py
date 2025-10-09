@@ -11,6 +11,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Mapping, Sequence
 
+try:
+    from src.event_loop_manager import setup_event_loop_policy
+    _event_loop_manager_available = True
+except ImportError:
+    _event_loop_manager_available = False
+
 from src.ibbot import update_service_health
 from src.ibbot.logging import get_logger
 from src.ibbot.storage.parquet_writer import MarketDataParquetWriter, get_market_data_writer
@@ -368,6 +374,14 @@ async def run_service() -> None:
 
 
 def main() -> None:
+    # 设置事件循环策略以提高兼容性
+    if _event_loop_manager_available:
+        try:
+            setup_event_loop_policy()
+            print("IB Feed service: 事件循环策略设置成功")
+        except Exception as e:
+            print(f"IB Feed service: 事件循环策略设置失败: {e}")
+    
     asyncio.run(run_service())
 
 

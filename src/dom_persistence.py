@@ -67,12 +67,20 @@ def _resolve_key(redis_key: Optional[str], *, default: str, env: str) -> str:
 
 def _load_payload(redis_key: str) -> Optional[Dict[str, Any]]:
     try:
-        return asyncio.run(_read_json_async(redis_key))
-    except RuntimeError:
-        logger.debug(
-            "DOM persistence load skipped because an event loop is already running",
-            key=redis_key,
-        )
+        # Check if event loop is already running before creating coroutine
+        try:
+            asyncio.get_running_loop()
+            # Event loop is already running, skip loading
+            logger.debug(
+                "DOM persistence load skipped because an event loop is already running",
+                key=redis_key,
+            )
+            return None
+        except RuntimeError:
+            # No event loop running, safe to use asyncio.run
+            return asyncio.run(_read_json_async(redis_key))
+    except Exception as e:
+        logger.warning(f"Failed to load DOM payload from Redis: {e}")
         return None
 
 
@@ -83,7 +91,10 @@ def _persist_payload(redis_key: str, payload: Mapping[str, Any]) -> None:
         asyncio.run(_write_json_async(redis_key, payload))
         return
 
-    loop.create_task(_write_json_async(redis_key, payload))
+    # Create task and add to background tasks to prevent garbage collection
+    task = loop.create_task(_write_json_async(redis_key, payload))
+    # Add callback to handle any exceptions and prevent warnings
+    task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
 
 
 def load_dom_config(redis_key: Optional[str] = None) -> Optional[Dict[str, Any]]:

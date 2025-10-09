@@ -240,7 +240,7 @@ services:
     restart: unless-stopped
 
   ib-gateway:
-    image: ghcr.io/gnzsnz/ib-gateway:10.39.1h
+    image: ghcr.io/gnzsnz/ib-gateway:latest
     container_name: ib-gateway
     restart: always
     env_file:

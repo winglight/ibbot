@@ -12,6 +12,12 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping
 from datetime import datetime, timezone
 from typing import Any
 
+try:
+    from src.event_loop_manager import setup_event_loop_policy
+    _event_loop_manager_available = True
+except ImportError:
+    _event_loop_manager_available = False
+
 from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -400,6 +406,14 @@ async def run_service() -> None:
 
 
 def main() -> None:
+    # 设置事件循环策略以提高兼容性
+    if _event_loop_manager_available:
+        try:
+            setup_event_loop_policy()
+            print("Notification service: 事件循环策略设置成功")
+        except Exception as e:
+            print(f"Notification service: 事件循环策略设置失败: {e}")
+    
     asyncio.run(run_service())
 
 

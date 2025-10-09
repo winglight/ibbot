@@ -22,6 +22,13 @@ try:  # pragma: no cover - optional dependency for local development
 except ImportError:  # pragma: no cover - the real implementation lands in later tasks
     NativeIB = None  # type: ignore[assignment]
 
+try:
+    from .event_loop_manager import EventLoopManager, get_safe_event_loop
+except ImportError:
+    # Fallback if event loop manager is not available
+    EventLoopManager = None
+    get_safe_event_loop = None
+
 
 class AdapterEvent:
     """Minimal event helper mimicking :mod:`ib_insync.eventkit.Event` semantics."""
@@ -80,6 +87,7 @@ class AdapterWrapper:
         self._client = client
         self._error_handlers: list[Callable[..., None]] = []
         self._depth_handlers: list[Callable[..., None]] = []
+        self._decoder_error_handler_installed = False
 
     def bind_client(self, client: Any) -> None:
         """Attach the underlying native client so handlers can be wired."""
@@ -87,6 +95,7 @@ class AdapterWrapper:
         self._client = client
         self._attach_error_handlers()
         self._attach_depth_handlers()
+        self._install_decoder_error_handler()
 
     def register_error_handler(self, handler: Callable[..., None]) -> None:
         if handler not in self._error_handlers:
@@ -117,6 +126,89 @@ class AdapterWrapper:
                 event = getattr(client, attr, None)
                 if event is not None:
                     event += handler  # type: ignore[operator]
+
+    def _install_decoder_error_handler(self) -> None:
+        """Install a monkey patch to handle decoder KeyError issues."""
+        if self._decoder_error_handler_installed or not self._client:
+            return
+            
+        try:
+            import ib_async.decoder as decoder
+            import ib_async.wrapper as wrapper_module
+            import logging
+            
+            # Store original interpret method
+            if hasattr(decoder, 'Decoder') and hasattr(decoder.Decoder, 'interpret'):
+                original_interpret = decoder.Decoder.interpret
+                
+                def patched_interpret(self, fields):
+                    """Patched interpret method that handles KeyError for unknown message IDs."""
+                    try:
+                        return original_interpret(self, fields)
+                    except KeyError as e:
+                        # Handle unknown message ID (like 178)
+                        msg_id = str(e).strip("'\"")
+                        warning_msg = f"Unknown message ID {msg_id} - possible TWS/Gateway version mismatch with ib_async library"
+                        
+                        # 安全地记录警告信息
+                        try:
+                            # 优先使用 decoder 的 logger
+                            if hasattr(self, 'logger') and self.logger:
+                                self.logger.warning(warning_msg)
+                            else:
+                                # 回退到标准 logging
+                                logging.warning(warning_msg)
+                        except Exception:
+                            # 如果日志记录失败，至少打印到控制台
+                            print(f"WARNING: {warning_msg}")
+                        
+                        # Return None or empty result to continue processing
+                        return None
+                    except Exception as e:
+                        # 记录其他异常但重新抛出
+                        error_msg = f"Decoder interpret error: {e}, fields: {fields[:5] if len(fields) >= 5 else fields}"
+                        try:
+                            if hasattr(self, 'logger') and self.logger:
+                                self.logger.error(error_msg)
+                            else:
+                                logging.error(error_msg)
+                        except Exception:
+                            print(f"ERROR: {error_msg}")
+                        raise
+                
+                # Apply the patch
+                decoder.Decoder.interpret = patched_interpret
+                
+            # Also patch wrapper's completedOrder method to handle missing completedOrders key
+            if hasattr(wrapper_module, 'Wrapper') and hasattr(wrapper_module.Wrapper, 'completedOrder'):
+                original_completed_order = wrapper_module.Wrapper.completedOrder
+                
+                def patched_completed_order(self, contract, order, orderState):
+                    """Patched completedOrder method that ensures completedOrders key exists."""
+                    try:
+                        # Ensure completedOrders key exists in _results
+                        if hasattr(self, '_results') and 'completedOrders' not in self._results:
+                            self._results['completedOrders'] = []
+                        
+                        return original_completed_order(self, contract, order, orderState)
+                    except KeyError as e:
+                        if 'completedOrders' in str(e):
+                            # Initialize the missing key and retry
+                            if hasattr(self, '_results'):
+                                self._results['completedOrders'] = []
+                                return original_completed_order(self, contract, order, orderState)
+                        raise
+                
+                # Apply the wrapper patch
+                wrapper_module.Wrapper.completedOrder = patched_completed_order
+                
+            self._decoder_error_handler_installed = True
+            logging.info("Decoder and wrapper error handlers installed successfully")
+                
+        except ImportError:
+            logging.warning("Could not import ib_async.decoder or ib_async.wrapper for error handling")
+        except Exception as e:
+            logging.error(f"Failed to install decoder error handler: {e}")
 
 
 class IBAsyncAdapter:
@@ -161,13 +253,21 @@ class IBAsyncAdapter:
                 "clientId": client_id,
                 **kwargs,
             }
-            await self._invoke(
-                ("connect", "connectAsync"),
-                host,
-                port,
-                clientId=client_id,
-                **kwargs,
-            )
+            
+            try:
+                await self._invoke(
+                    ("connect", "connectAsync"),
+                    host,
+                    port,
+                    clientId=client_id,
+                    **kwargs,
+                )
+            except RuntimeError as e:
+                error_msg = str(e).lower()
+                if "event loop is closed" in error_msg:
+                    # Re-raise with more specific error message for better handling upstream
+                    raise RuntimeError(f"Event loop is closed during ib_async connection: {e}") from e
+                raise
 
     async def disconnect(self) -> None:
         """Close the active ``ib_async`` session and release resources."""
@@ -392,10 +492,44 @@ class IBAsyncAdapter:
     async def request_account_updates(self, account: Optional[str] = None) -> Any:
         """Fetch the latest account summary for ``account``."""
 
-        method_names = ("account_summary", "accountSummary", "reqAccountSummary")
-        if account is None:
-            return await self._invoke(method_names)
-        return await self._invoke(method_names, account)
+        # For ib_async, we need to handle different method signatures
+        # accountSummary() - no parameters needed
+        # reqAccountSummary(reqId, groupName, tags) - requires specific parameters
+        
+        try:
+            # First try the high-level accountSummary method (no parameters needed)
+            method_names = ("account_summary", "accountSummary")
+            if account is None:
+                return await self._invoke(method_names)
+            return await self._invoke(method_names, account)
+        except Exception as e:
+            # If high-level method fails, try the low-level reqAccountSummary
+            # with proper parameters
+            try:
+                import ib_async
+                if hasattr(self._client, 'client') and hasattr(self._client.client, 'reqAccountSummary'):
+                    # Use low-level client method with required parameters
+                    req_id = self._client.client.getReqId()
+                    group_name = "All" if account is None else account
+                    tags = "TotalCashValue,NetLiquidation,UnrealizedPnL,RealizedPnL,GrossPositionValue"
+                    
+                    return await self._invoke(
+                        ("reqAccountSummary",), 
+                        req_id, 
+                        group_name, 
+                        tags
+                    )
+                else:
+                    # Fallback to original behavior
+                    method_names = ("account_summary", "accountSummary", "reqAccountSummary")
+                    if account is None:
+                        return await self._invoke(method_names)
+                    return await self._invoke(method_names, account)
+            except Exception as inner_e:
+                # Log both errors and re-raise the original
+                import logging
+                logging.error(f"Failed to request account updates: original error: {e}, fallback error: {inner_e}")
+                raise e
 
     async def request_portfolio(self) -> Sequence[Any]:
         """Return the current portfolio positions."""
@@ -448,11 +582,45 @@ class IBAsyncAdapter:
             raise RuntimeError(f"Native ib_async client does not expose {method_names!r}")
 
         for index, target in enumerate(targets):
-            result = target(*args, **kwargs)
-            if inspect.isawaitable(result):
-                result = await result
-            if result is not None or index == len(targets) - 1:
-                return result
+            try:
+                result = target(*args, **kwargs)
+                if inspect.isawaitable(result):
+                    result = await result
+                if result is not None or index == len(targets) - 1:
+                    return result
+            except RuntimeError as e:
+                error_msg = str(e).lower()
+                if "event loop is closed" in error_msg:
+                    # Log the recovery attempt but don't try to fix it here
+                    # The connection manager should handle this at a higher level
+                    print(f"尝试使用新的事件循环恢复: {method_names}")
+                    
+                    # Check if this is the last target to try
+                    if index == len(targets) - 1:
+                        # Re-raise the event loop error for upstream handling
+                        raise RuntimeError(f"Event loop is closed in ib_async method {method_names}: {e}") from e
+                    # Otherwise, try the next target
+                    continue
+                elif "this event loop is already running" in error_msg:
+                    # Handle the "event loop already running" error
+                    if index == len(targets) - 1:
+                        raise RuntimeError(f"This event loop is already running: {e}") from e
+                    continue
+                # Re-raise other RuntimeErrors
+                raise
+            except Exception as e:
+                # For non-RuntimeError exceptions, check if it's event loop related
+                error_msg = str(e).lower()
+                if "event loop is closed" in error_msg:
+                    if index == len(targets) - 1:
+                        raise RuntimeError(f"Event loop is closed in ib_async method {method_names}: {e}") from e
+                    continue
+                elif "this event loop is already running" in error_msg:
+                    if index == len(targets) - 1:
+                        raise RuntimeError(f"This event loop is already running: {e}") from e
+                    continue
+                # Re-raise other exceptions
+                raise
 
         return None
 

@@ -5,6 +5,12 @@ import signal
 from contextlib import AsyncExitStack
 from typing import Any, Mapping
 
+try:
+    from src.event_loop_manager import setup_event_loop_policy
+    _event_loop_manager_available = True
+except ImportError:
+    _event_loop_manager_available = False
+
 from services.risk import RiskRuntime
 from services.risk.runtime import (
     ConfigRepositoryFactory,
@@ -74,9 +80,20 @@ async def run_service() -> None:
 
             await runtime.start()
             await stop_event.wait()
+    except Exception as e:
+        logger.error(f"Risk service error: {e}")
+        raise
 
 
 def main() -> None:
+    # 设置事件循环策略以提高兼容性
+    if _event_loop_manager_available:
+        try:
+            setup_event_loop_policy()
+            print("Risk service: 事件循环策略设置成功")
+        except Exception as e:
+            print(f"Risk service: 事件循环策略设置失败: {e}")
+    
     asyncio.run(run_service())
 
 

@@ -20,6 +20,7 @@ from loguru import logger
 
 from .utils import now_local
 from .restart_utils import restart_program
+from .event_loop_manager import EventLoopManager, setup_event_loop_policy, get_safe_event_loop
 
 # 为connection模块创建专用logger
 connection_logger = logger.bind(module="connection", request_id="-")
@@ -130,6 +131,15 @@ class ConnectionManager:
     """统一的IBKR连接管理器"""
     
     def __init__(self):
+        # 首先设置事件循环管理器以确保兼容性
+        try:
+            setup_event_loop_policy()
+            self._event_loop_manager = EventLoopManager.get_instance()
+            connection_logger.info("事件循环管理器初始化成功")
+        except Exception as e:
+            connection_logger.warning(f"事件循环管理器初始化失败: {e}")
+            self._event_loop_manager = None
+        
         self._client_factory: Optional[Callable[[], Any]] = None
         if NativeIB is not None:
             self._client_factory = NativeIB
@@ -806,11 +816,55 @@ class ConnectionManager:
                         error_msg = str(conn_error)
                         lower_error = error_msg.lower()
                         if "event loop is closed" in lower_error:
-                            self._last_connect_error = "连接失败: Event loop 已关闭"
-                            connection_logger.error(
-                                "Event loop became unavailable during connect attempt",
+                            # Event loop is closed, need to recreate the client
+                            connection_logger.warning(
+                                "Event loop closed during connect attempt, recreating client",
                                 client_id=try_client_id,
                             )
+                            try:
+                                # Check if we have a running event loop
+                                current_loop = asyncio.get_running_loop()
+                                if current_loop.is_closed():
+                                    self._last_connect_error = "连接失败: Event loop 已关闭且无法恢复"
+                                    connection_logger.error(
+                                        "Current event loop is closed and cannot be recovered",
+                                        client_id=try_client_id,
+                                    )
+                                    raise RuntimeError(self._last_connect_error) from conn_error
+                                else:
+                                    # Recreate the client with the current loop
+                                    connection_logger.info(
+                                        "Recreating ib_async client due to closed event loop",
+                                        client_id=try_client_id,
+                                    )
+                                    # Create a new client instance
+                                    if self._client_factory:
+                                        new_client = self._client_factory()
+                                        self._adapter = IBAsyncAdapter(new_client)
+                                        self.ib = new_client
+                                        # Continue with the new client
+                                        continue
+                                    else:
+                                        self._last_connect_error = "连接失败: 无法创建新的客户端实例"
+                                        connection_logger.error("No client factory available for recreation")
+                                        raise RuntimeError(self._last_connect_error) from conn_error
+                            except RuntimeError:
+                                # No running loop, this is a serious issue
+                                self._last_connect_error = "连接失败: Event loop 已关闭"
+                                connection_logger.error(
+                                    "No running event loop available during connect attempt",
+                                    client_id=try_client_id,
+                                )
+                                raise RuntimeError(self._last_connect_error) from conn_error
+                        elif "this event loop is already running" in lower_error:
+                            # Handle the "event loop already running" error
+                            connection_logger.warning(
+                                "Event loop already running error, this is expected in some environments",
+                                client_id=try_client_id,
+                            )
+                            self._last_connect_error = "连接失败: This event loop is already running"
+                            # This error typically means ib-async can't handle the current event loop setup
+                            # We should not retry as it will likely fail again
                             raise RuntimeError(self._last_connect_error) from conn_error
 
                         client_id_in_use_signals = (
@@ -1058,26 +1112,48 @@ class ConnectionManager:
                         )
 
         def run_worker() -> None:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            self._loop = loop
+            # Create a new event loop for this thread using event loop manager
+            try:
+                if self._event_loop_manager:
+                    loop = self._event_loop_manager.get_or_create_loop()
+                    connection_logger.info("使用事件循环管理器创建事件循环")
+                else:
+                    # Fallback to original method if manager is not available
+                    loop = get_safe_event_loop()
+                    connection_logger.warning("事件循环管理器不可用，使用安全回退方法")
+                
+                asyncio.set_event_loop(loop)
+                self._loop = loop
+            except Exception as e:
+                connection_logger.error(f"创建事件循环失败: {e}")
+                # Final fallback
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                self._loop = loop
 
             task: Optional[asyncio.Task[Any]] = None
             try:
                 task = loop.create_task(connect_worker())
 
                 def stop_loop_on_timeout() -> None:
-                    if not loop.is_running():
-                        return
-                    if self._connection_thread_alive or self.connected:
-                        connection_logger.debug(
-                            "Event loop timeout guard triggered but connection thread is healthy; skipping stop",
+                    try:
+                        if not loop.is_running():
+                            return
+                        if self._connection_thread_alive or self.connected:
+                            connection_logger.debug(
+                                "Event loop timeout guard triggered but connection thread is healthy; skipping stop",
+                            )
+                            return
+                        connection_logger.warning(
+                            "Event loop timeout while waiting for connection; stopping loop",
                         )
-                        return
-                    connection_logger.warning(
-                        "Event loop timeout while waiting for connection; stopping loop",
-                    )
-                    loop.call_soon_threadsafe(loop.stop)
+                        if not loop.is_closed():
+                            loop.call_soon_threadsafe(loop.stop)
+                    except RuntimeError as e:
+                        if "event loop is closed" in str(e).lower():
+                            connection_logger.debug("Event loop already closed during timeout handler")
+                        else:
+                            connection_logger.warning(f"Error in timeout handler: {e}")
 
                 timeout_timer = threading.Timer(30.0, stop_loop_on_timeout)
                 timeout_timer.start()
@@ -1095,13 +1171,21 @@ class ConnectionManager:
                 self._last_connect_error = f"Event loop error: {exc}"
                 self._notify_connect_waiters()
             finally:
+                # Enhanced cleanup with better error handling for Python 3.13
                 try:
                     if task and not task.done():
                         task.cancel()
                         try:
-                            loop.run_until_complete(asyncio.wait_for(task, timeout=1.0))
-                        except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                            # Only run cleanup if loop is still running
+                            if not loop.is_closed():
+                                loop.run_until_complete(asyncio.wait_for(task, timeout=1.0))
+                        except (asyncio.TimeoutError, asyncio.CancelledError):
                             pass
+                        except RuntimeError as e:
+                            if "event loop is closed" not in str(e).lower():
+                                connection_logger.debug(f"Task cleanup error: {e}")
+                        except Exception as e:
+                            connection_logger.debug(f"Unexpected task cleanup error: {e}")
                 except Exception as exc:
                     connection_logger.debug(
                         "Error during task cleanup",
@@ -1109,20 +1193,36 @@ class ConnectionManager:
                     )
                 finally:
                     try:
-                        pending_tasks = [t for t in asyncio.all_tasks(loop) if not t.done()]
-                        if pending_tasks:
-                            connection_logger.debug(
-                                "Cancelling {count} pending tasks",
-                                count=len(pending_tasks),
-                            )
-                            for pending in pending_tasks:
-                                pending.cancel()
-
+                        # Cancel all pending tasks if loop is still available
                         if not loop.is_closed():
-                            loop.close()
+                            try:
+                                pending_tasks = [t for t in asyncio.all_tasks(loop) if not t.done()]
+                                if pending_tasks:
+                                    connection_logger.debug(
+                                        "Cancelling {count} pending tasks",
+                                        count=len(pending_tasks),
+                                    )
+                                    for pending in pending_tasks:
+                                        pending.cancel()
+                                    
+                                    # Give tasks a chance to complete cancellation
+                                    try:
+                                        loop.run_until_complete(asyncio.gather(*pending_tasks, return_exceptions=True))
+                                    except Exception:
+                                        pass  # Ignore errors during final cleanup
+                            except RuntimeError as e:
+                                if "event loop is closed" not in str(e).lower():
+                                    connection_logger.debug(f"Error getting pending tasks: {e}")
+
+                        # Close the loop safely
+                        if not loop.is_closed():
+                            try:
+                                loop.close()
+                            except Exception as e:
+                                connection_logger.debug(f"Error closing loop: {e}")
                     except Exception as exc:
                         connection_logger.debug(
-                            "Error closing loop",
+                            "Error in final cleanup",
                             error=str(exc),
                         )
                     finally:

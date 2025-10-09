@@ -8,6 +8,12 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import Any, Mapping
 
+try:
+    from src.event_loop_manager import setup_event_loop_policy
+    _event_loop_manager_available = True
+except ImportError:
+    _event_loop_manager_available = False
+
 from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel, Field
 
@@ -362,6 +368,14 @@ def create_app(*, health_interval: float = HEALTH_INTERVAL) -> FastAPI:
 
 def main() -> None:  # pragma: no cover - CLI entrypoint
     import uvicorn
+    
+    # 设置事件循环策略以提高兼容性
+    if _event_loop_manager_available:
+        try:
+            setup_event_loop_policy()
+            print("Connection Control service: 事件循环策略设置成功")
+        except Exception as e:
+            print(f"Connection Control service: 事件循环策略设置失败: {e}")
 
     app = create_app()
     uvicorn.run(app, host="0.0.0.0", port=8056)
