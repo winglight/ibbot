@@ -556,7 +556,16 @@ class IBAPIController(EWrapper):
         try:
             if not account_code:
                 remaining = timeout - (self._loop.time() - start_time)
-                account_code = await self._await_default_account(remaining)
+                try:
+                    account_code = await self._await_default_account(remaining)
+                except asyncio.TimeoutError:
+                    # ``reqAccountUpdates`` accepts an empty string to request the
+                    # default account. When TWS/IB Gateway is slow to publish the
+                    # managed account list we still want to issue the subscription
+                    # instead of failing fast so the streamed snapshot can arrive
+                    # once the backend is ready.
+                    account_code = ""
+                    start_time = self._loop.time()
 
             request.account = account_code
 
