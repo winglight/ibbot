@@ -14,7 +14,7 @@ import os.path
 
 from ibapi import wrapper
 from ibapi.client import EClient
-from ibapi.utils import getTimeStrFromMillis, longMaxString, decimalMaxString
+from ibapi.utils import getTimeStrFromMillis, longMaxString, decimalMaxString, getEnumTypeName
 from ibapi.utils import iswrapper
 
 # types
@@ -129,6 +129,7 @@ class TestClient(EClient):
             if idx >= 0:
                 sign = -1 if 'cancel' in methName else 1
                 self.reqId2nReq[sign * args[idx]] += 1
+            # print("methName", methName, "args", args, "kwargs", kwargs)
             return fn(*args, **kwargs)
 
         return countReqId_
@@ -266,35 +267,35 @@ class TestApp(TestWrapper, TestClient):
             self.reqGlobalCancel(OrderSamples.CancelOrderEmpty())
         else:
             print("Executing requests")
-            #self.reqGlobalCancel(OrderSamples.CancelOrderEmpty()))
-            #self.marketDataTypeOperations()
-            #self.accountOperations_req()
-            #self.tickDataOperations_req()
-            #self.tickOptionComputations_req()
-            #self.marketDepthOperations_req()
-            #self.realTimeBarsOperations_req()
-            #self.historicalDataOperations_req()
-            #self.optionsOperations_req()
-            #self.marketScannersOperations_req()
-            #self.fundamentalsOperations_req()
-            #self.bulletinsOperations_req()
-            #self.contractOperations()
-            #self.newsOperations_req()
-            #self.miscelaneousOperations()
-            #self.linkingOperations()
-            #self.financialAdvisorOperations()
-            self.orderOperations_req()
-            #self.rerouteCFDOperations()
-            #self.marketRuleOperations()
-            #self.pnlOperations_req()
-            #self.histogramOperations_req()
-            #self.continuousFuturesOperations_req()
-            #self.historicalTicksOperations()
-            #self.tickByTickOperations_req()
-            #self.whatIfOrderOperations()
-            #self.wshCalendarOperations()
-            #self.algoSamples()
-            #self.conditionSamples()
+            self.reqGlobalCancel(OrderSamples.CancelOrderEmpty())
+            self.marketDataTypeOperations()
+            self.accountOperations_req()
+            self.tickDataOperations_req()
+            self.tickOptionComputations_req()
+            self.marketDepthOperations_req()
+            self.realTimeBarsOperations_req()
+            self.historicalDataOperations_req()
+            self.optionsOperations_req()
+            self.marketScannersOperations_req()
+            self.fundamentalsOperations_req()
+            self.bulletinsOperations_req()
+            self.contractOperations()
+            self.newsOperations_req()
+            self.miscelaneousOperations()
+            self.linkingOperations()
+            self.financialAdvisorOperations()
+            # self.orderOperations_req()
+            self.rerouteCFDOperations()
+            self.marketRuleOperations()
+            self.pnlOperations_req()
+            self.histogramOperations_req()
+            self.continuousFuturesOperations_req()
+            self.historicalTicksOperations()
+            self.tickByTickOperations_req()
+            self.whatIfOrderOperations()
+            self.wshCalendarOperations()
+            self.algoSamples()
+            self.conditionSamples()
 
             
             print("Executing requests ... finished")
@@ -309,22 +310,22 @@ class TestApp(TestWrapper, TestClient):
 
     def stop(self):
         print("Executing cancels")
-        #self.orderOperations_cancel()
-        #self.accountOperations_cancel()
-        #self.tickDataOperations_cancel()
-        #self.tickOptionComputations_cancel()
-        #self.marketDepthOperations_cancel()
-        #self.realTimeBarsOperations_cancel()
-        #self.historicalDataOperations_cancel()
-        #self.optionsOperations_cancel()
-        #self.marketScanners_cancel()
-        #self.fundamentalsOperations_cancel()
-        #self.bulletinsOperations_cancel()
-        #self.newsOperations_cancel()
-        #self.pnlOperations_cancel()
-        #self.histogramOperations_cancel()
-        #self.continuousFuturesOperations_cancel()
-        #self.tickByTickOperations_cancel()
+        self.orderOperations_cancel()
+        self.accountOperations_cancel()
+        self.tickDataOperations_cancel()
+        self.tickOptionComputations_cancel()
+        self.marketDepthOperations_cancel()
+        self.realTimeBarsOperations_cancel()
+        self.historicalDataOperations_cancel()
+        self.optionsOperations_cancel()
+        self.marketScanners_cancel()
+        self.fundamentalsOperations_cancel()
+        self.bulletinsOperations_cancel()
+        self.newsOperations_cancel()
+        self.pnlOperations_cancel()
+        self.histogramOperations_cancel()
+        self.continuousFuturesOperations_cancel()
+        self.tickByTickOperations_cancel()
         print("Executing cancels ... finished")
 
     def nextOrderId(self):
@@ -2199,7 +2200,7 @@ def main():
     # cmdLineParser.add_option("-c", action="store_True", dest="use_cache", default = False, help = "use the cache")
     # cmdLineParser.add_option("-f", action="store", type="string", dest="file", default="", help="the input file")
     cmdLineParser.add_argument("-p", "--port", action="store", type=int,
-                               dest="port", default=7496, help="The TCP port to use")
+                               dest="port", default=4002, help="The TCP port to use")
     cmdLineParser.add_argument("-C", "--global-cancel", action="store_true",
                                dest="global_cancel", default=False,
                                help="whether to trigger a globalCancel req")

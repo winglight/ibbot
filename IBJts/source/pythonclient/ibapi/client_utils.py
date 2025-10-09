@@ -64,7 +64,7 @@ def createContractProto(contract: Contract, order: Order) -> ContractProto:
     if contract.right: contractProto.right = contract.right
     if contract.multiplier: contractProto.multiplier = float(contract.multiplier)
     if contract.exchange: contractProto.exchange = contract.exchange
-    if contract.primaryExchange: contractProto.primaryExchange = contract.primaryExchange
+    if contract.primaryExchange: contractProto.primaryExch = contract.primaryExchange
     if contract.currency: contractProto.currency = contract.currency
     if contract.localSymbol: contractProto.localSymbol = contract.localSymbol
     if contract.tradingClass: contractProto.tradingClass = contract.tradingClass
