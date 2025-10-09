@@ -168,7 +168,20 @@ async def enqueue_ib_command(
     redis: Redis | None = None,
     queue_key: str = DEFAULT_COMMAND_QUEUE,
 ) -> int:
-    raise LegacyIBCommandUnavailableError()
+    """Append *command* to the legacy IB command queue.
+
+    The historical :mod:`ib_command` service has been decommissioned, but we
+    still persist queued commands so that operational tooling can observe queue
+    depth and bespoke consumers can continue to operate.  Persisting the payload
+    instead of raising keeps the call sites working while signalling that the
+    legacy pipeline is effectively a no-op unless an external worker consumes
+    the queue.
+    """
+
+    client = await _ensure_client(redis)
+    payload = json.dumps(dict(command), ensure_ascii=False)
+    result = await client.rpush(queue_key, payload)
+    return int(result or 0)
 
 
 async def request_ib_command(

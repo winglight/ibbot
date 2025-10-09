@@ -6,7 +6,8 @@ import asyncio
 import os
 import time
 from datetime import datetime, timedelta
-from typing import Any, Dict, Mapping, Optional
+from decimal import Decimal
+from typing import TYPE_CHECKING, Any, Dict, Mapping, Optional
 
 from loguru import logger
 
@@ -17,11 +18,10 @@ from .account_snapshot_cache import (
 )
 from .utils import now_local, to_local_iso
 from src.ibbot import update_service_health
-from src.ibbot.redis import (
-    LegacyIBCommandUnavailableError,
-    get_redis_client,
-    request_ib_command,
-)
+from src.ibbot.redis import LegacyIBCommandUnavailableError, get_redis_client
+
+if TYPE_CHECKING:  # pragma: no cover - optional dependency for type checking
+    from services.account.ib_client import ServiceIBClient
 
 
 def _read_interval_env(name: str, default: int) -> int:
@@ -33,6 +33,18 @@ def _read_interval_env(name: str, default: int) -> int:
 
 
 snapshot_service_logger = logger.bind(module="account_snapshot_service", request_id="-")
+
+ACCOUNT_SUMMARY_TAGS: tuple[str, ...] = (
+    "AccountCode",
+    "AccountType",
+    "TotalCashValue",
+    "AvailableFunds",
+    "BuyingPower",
+    "NetLiquidation",
+    "UnrealizedPnL",
+    "RealizedPnL",
+)
+ACCOUNT_SUMMARY_TAG_STRING = ",".join(ACCOUNT_SUMMARY_TAGS)
 
 
 class AccountSnapshotService:
@@ -85,6 +97,12 @@ class AccountSnapshotService:
         self._last_positions_refresh: Optional[datetime] = None
         self._health_redis: Any = None
         self._health_last_error: str = ""
+        self._ib_client: "ServiceIBClient" | None = None
+
+    def set_ib_client(self, client: "ServiceIBClient" | None) -> None:
+        """Inject the service-scoped IB client used for direct requests."""
+
+        self._ib_client = client
 
     async def _ensure_health_client(self) -> Any | None:
         if self._health_redis is not None:
@@ -130,6 +148,155 @@ class AccountSnapshotService:
             metrics=metrics,
             logger=snapshot_service_logger,
         )
+
+    def _require_ib_client(self) -> "ServiceIBClient":
+        client = self._ib_client
+        if client is None:
+            raise LegacyIBCommandUnavailableError("Account IB client unavailable")
+        return client
+
+    @staticmethod
+    def _coerce_float(value: Any) -> float:
+        if isinstance(value, Decimal):
+            return float(value)
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+
+    @staticmethod
+    def _coerce_optional_float(value: Any) -> float | None:
+        if isinstance(value, Decimal):
+            return float(value)
+        if value in (None, ""):
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _timestamp_to_iso(value: Any) -> str:
+        if isinstance(value, datetime):
+            return to_local_iso(value)
+        if isinstance(value, str) and value:
+            return value
+        return to_local_iso(now_local())
+
+    async def _dispatch_command_via_client(
+        self,
+        method: str,
+        *,
+        args: list[Any],
+        kwargs: dict[str, Any],
+    ) -> Dict[str, Any]:
+        client = self._require_ib_client()
+        _ = args  # arguments are retained for parity with legacy pipeline
+        timeout = float(kwargs.pop("timeout", self._request_timeout_seconds))
+
+        if method == "get_account_info":
+            result = await self._fetch_account_info(client, timeout=timeout)
+        elif method == "get_positions":
+            result = await self._fetch_positions(client, timeout=timeout)
+        else:
+            raise LegacyIBCommandUnavailableError(
+                f"Unsupported ib_command method '{method}' for account snapshots"
+            )
+
+        command_id = kwargs.get("command_id")
+        if not command_id:
+            command_id = f"local:{method}:{int(time.time() * 1000)}"
+        return {
+            "status": "success",
+            "command_id": command_id,
+            "result": result,
+            "source": IB_COMMAND_SOURCE,
+        }
+
+    async def _fetch_account_info(
+        self,
+        client: "ServiceIBClient",
+        *,
+        timeout: float,
+    ) -> Dict[str, Any]:
+        summary = await client.fetch_account_summary(
+            ACCOUNT_SUMMARY_TAG_STRING,
+            timeout=timeout,
+        )
+        accounts = summary.get("accounts") or {}
+        currencies = summary.get("currencies") or {}
+
+        account_id: str | None = None
+        account_values: Mapping[str, Any] = {}
+        for candidate, values in accounts.items():
+            account_id = candidate
+            account_values = values or {}
+            break
+
+        info: Dict[str, Any] = {}
+        if account_id:
+            info["account_id"] = account_id
+
+        account_type = account_values.get("AccountType")
+        if account_type is not None:
+            info["account_type"] = str(account_type)
+
+        info["total_cash"] = self._coerce_float(account_values.get("TotalCashValue"))
+        info["available_funds"] = self._coerce_float(account_values.get("AvailableFunds"))
+        info["buying_power"] = self._coerce_float(account_values.get("BuyingPower"))
+        info["net_liquidation"] = self._coerce_float(account_values.get("NetLiquidation"))
+        info["unrealized_pnl"] = (
+            self._coerce_optional_float(account_values.get("UnrealizedPnL")) or 0.0
+        )
+        info["realized_pnl"] = (
+            self._coerce_optional_float(account_values.get("RealizedPnL")) or 0.0
+        )
+
+        base_currency = None
+        currency_map = currencies.get(account_id or "")
+        if isinstance(currency_map, Mapping):
+            base_currency = currency_map.get("NetLiquidation") or currency_map.get(
+                "TotalCashValue"
+            )
+        if isinstance(base_currency, str) and base_currency:
+            info["base_currency"] = base_currency
+
+        received_at = summary.get("received_at")
+        timestamp = self._timestamp_to_iso(received_at)
+        info["received_at"] = timestamp
+        info.setdefault("updated_at", timestamp)
+        return info
+
+    async def _fetch_positions(
+        self,
+        client: "ServiceIBClient",
+        *,
+        timeout: float,
+    ) -> list[Dict[str, Any]]:
+        events = await client.fetch_positions(timeout=timeout)
+        payload: list[Dict[str, Any]] = []
+        for event in events:
+            payload.append(self._normalise_position_event(event))
+        return payload
+
+    def _normalise_position_event(self, event: Any) -> Dict[str, Any]:
+        if hasattr(event, "model_dump"):
+            data = event.model_dump()
+        elif isinstance(event, Mapping):
+            data = dict(event)
+        else:
+            data = {}
+
+        normalised: Dict[str, Any] = {}
+        for key, value in data.items():
+            if isinstance(value, Decimal):
+                normalised[key] = float(value)
+            elif isinstance(value, datetime):
+                normalised[key] = self._timestamp_to_iso(value)
+            else:
+                normalised[key] = value
+        normalised.setdefault("timestamp", self._timestamp_to_iso(data.get("timestamp")))
+        return normalised
 
     # ------------------------------------------------------------------
     # Lifecycle management
@@ -615,20 +782,18 @@ class AccountSnapshotService:
         """Execute an IB command and normalise the result for callers."""
 
         started = time.perf_counter()
-        arguments = args or []
         keyword_arguments = dict(kwargs or {})
         try:
-            record = await request_ib_command(
+            record = await self._dispatch_command_via_client(
                 method,
-                args=arguments,
+                args=list(args or []),
                 kwargs=keyword_arguments,
-                timeout=self._request_timeout_seconds,
             )
         except LegacyIBCommandUnavailableError as exc:
             duration = time.perf_counter() - started
             message = str(exc)
             snapshot_service_logger.warning(
-                "Legacy ib_command pipeline unavailable for method %s (duration=%.3fs)",
+                "Account IB client unavailable for method %s (duration=%.3fs)",
                 method,
                 duration,
             )
@@ -674,6 +839,9 @@ class AccountSnapshotService:
             raise
 
         duration = time.perf_counter() - started
+        record.setdefault("duration", duration)
+        record.setdefault("command_id", f"local:{method}")
+        record.setdefault("source", IB_COMMAND_SOURCE)
         command_id = str(record.get("command_id") or "")
         result_payload = record.get("result")
         snapshot_service_logger.debug(
@@ -690,4 +858,4 @@ class AccountSnapshotService:
         }
 
 
-IB_COMMAND_SOURCE = "ib-command:ibapi-controller"
+IB_COMMAND_SOURCE = "service:account:ib-client"
