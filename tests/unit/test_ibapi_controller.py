@@ -478,6 +478,30 @@ async def test_request_account_updates_uses_default_account_when_missing() -> No
 
 
 @pytest.mark.asyncio
+async def test_request_account_updates_falls_back_without_managed_accounts() -> None:
+    controller = IBAPIController(loop=asyncio.get_running_loop())
+
+    await controller.connect()
+    await controller.wait_until_connected()
+
+    task = asyncio.create_task(controller.request_account_updates(timeout=1))
+    await asyncio.sleep(0)
+
+    client = controller.client
+    contract = Contract(symbol="AAPL", secType="STK", exchange="SMART", currency="USD")
+    client.emit_account_value("NetLiquidation", "15000", "USD", "DU123")
+    client.emit_portfolio_update(contract, 10.0, 150.0, 1500.0, 1200.0, 300.0, 0.0, "DU123")
+    client.emit_account_download_end("DU123")
+    await asyncio.sleep(0)
+
+    snapshot = await task
+    assert snapshot["account"] == "DU123"
+    assert client._account_updates_subscribed is False
+
+    await controller.disconnect()
+
+
+@pytest.mark.asyncio
 async def test_request_account_updates_times_out_without_managed_accounts() -> None:
     controller = IBAPIController(loop=asyncio.get_running_loop())
 
