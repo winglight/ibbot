@@ -523,78 +523,126 @@ class IBAsyncAdapter:
         return result if result is not None else ()
 
     async def request_account_updates(self, account: Optional[str] = None) -> Any:
-        """Fetch the latest account summary for ``account``."""
+        """Fetch the latest account summary for ``account``.
 
-        # For ib_async, we need to handle different method signatures
-        # accountSummary() - no parameters needed
-        # reqAccountSummary(reqId, groupName, tags) - requires specific parameters
-        
-        try:
-            # First try the high-level accountSummary method (no parameters needed)
-            method_names = (
-                "accountSummaryAsync",
-                "account_summary_async",
-                "account_summary",
-                "accountSummary",
-            )
-            if account is None:
-                return await self._invoke(method_names)
-            return await self._invoke(method_names, account)
-        except Exception as e:
-            # If high-level method fails, try alternative approaches
+        The real ``ib_async`` implementation mirrors ``ib_insync`` where the
+        ``accountSummary`` helpers expect an account identifier when multiple
+        accounts are available.  Production logs showed that calling the helper
+        without an explicit account resulted in empty payloads which in turn
+        triggered repeated refresh failures.  We therefore resolve the default
+        managed account before issuing the summary request and gracefully fall
+        back to other helpers when necessary.
+        """
+
+        async def _resolve_account() -> Optional[str]:
+            if account:
+                return account
             try:
-                # Try accountValues() method which is more commonly available
-                method_names = (
-                    "accountValuesAsync",
-                    "account_values_async",
-                    "account_values",
-                    "accountValues",
+                managed_accounts = await self._invoke(
+                    (
+                        "managedAccountsAsync",
+                        "managed_accounts_async",
+                        "managed_accounts",
+                        "managedAccounts",
+                    )
                 )
-                if account is None:
-                    return await self._invoke(method_names)
-                return await self._invoke(method_names, account)
-            except Exception as values_e:
-                # If accountValues also fails, try the low-level reqAccountSummary
-                # but handle it more carefully
-                try:
-                    import ib_async
-                    client = self._client
-                    
-                    # Check if we can access the low-level client
-                    if hasattr(client, 'client') and hasattr(client.client, 'reqAccountSummary'):
-                        # For reqAccountSummary, we need to call it without parameters
-                        # and let ib_async handle the internal parameter management
-                        return await self._invoke(("reqAccountSummary",))
-                    elif hasattr(client, 'reqAccountSummary'):
-                        # Direct access to reqAccountSummary method
-                        return await self._invoke(("reqAccountSummary",))
-                    else:
-                        # Final fallback - try any available account-related methods
-                        fallback_methods = (
-                            "portfolioAsync",
-                            "portfolio_async",
-                            "portfolio",
-                            "positionsAsync",
-                            "positions_async",
-                            "positions",
-                            "reqPositionsAsync",
-                            "req_positions_async",
-                            "reqPositions",
-                        )
-                        return await self._invoke(fallback_methods)
-                        
-                except Exception as inner_e:
-                    # Log all errors for debugging
-                    import logging
-                    logging.error(f"Failed to request account updates: original error: {e}, accountValues error: {values_e}, fallback error: {inner_e}")
-                    # Return empty list instead of raising to prevent cascading failures
-                    return []
+            except Exception:
+                return None
+
+            if not managed_accounts:
+                return None
+            if isinstance(managed_accounts, (list, tuple)):
+                return next((str(item) for item in managed_accounts if item), None)
+            if isinstance(managed_accounts, str):
+                # ``managedAccounts`` commonly returns a comma separated string
+                # when only the legacy API is available.
+                first = managed_accounts.split(",")[0].strip()
+                return first or None
+            return None
+
+        account_id = await _resolve_account()
+
+        # Prefer the high level accountSummary helpers.
+        summary_methods = (
+            "accountSummaryAsync",
+            "account_summary_async",
+            "account_summary",
+            "accountSummary",
+        )
+
+        try:
+            if account_id:
+                result = await self._invoke(summary_methods, account_id)
+            else:
+                result = await self._invoke(summary_methods)
+            if result:
+                return result
+        except Exception:
+            # Fall back to other helpers when the summary helpers are not
+            # exposed by the backend.
+            pass
+
+        value_methods = (
+            "accountValuesAsync",
+            "account_values_async",
+            "account_values",
+            "accountValues",
+        )
+
+        try:
+            if account_id:
+                result = await self._invoke(value_methods, account_id)
+            else:
+                result = await self._invoke(value_methods)
+            if result:
+                return result
+        except Exception:
+            pass
+
+        # As a final attempt, try triggering the low level request which relies
+        # on callbacks populating the in-memory cache used by ``portfolio`` /
+        # ``positions`` helpers.
+        try:
+            await self._invoke(("reqAccountSummary",))
+        except Exception:
+            return []
+
+        try:
+            return await self._invoke(summary_methods)
+        except Exception:
+            return []
 
     async def request_portfolio(self) -> Sequence[Any]:
         """Return the current portfolio positions."""
 
-        result = await self._invoke(("portfolio", "reqPositions"))
-        return result if result is not None else ()
+        method_candidates = (
+            "positionsAsync",
+            "positions_async",
+            "positions",
+            "portfolioAsync",
+            "portfolio_async",
+            "portfolio",
+        )
+
+        result = await self._invoke(method_candidates)
+        if result:
+            return result
+
+        # When direct helpers return nothing, trigger a refresh via the legacy
+        # ``reqPositions`` call before reading the cached snapshot again.
+        try:
+            await self._invoke(
+                (
+                    "reqPositionsAsync",
+                    "req_positions_async",
+                    "reqPositions",
+                )
+            )
+        except Exception:
+            return ()
+
+        refreshed = await self._invoke(method_candidates)
+        return refreshed if refreshed is not None else ()
 
     async def ensure_connected(self) -> None:
         """Idempotently guarantee that the adapter maintains a live connection."""
