@@ -276,16 +276,39 @@ class IBAsyncAdapter:
         if not client:
             return
 
-        await self._invoke(
-            (
-                "disconnect",
-                "disconnectAsync",
-                "disconnect_async",
-                "close",
-                "closeAsync",
-                "close_async",
+        try:
+            await self._invoke(
+                (
+                    "disconnect",
+                    "disconnectAsync",
+                    "disconnect_async",
+                    "close",
+                    "closeAsync",
+                    "close_async",
+                )
             )
-        )
+        finally:
+            # ``ib_async`` retains internal reader tasks even after ``disconnect``
+            # succeeds.  Reuse of the same client instance can therefore leak the
+            # half-closed socket and cause subsequent ``connect`` calls to hang
+            # (observed as timeouts once the background services restart).  The
+            # simple test client (`python test.py`) instantiates a fresh ``IB``
+            # object for every connection, so it never hits this behaviour.  The
+            # production services, however, keep the adapter instance around and
+            # would attempt to reuse the stale client.
+            #
+            # To mirror the working behaviour we dispose of the native client on
+            # every disconnect so that the next ``connect`` call spins up a brand
+            # new ``IB`` instance.  This also clears cached connection arguments
+            # because they are tied to the previous session.
+            self._client = None
+            self._connection_args = {}
+            try:
+                self.wrapper.bind_client(None)
+            except Exception:
+                # ``bind_client`` tolerates ``None`` but keep the guard defensive
+                # in case the wrapper implementation changes.
+                pass
 
     def is_connected(self) -> bool:
         """Return ``True`` if the adapter currently has an active connection."""
