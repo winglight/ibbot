@@ -60,7 +60,7 @@ class BaseServiceIBClient(EWrapper, EClient):
 
     async def connect(self, *, timeout: float | None = None) -> None:
         if self.isConnected():
-            logger.debug("%s already connected", self._service_name)
+            logger.debug("{} already connected", self._service_name)
             return
 
         loop = asyncio.get_running_loop()
@@ -80,7 +80,7 @@ class BaseServiceIBClient(EWrapper, EClient):
         client_id = int(os.getenv(self._client_id_env, "0"))
 
         logger.info(
-            "%s connecting to %s:%s with client id %s",
+            "{} connecting to {}:{} with client id {}",
             self._service_name,
             host,
             port,
@@ -90,10 +90,22 @@ class BaseServiceIBClient(EWrapper, EClient):
         try:
             # Set connection options like the working reference code
             self.setConnectOptions("+PACEAPI")
-            EClient.connect(self, host, port, client_id)
+            connected = EClient.connect(self, host, port, client_id)
         except Exception:
-            logger.exception("%s failed to initiate connection", self._service_name)
+            logger.exception("{} failed to initiate connection", self._service_name)
             raise
+
+        if not connected:
+            logger.error(
+                "{} failed to open socket to {}:{} (client id {})",
+                self._service_name,
+                host,
+                port,
+                client_id,
+            )
+            raise ConnectionError(
+                f"{self._service_name} failed to connect to {host}:{port}"
+            )
 
         self._reader = EReader(self, self.msg_queue)
         self._reader_thread = threading.Thread(
@@ -113,7 +125,7 @@ class BaseServiceIBClient(EWrapper, EClient):
         try:
             await self._wait_for_ready(ready_event, timeout or self.DEFAULT_TIMEOUT)
         except Exception:
-            logger.exception("%s connection handshake timed out", self._service_name)
+            logger.exception("{} connection handshake timed out", self._service_name)
             await self.async_disconnect()
             raise
 
@@ -128,17 +140,17 @@ class BaseServiceIBClient(EWrapper, EClient):
         self._cancel_waiters()
 
         if self.isConnected():
-            logger.info("%s disconnecting from IB", self._service_name)
+            logger.info("{} disconnecting from IB", self._service_name)
         reader = self._reader
         if reader is not None and hasattr(reader, "stop"):
             try:
                 reader.stop()
             except Exception:  # pragma: no cover - defensive guard
-                logger.exception("%s failed to stop EReader thread", self._service_name)
+                logger.exception("{} failed to stop EReader thread", self._service_name)
         try:
             EClient.disconnect(self)
         except Exception:
-            logger.exception("%s error during disconnect", self._service_name)
+            logger.exception("{} error during disconnect", self._service_name)
 
         self._join_threads()
 
@@ -168,7 +180,7 @@ class BaseServiceIBClient(EWrapper, EClient):
 
     def nextValidId(self, orderId: int) -> None:  # noqa: N802 - IB API signature
         super().nextValidId(orderId)
-        logger.debug("%s received nextValidId=%s", self._service_name, orderId)
+        logger.debug("{} received nextValidId={}", self._service_name, orderId)
         waiters: list[asyncio.Future[int]]
         with self._id_guard:
             self._next_valid_id = orderId
@@ -213,7 +225,7 @@ class BaseServiceIBClient(EWrapper, EClient):
 
             _EClient.run(self)
         except Exception:
-            logger.exception("%s IB client pump failed", self._service_name)
+            logger.exception("{} IB client pump failed", self._service_name)
         finally:
             self._stop_event.set()
             loop = self._loop
@@ -239,7 +251,7 @@ class BaseServiceIBClient(EWrapper, EClient):
         loop = self._loop
         if not queue_ or not loop:
             logger.debug(
-                "%s dropping event %s because callback queue unavailable",
+                "{} dropping event {} because callback queue unavailable",
                 self._service_name,
                 event_type,
             )
