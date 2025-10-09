@@ -33,7 +33,7 @@ IBBot 是一个围绕 Interactive Brokers API 构建的全栈交易与风险管�
        ▼                        ▼
 ┌──────────────┐      ┌────────────────────┐
 │ IBKR Client  │      │ Services / Cache   │
-│ (ib_insync)  │      │ HTTP APIs + Redis  │
+│ (ib_async)   │      │ HTTP APIs + Redis  │
 └──────────────┘      └────────────────────┘
 ```
 
@@ -92,6 +92,9 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+> ℹ️ **ib_async 迁移提示**：安装 `requirements.txt` 会拉取 `ib-async` 及其基于 `asyncio` 的运行时。若部署在精简容器中，请提前确认 `libstdc++`
+> 版本满足轮子依赖，或执行 `python -m compileall src/ib_async_adapter.py` 验证兼容性。
+
 ### 2. 配置环境变量
 
 根目录提供 `.env.example` 模板，包含全部默认值及注释。首次启动前建议：
@@ -102,6 +105,12 @@ cp .env.example .env.local  # 本地覆写，保存凭据与私有配置
 ```
 
 `src.config.load_project_env` 会同时加载 `.env` 与 `.env.local`（若存在），因此请将敏感配置写入 `.env.local` 并按需覆盖 `.env` 中的公共默认值。
+
+### ⚙️ ib_async 运维须知
+
+- **统一事件循环**：核心服务通过 `IBAsyncAdapter` 共享一个 `asyncio` 事件循环。部署时请避免在同一进程内强制切换 loop 实现（例如打开 `uvloop`），以免破坏 IBKR 会话。
+- **离线调试**：若无法访问真实 IBKR，可导入 `test.ib_insync_stub.IB` 模拟 `ib_async` 行为；`diagnose_connection.py` 会在实际库缺失时自动回退到该 stub。
+- **脚本自检**：`start_with_env.py` 与 `start_service.sh` 会在启动前检查 `python-dotenv` 与环境变量配置，执行 `./start_service.sh list` 可快速确认依赖与配置状态。
 
 常用环境变量速查表：
 

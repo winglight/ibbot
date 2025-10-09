@@ -2,8 +2,24 @@
 """
 测试订单列表错误修复的脚本
 """
-import requests
 import json
+
+try:  # pragma: no cover - optional dependency for manual smoke tests
+    import requests
+except ModuleNotFoundError:  # pragma: no cover - handled for pytest collection
+    requests = None
+
+try:  # pragma: no cover - pytest may be unavailable when executed as a script
+    import pytest
+except ModuleNotFoundError:  # pragma: no cover - executed outside pytest
+    pytest = None
+else:  # pragma: no cover - exercised during automated testing
+    pytestmark = pytest.mark.skip(
+        reason="Manual integration script requiring requests; skipped during automated tests."
+    )
+
+if requests is None and pytest is not None:  # pragma: no cover - skip pytest collection
+    pytest.skip("requests is required for manual integration script", allow_module_level=True)
 
 def get_auth_token():
     """获取认证token"""

@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import atexit
 import os
+from contextlib import suppress
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import datetime
 from threading import Lock
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
@@ -27,9 +27,15 @@ _CANCEL_TIMEOUT_SEC = 5.0
 
 @dataclass
 class _DepthStream:
-    ticker: Any
+    """Container for active depth subscriptions."""
+
+    ticker: Optional[Any]
     contract: Any
     callbacks: List[Callable]
+    handler: Optional[Callable[..., None]] = None
+    event: Optional[Any] = None
+    use_adapter: bool = False
+    adapter_stream: Optional[Any] = None
 
 
 class DepthSubscriber:
@@ -72,6 +78,61 @@ class DepthSubscriber:
         self._last_error = message
         self._last_error_status = status
 
+    @staticmethod
+    def _resolve_depth_event(ticker: Optional[Any]) -> Optional[Any]:
+        if not ticker:
+            return None
+        for attr in ("dom_update_event", "domUpdateEvent", "updateEvent", "update_event"):
+            event = getattr(ticker, attr, None)
+            if event is not None:
+                return event
+        return None
+
+    def _detach_stream_handlers(self, stream: _DepthStream) -> None:
+        handler = stream.handler
+        event = stream.event
+        if handler and event:
+            try:
+                event -= handler  # type: ignore[operator]
+            except TypeError:
+                removed = False
+                if hasattr(event, "remove"):
+                    with suppress(ValueError):
+                        event.remove(handler)
+                        removed = True
+                if not removed and hasattr(event, "discard"):
+                    try:
+                        event.discard(handler)  # type: ignore[attr-defined]
+                        removed = True
+                    except Exception:
+                        pass
+                if not removed and hasattr(event, "clear"):
+                    try:
+                        event.clear()
+                    except Exception:
+                        pass
+
+        if not stream.use_adapter and stream.ticker is not None:
+            update_event = getattr(stream.ticker, "updateEvent", None)
+            if update_event is not None and handler and update_event is not event:
+                try:
+                    update_event -= handler  # type: ignore[operator]
+                except TypeError:
+                    if hasattr(update_event, "remove"):
+                        with suppress(ValueError):
+                            update_event.remove(handler)
+                    elif hasattr(update_event, "discard"):
+                        try:
+                            update_event.discard(handler)  # type: ignore[attr-defined]
+                        except Exception:
+                            pass
+            try:
+                update_event = getattr(stream.ticker, "updateEvent", None)
+                if update_event is not None and hasattr(update_event, "clear"):
+                    update_event.clear()
+            except Exception:
+                pass
+
     # ------------------------------------------------------------------
     def start_depth_stream(
         self,
@@ -113,6 +174,17 @@ class DepthSubscriber:
             _depth_logger.error(reason)
             return False
 
+        adapter = getattr(self.connection_manager, "_adapter", None)
+        adapter_connected = False
+        if adapter is not None:
+            try:
+                adapter_connected = bool(adapter.is_connected())
+            except Exception as exc:  # pragma: no cover - diagnostic only
+                _depth_logger.debug(
+                    "Failed to query adapter connection state", error=str(exc)
+                )
+        use_adapter = adapter is not None and adapter_connected
+
         callbacks: List[Callable] = [callback]
         prior_stream: Optional[_DepthStream] = None
 
@@ -142,91 +214,140 @@ class DepthSubscriber:
                     callbacks.append(callback)
 
         if prior_stream:
-            def _cancel_previous():
-                ib = self.connection_manager.get_ib_instance()
-                if ib:
-                    try:
-                        ib.cancelMktDepth(prior_stream.contract)
-                    except Exception as e:
-                        _depth_logger.error(
-                            f"cancelMktDepth error while restarting {symbol}: {e}"
-                        )
+            self._detach_stream_handlers(prior_stream)
 
-            try:
-                self.connection_manager.run_in_connection_thread(
-                    _cancel_previous,
-                    timeout=_CANCEL_TIMEOUT_SEC,
-                )
-            except Exception as exc:
-                _depth_logger.warning(
-                    f"Failed to cancel previous depth stream for {symbol}: {exc}"
-                )
-            try:
-                prior_stream.ticker.updateEvent.clear()
-            except Exception:
-                pass
+            adapter_for_cancel = getattr(self.connection_manager, "_adapter", None)
+            if prior_stream.use_adapter and prior_stream.adapter_stream and adapter_for_cancel:
+                try:
+                    self.connection_manager.run_async_in_connection_thread(
+                        adapter_for_cancel.cancel_market_depth(prior_stream.adapter_stream),
+                        timeout=_CANCEL_TIMEOUT_SEC,
+                    )
+                except Exception as exc:
+                    _depth_logger.warning(
+                        f"Failed to cancel adapter depth stream for {symbol}: {exc}"
+                    )
+            else:
 
-        def _subscribe():
-            ib = self.connection_manager.get_ib_instance()
-            if not ib:
-                return None
+                def _cancel_previous():
+                    ib = self.connection_manager.get_ib_instance()
+                    if ib:
+                        try:
+                            ib.cancelMktDepth(prior_stream.contract)
+                        except Exception as e:
+                            _depth_logger.error(
+                                f"cancelMktDepth error while restarting {symbol}: {e}"
+                            )
 
-            ibkr_client = self._resolve_ibkr_client()
-            if not ibkr_client:
-                reason = f"IBKR client unavailable when building contract for {symbol}"
-                self._set_last_error(reason, 500)
-                _depth_logger.error(reason)
-                return None
+                try:
+                    self.connection_manager.run_in_connection_thread(
+                        _cancel_previous,
+                        timeout=_CANCEL_TIMEOUT_SEC,
+                    )
+                except Exception as exc:
+                    _depth_logger.warning(
+                        f"Failed to cancel previous depth stream for {symbol}: {exc}"
+                    )
 
-            # Choose contract helper from IBKR client when available
-            contract = None
-            try:
-                if symbol.upper() in INDEX_FUTURE_SYMBOLS:
-                    contract = ibkr_client.get_future_contract(symbol, exchange="CME")
-                else:
-                    contract = ibkr_client.get_stock_contract(symbol)
-            except Exception as e:
-                reason = f"Contract build failed for {symbol}: {e}"
-                self._set_last_error(reason, 500)
-                _depth_logger.error(reason)
-                return None
-            ticker = ib.reqMktDepth(contract, numRows=num_rows, isSmartDepth=False)
-            _depth_logger.warning(f"Created ticker for {symbol}: {ticker}, contract: {contract}")
-            _depth_logger.warning(f"Ticker initial state - domBids: {getattr(ticker, 'domBids', 'None')}, domAsks: {getattr(ticker, 'domAsks', 'None')}")
-            return ticker, contract
-
-        result = self.connection_manager.run_in_connection_thread(
-            _subscribe,
-            timeout=_SUBSCRIBE_TIMEOUT_SEC,
-        )
-        if not result:
-            reason = f"Failed to subscribe market depth for {symbol}"
+        ibkr_client = self._resolve_ibkr_client()
+        if not ibkr_client:
+            reason = f"IBKR client unavailable when building contract for {symbol}"
             self._set_last_error(reason, 500)
             _depth_logger.error(reason)
             return False
-        ticker, contract = result
 
-        def _on_update(*_):
-            # _depth_logger.warning(f"*** _on_update CALLED for {symbol} ***")
-            # _depth_logger.warning(f"Ticker domBids: {getattr(ticker, 'domBids', 'None')}")
-            # _depth_logger.warning(f"Ticker domAsks: {getattr(ticker, 'domAsks', 'None')}")
-            bids = [(d.price, d.size) for d in getattr(ticker, "domBids", [])]
-            asks = [(d.price, d.size) for d in getattr(ticker, "domAsks", [])]
-            data = {
-                "bids": bids,
-                "asks": asks,
-                "timestamp": now_local(),
-            }
+        try:
+            if symbol.upper() in INDEX_FUTURE_SYMBOLS:
+                contract = ibkr_client.get_future_contract(symbol, exchange="CME")
+            else:
+                contract = ibkr_client.get_stock_contract(symbol)
+        except Exception as e:
+            reason = f"Contract build failed for {symbol}: {e}"
+            self._set_last_error(reason, 500)
+            _depth_logger.error(reason)
+            return False
+
+        adapter_stream: Optional[Any] = None
+        ticker: Optional[Any] = None
+        event_ref: Optional[Any] = None
+
+        if use_adapter:
+            try:
+                adapter_stream = self.connection_manager.run_async_in_connection_thread(
+                    adapter.request_market_depth(
+                        contract,
+                        num_rows=num_rows,
+                        is_smart_depth=False,
+                    ),
+                    timeout=_SUBSCRIBE_TIMEOUT_SEC,
+                )
+            except Exception as exc:
+                _depth_logger.error(
+                    f"Adapter depth subscription failed for {symbol}: {exc}"
+                )
+                adapter_stream = None
+
+            if not adapter_stream:
+                reason = f"Failed to subscribe market depth for {symbol}"
+                self._set_last_error(reason, 500)
+                _depth_logger.error(reason)
+                return False
+
+            ticker = getattr(adapter_stream, "ticker", None)
+            event_ref = getattr(adapter_stream, "event", None)
+            if event_ref is None and ticker is not None:
+                event_ref = self._resolve_depth_event(ticker)
+        else:
+
+            def _subscribe():
+                ib = self.connection_manager.get_ib_instance()
+                if not ib:
+                    return None
+                ticker_local = ib.reqMktDepth(
+                    contract, numRows=num_rows, isSmartDepth=False
+                )
+                return ticker_local, contract
+
+            result = self.connection_manager.run_in_connection_thread(
+                _subscribe,
+                timeout=_SUBSCRIBE_TIMEOUT_SEC,
+            )
+            if not result:
+                reason = f"Failed to subscribe market depth for {symbol}"
+                self._set_last_error(reason, 500)
+                _depth_logger.error(reason)
+                return False
+            ticker, _ = result
+            event_ref = self._resolve_depth_event(ticker)
+
+        ticker_ref = ticker
+
+        def _on_update(*args):
+            nonlocal ticker_ref
+            ticker_obj = ticker_ref
+            if args:
+                candidate = args[0]
+                if hasattr(candidate, "domBids") or hasattr(candidate, "domAsks"):
+                    ticker_obj = candidate
+            if ticker_obj is None and adapter_stream is not None:
+                ticker_obj = getattr(adapter_stream, "ticker", None)
+            if ticker_obj is None:
+                return
+
+            bids = [(d.price, d.size) for d in getattr(ticker_obj, "domBids", [])]
+            asks = [(d.price, d.size) for d in getattr(ticker_obj, "domAsks", [])]
+            timestamp = now_local()
+
             streams = self._streams.get(symbol)
             if not streams:
                 return
-            callbacks = list(streams.callbacks)
+            callbacks_local = list(streams.callbacks)
             executor = getattr(self, "_callback_executor", None)
-            for cb in callbacks:
+            for cb in callbacks_local:
                 payload = {
                     "bids": list(bids),
                     "asks": list(asks),
-                    "timestamp": data["timestamp"],
+                    "timestamp": timestamp,
                 }
                 if executor:
                     try:
@@ -236,15 +357,38 @@ class DepthSubscriber:
                         executor = None
                 self._invoke_callback(symbol, cb, payload)
 
-        # _depth_logger.warning(f"Before binding updateEvent for {symbol}, ticker: {ticker}")
-        # _depth_logger.warning(f"Ticker updateEvent before binding: {ticker.updateEvent}")
-        ticker.updateEvent += _on_update
-        # _depth_logger.warning(f"After binding updateEvent for {symbol}, event handlers: {len(ticker.updateEvent)}")
+        handler_event = event_ref
+        if handler_event is None and ticker_ref is not None:
+            handler_event = getattr(ticker_ref, "updateEvent", None)
+
+        if handler_event is not None:
+            try:
+                handler_event += _on_update  # type: ignore[operator]
+            except TypeError:
+                if hasattr(handler_event, "append"):
+                    handler_event.append(_on_update)  # type: ignore[call-arg]
+                else:
+                    handler_event = None
+        elif ticker_ref is not None:
+            update_event = getattr(ticker_ref, "updateEvent", None)
+            if update_event is not None:
+                try:
+                    update_event += _on_update  # type: ignore[operator]
+                    handler_event = update_event
+                except TypeError:
+                    if hasattr(update_event, "append"):
+                        update_event.append(_on_update)  # type: ignore[call-arg]
+                        handler_event = update_event
+
         with self._lock:
             self._streams[symbol] = _DepthStream(
-                ticker=ticker,
+                ticker=ticker_ref,
                 contract=contract,
                 callbacks=list(callbacks),
+                handler=_on_update,
+                event=handler_event,
+                use_adapter=use_adapter,
+                adapter_stream=adapter_stream,
             )
         _depth_logger.info(
             f"Started depth stream for {symbol}" + (" (forced restart)" if prior_stream else "")
@@ -261,22 +405,33 @@ class DepthSubscriber:
             _depth_logger.warning(f"No active depth stream for {symbol}")
             return False
 
-        def _cancel():
-            ib = self.connection_manager.get_ib_instance()
-            if ib:
-                try:
-                    ib.cancelMktDepth(stream.contract)
-                except Exception as e:
-                    _depth_logger.error(f"cancelMktDepth error for {symbol}: {e}")
+        self._detach_stream_handlers(stream)
 
-        self.connection_manager.run_in_connection_thread(
-            _cancel,
-            timeout=_CANCEL_TIMEOUT_SEC,
-        )
-        try:
-            stream.ticker.updateEvent.clear()
-        except Exception:
-            pass
+        adapter = getattr(self.connection_manager, "_adapter", None)
+        if stream.use_adapter and stream.adapter_stream and adapter is not None:
+            try:
+                self.connection_manager.run_async_in_connection_thread(
+                    adapter.cancel_market_depth(stream.adapter_stream),
+                    timeout=_CANCEL_TIMEOUT_SEC,
+                )
+            except Exception as exc:
+                _depth_logger.error(
+                    f"Adapter cancelMktDepth error for {symbol}: {exc}"
+                )
+        else:
+
+            def _cancel():
+                ib = self.connection_manager.get_ib_instance()
+                if ib:
+                    try:
+                        ib.cancelMktDepth(stream.contract)
+                    except Exception as e:
+                        _depth_logger.error(f"cancelMktDepth error for {symbol}: {e}")
+
+            self.connection_manager.run_in_connection_thread(
+                _cancel,
+                timeout=_CANCEL_TIMEOUT_SEC,
+            )
         _depth_logger.info(f"Stopped depth stream for {symbol}")
         return True
 

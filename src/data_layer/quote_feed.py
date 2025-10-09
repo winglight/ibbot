@@ -11,7 +11,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 from importlib import import_module
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional
 
 from loguru import logger
 
@@ -92,12 +92,18 @@ class InMemoryQuoteFeed(QuoteFeed):
                 continue
 
 
+if TYPE_CHECKING:
+    from src.ib_async_adapter import MarketDataSubscription as AdapterMarketDataSubscription
+
+
 @dataclass
 class _Subscription:
     callbacks: List[Callback]
-    ticker: any
-    contract: any
+    contract: Any
     handler: Callable[..., None]
+    ticker: Any | None = None
+    adapter_subscription: "AdapterMarketDataSubscription | None" = None
+    use_adapter: bool = False
 
 
 class IBQuoteFeed(QuoteFeed):
@@ -182,8 +188,67 @@ class IBQuoteFeed(QuoteFeed):
         options: Dict[str, Any],
     ) -> Optional[_Subscription]:
         cm = self._connection_manager
+        adapter = getattr(cm, "_adapter", None)
+        use_adapter = adapter is not None and adapter.is_connected()
+        ticker_ref: Dict[str, Any] = {"ticker": None}
 
-        def _subscribe():
+        def _on_update(*event_args: Any, sym: str = symbol) -> None:
+            ticker_obj = None
+            if event_args:
+                ticker_candidate = event_args[0]
+                if ticker_candidate is not None:
+                    ticker_obj = ticker_candidate
+            if ticker_obj is None:
+                ticker_obj = ticker_ref.get("ticker")
+            if ticker_obj is None:
+                return
+            ticker_ref["ticker"] = ticker_obj
+            payload = self._extract_payload(sym, ticker_obj)
+            if payload is None:
+                return
+            loop = self._loop
+            if loop and loop.is_running():
+                loop.call_soon_threadsafe(self._notify_callbacks, sym, payload)
+            else:
+                self._notify_callbacks(sym, payload)
+
+        if use_adapter:
+            async def _subscribe_async() -> tuple[Any, "AdapterMarketDataSubscription"]:
+                contract_local = self._build_contract(symbol, options)
+                subscription = await adapter.request_market_data(  # type: ignore[union-attr]
+                    contract_local,
+                    snapshot=False,
+                    regulatory_snapshot=False,
+                    price_handler=_on_update,
+                )
+                return contract_local, subscription
+
+            try:
+                result = cm.run_async_in_connection_thread(
+                    _subscribe_async(),
+                    timeout=15.0,
+                )
+            except Exception as exc:
+                raise RuntimeError(f"reqMktData failed for {symbol}: {exc}") from exc
+            if not result:
+                raise RuntimeError(f"reqMktData failed for {symbol}")
+            contract, adapter_subscription = result
+            ticker_obj = (
+                getattr(adapter_subscription, "price_ticker", None)
+                or getattr(adapter_subscription, "dom_ticker", None)
+                or adapter_subscription
+            )
+            ticker_ref["ticker"] = ticker_obj
+            return _Subscription(
+                callbacks=[callback],
+                contract=contract,
+                handler=_on_update,
+                ticker=ticker_obj,
+                adapter_subscription=adapter_subscription,
+                use_adapter=True,
+            )
+
+        def _subscribe_sync():
             ib = cm.get_ib_instance()
             if not ib:
                 return None
@@ -192,22 +257,13 @@ class IBQuoteFeed(QuoteFeed):
             return ticker, contract
 
         result = cm.run_in_connection_thread(
-            _subscribe,
+            _subscribe_sync,
             timeout=15.0,
         )
         if not result:
             raise RuntimeError(f"reqMktData failed for {symbol}")
         ticker, contract = result
-
-        def _on_update(*_args, sym: str = symbol, tick=ticker) -> None:
-            payload = self._extract_payload(sym, tick)
-            if payload is None:
-                return
-            loop = self._loop
-            if loop and loop.is_running():
-                loop.call_soon_threadsafe(self._notify_callbacks, sym, payload)
-            else:
-                self._notify_callbacks(sym, payload)
+        ticker_ref["ticker"] = ticker
 
         try:
             ticker.updateEvent += _on_update
@@ -217,18 +273,55 @@ class IBQuoteFeed(QuoteFeed):
                 symbol=symbol,
                 error=exc,
             )
-            connection_manager.run_in_connection_thread(
-                lambda: connection_manager.get_ib_instance().cancelMktData(contract)
+            cm.run_in_connection_thread(
+                lambda: cm.get_ib_instance().cancelMktData(contract)
             )
             return None
 
-        return _Subscription(callbacks=[callback], ticker=ticker, contract=contract, handler=_on_update)
+        return _Subscription(
+            callbacks=[callback],
+            contract=contract,
+            handler=_on_update,
+            ticker=ticker,
+        )
 
     def _stop_subscription(self, subscription: _Subscription) -> None:
+        cm = self._connection_manager
+        adapter_subscription = subscription.adapter_subscription
+
+        if subscription.use_adapter and adapter_subscription is not None:
+            adapter = getattr(cm, "_adapter", None)
+            adapter_local = adapter if adapter and adapter.is_connected() else None
+
+            if adapter_local is not None:
+                async def _cancel_async() -> None:
+                    await adapter_local.cancel_market_data(adapter_subscription)  # type: ignore[union-attr]
+
+                try:
+                    cm.run_async_in_connection_thread(
+                        _cancel_async(),
+                        timeout=5.0,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to cancel adapter market data stream", error=exc
+                    )
+            price_event = getattr(adapter_subscription, "price_event", None)
+            if price_event is not None:
+                try:
+                    price_event -= subscription.handler
+                except Exception:
+                    try:
+                        price_event.clear()
+                    except Exception:
+                        pass
+            return
+
         ticker = subscription.ticker
         contract = subscription.contract
 
-        cm = self._connection_manager
+        if ticker is None:
+            return
 
         def _cancel():
             ib = cm.get_ib_instance()

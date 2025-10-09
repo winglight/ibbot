@@ -1,11 +1,11 @@
 功能模块,功能名称,功能描述,实现状态,优先级,技术栈,相关文件
 用户认证,JWT登录,使用可配置的管理员与访客账户发放JWT令牌并支持访客只读限制,已完成,高,FastAPI + python-jose,src/routes/auth.py; main.py
-连接管理,IBKR连接编排,集中管理连接配置、超时保护与重连错误缓存,已完成,高,ib_insync + asyncio,src/connection_manager.py; src/routes/connection.py
+连接管理,IBKR连接编排,集中管理连接配置、超时保护与重连错误缓存,已完成,高,ib_async + asyncio,src/connection_manager.py; src/routes/connection.py
 连接管理,连接状态广播,连接或断开后向WebSocket广播连接状态与账户快照,已完成,高,FastAPI + asyncio,src/routes/connection.py; core/websocket_manager.py
 市场数据,历史数据接口,按需拉取K线与图表数据并规范化返回结构,已完成,高,FastAPI + pandas,src/routes/market_data.py; src/ibkr_client.py
 市场数据,实时价格流,统一的行情流服务支持WebSocket与REST查询最新价,已完成,高,asyncio,src/market_data_stream.py; src/routes/market_data.py
 DOM分析,深度行情服务,封装深度订阅、缓存与报警通知,已完成,高,FastAPI + asyncio,src/dom_service.py; src/routes/dom.py
-订单管理,订单路由与风控联动,统一下单、撤单、反手与批量取消并校验风控限制,已完成,高,ib_insync + FastAPI,services/orders/main.py; src/routes/orders.py
+订单管理,订单路由与风控联动,统一下单、撤单、反手与批量取消并校验风控限制,已完成,高,ib_async + FastAPI,services/orders/main.py; src/routes/orders.py
 订单管理,订单历史同步,支持佣金补录与外部同步策略,已完成,中,Orders Service + Redis,src/routes/orders.py; services/orders/main.py
 风险控制,风险规则管理,提供风控规则CRUD、阈值与ATR跟踪,已完成,高,FastAPI + APScheduler,src/risk_manager.py; src/routes/risk.py
 风险控制,动态仓位计算,根据风险预算与波动率自动计算下单手数,已完成,高,Python,src/risk_manager.py

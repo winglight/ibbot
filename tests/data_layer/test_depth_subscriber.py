@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from types import SimpleNamespace
 
 import pytest
+
+from src.ib_async_adapter import DepthStream as AdapterDepthStream
 
 from src.depth_subscriber import DepthSubscriber
 
@@ -44,6 +47,9 @@ class RecordingConnectionManager:
         self.calls: list[str] = []
         self.ib = RecordingIB()
         self.fail_next_call = False
+        self._adapter = None
+        self.async_timeouts: list[float | None] = []
+        self.async_calls: list[str] = []
 
     def is_connected(self) -> bool:
         return self._connected
@@ -56,6 +62,12 @@ class RecordingConnectionManager:
             return None
         return func(*args, **kwargs)
 
+    def run_async_in_connection_thread(self, coro, timeout: float | None = None):
+        self.async_timeouts.append(timeout)
+        name = getattr(getattr(coro, "cr_code", None), "co_name", repr(coro))
+        self.async_calls.append(name)
+        return asyncio.run(coro)
+
     def get_ib_instance(self) -> RecordingIB:
         return self.ib
 
@@ -67,6 +79,37 @@ class RecordingIbClient:
     def get_stock_contract(self, symbol: str) -> str:
         self.contract_requests.append(symbol)
         return f"CONTRACT:{symbol}"
+
+
+class RecordingAdapter:
+    def __init__(self) -> None:
+        self.requests: list[dict[str, object]] = []
+        self.cancelled: list[object] = []
+
+    def is_connected(self) -> bool:
+        return True
+
+    async def request_market_depth(self, contract: object, num_rows: int, *, is_smart_depth: bool) -> AdapterDepthStream:
+        ticker = SimpleNamespace(
+            domBids=[],
+            domAsks=[],
+            updateEvent=RecordingUpdateEvent(),
+            domUpdateEvent=RecordingUpdateEvent(),
+        )
+        event = ticker.domUpdateEvent
+        stream = AdapterDepthStream(contract=contract, handler=None, ticker=ticker, event=event)
+        self.requests.append(
+            {
+                "contract": contract,
+                "num_rows": num_rows,
+                "is_smart_depth": is_smart_depth,
+                "stream": stream,
+            }
+        )
+        return stream
+
+    async def cancel_market_depth(self, stream: AdapterDepthStream) -> None:
+        self.cancelled.append(stream.contract)
 
 
 def _no_op_callback(_: dict[str, object]) -> None:
@@ -140,5 +183,40 @@ def test_start_fails_when_connection_not_active(monkeypatch: pytest.MonkeyPatch)
         assert error is not None and "not active" in error
         assert manager.calls == []
         assert manager.timeouts == []
+    finally:
+        _shutdown_subscriber(subscriber)
+
+
+def test_adapter_path_starts_and_stops(monkeypatch: pytest.MonkeyPatch) -> None:
+    manager = RecordingConnectionManager()
+    adapter = RecordingAdapter()
+    manager._adapter = adapter
+    subscriber = DepthSubscriber(manager)
+
+    try:
+        monkeypatch.setattr(DepthSubscriber, "_resolve_ibkr_client", lambda self: RecordingIbClient())
+
+        captured: list[dict[str, object]] = []
+
+        def _callback(payload: dict[str, object]) -> None:
+            captured.append(payload)
+
+        subscriber._callback_executor = None
+
+        assert subscriber.start_depth_stream("AAPL", _callback, num_rows=10) is True
+
+        assert manager.async_timeouts == [pytest.approx(15.0)]
+        assert adapter.requests and adapter.requests[0]["num_rows"] == 10
+
+        stream = subscriber._streams.get("AAPL")
+        assert stream is not None
+        assert stream.use_adapter is True
+        assert stream.event is not None
+        assert len(stream.event) == 1
+
+        assert subscriber.stop_depth_stream("AAPL") is True
+        assert manager.async_timeouts == [pytest.approx(15.0), pytest.approx(5.0)]
+        assert adapter.cancelled == ["CONTRACT:AAPL"]
+        assert captured == []
     finally:
         _shutdown_subscriber(subscriber)

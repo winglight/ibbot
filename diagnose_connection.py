@@ -10,6 +10,7 @@ import asyncio
 import os
 import socket
 import sys
+from contextlib import suppress
 from pathlib import Path
 from typing import Set
 from urllib.parse import urlparse, urlunparse
@@ -29,11 +30,21 @@ from src.db import (  # noqa: E402
     run_sql_query,
 )
 from src.db.schema import REQUIRED_TABLES  # noqa: E402
+from src.ib_async_adapter import IBAsyncAdapter  # noqa: E402
 
-try:  # pragma: no cover - utility script, rarely exercised in tests
-    from ib_insync import IB
-except ImportError:  # pragma: no cover - allow diagnostics in stub mode
-    from test.ib_insync_stub import IB
+try:  # pragma: no cover - optional dependency for local diagnostics
+    from ib_async import IB as _NativeIB
+except ImportError:  # pragma: no cover - fall back to stub implementation
+    _NativeIB = None
+
+if _NativeIB is None:  # pragma: no cover - exercised when dependency missing
+    from test.ib_insync_stub import IB as _StubIB
+
+
+def _build_adapter() -> IBAsyncAdapter:
+    if _NativeIB is not None:
+        return IBAsyncAdapter(client_factory=_NativeIB)
+    return IBAsyncAdapter(client_factory=_StubIB)
 
 load_project_env()
 
@@ -81,20 +92,22 @@ def check_port_connectivity(host: str, port: int) -> bool:
 
 async def test_ibkr_connection(host: str, port: int, client_id: int) -> bool:
     """测试IBKR连接，自动尝试不同的客户端ID"""
-    ib = IB()
 
     for attempt in range(6):
         try_client_id = client_id + attempt
         if try_client_id > 32:
             try_client_id -= 32
 
+        adapter = _build_adapter()
         try:
             print(f"   尝试客户端ID: {try_client_id}")
-            await ib.connectAsync(host=host, port=port, clientId=try_client_id, timeout=8)
+            await adapter.connect(host=host, port=port, client_id=try_client_id, timeout=8)
             logger.info(f"IBKR连接测试成功，使用客户端ID: {try_client_id}")
-            ib.disconnect()
+            await adapter.disconnect()
             return True
         except Exception as exc:
+            with suppress(Exception):
+                await adapter.disconnect()
             error_msg = str(exc)
             if "already connected" in error_msg.lower() or "duplicate" in error_msg.lower():
                 print(f"   客户端ID {try_client_id} 已被使用")

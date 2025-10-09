@@ -23,6 +23,7 @@ class _StubConnectionManager:
         self.connect_result = connect_result
         self.config = SimpleNamespace(client_id=0)
         self._ibkr_client_ref = None
+        self._last_error: str | None = None
 
     def is_connected(self) -> bool:
         return self._connected
@@ -36,8 +37,10 @@ class _StubConnectionManager:
     def connect(self) -> bool:
         self.connect_calls += 1
         if not self.connect_result:
+            self._last_error = "connect failed"
             return False
         self._connected = True
+        self._last_error = None
         return True
 
     def disconnect(self) -> None:
@@ -45,6 +48,9 @@ class _StubConnectionManager:
 
     def get_ib_instance(self) -> None:  # pragma: no cover - compatibility hook
         return None
+
+    def get_last_connect_error(self) -> str | None:
+        return self._last_error
 
 
 @pytest.mark.asyncio

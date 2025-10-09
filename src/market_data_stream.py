@@ -2,7 +2,7 @@
 
 This module provides a lightweight publish/subscribe facade that the
 ATR trailing service can use to receive real-time bars without binding
-directly to the ``ib_insync`` APIs during unit tests.  When connected to
+directly to the ``ib_async`` adapter during unit tests.  When connected to
 IBKR the stream can be extended to request live data, but in tests we
 simply inject bars via :meth:`PriceVolumeStream.publish_bar`.
 """
@@ -45,7 +45,7 @@ class PriceVolumeStream:
 
     The stream keeps an internal queue per symbol.  Tests can push bars
     to the queue via :meth:`publish_bar`, while production code can be
-    extended to forward data from the ``ib_insync`` client.
+    extended to forward data from the async IB adapter.
     """
 
     def __init__(
