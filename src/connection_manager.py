@@ -745,6 +745,20 @@ class ConnectionManager:
             disconnect_reason = "connect-error"
             connection_announced = False
 
+            async def _safe_disconnect_after_failure() -> None:
+                """Attempt to close the adapter when a connect retry is required."""
+
+                if adapter is None:
+                    return
+
+                try:
+                    await adapter.disconnect()
+                except Exception as exc:  # pragma: no cover - defensive logging
+                    connection_logger.debug(
+                        "Adapter disconnect after failed attempt raised",
+                        error=str(exc),
+                    )
+
             try:
                 if adapter is not None:
                     try:
@@ -798,11 +812,18 @@ class ConnectionManager:
                             timeout=connect_timeout,
                         )
                     except asyncio.TimeoutError:
+                        self._last_connect_error = (
+                            f"连接超时 - 请检查TWS/Gateway是否启用API连接 (端口: {self.config.port})"
+                        )
                         connection_logger.warning(
-                            "connect timeout; entering handshake grace period",
+                            "IBKR connect call timed out before handshake completed; advancing to next client ID",
                             client_id=try_client_id,
                             timeout_sec=round(connect_timeout, 1),
                         )
+                        await _safe_disconnect_after_failure()
+                        try_client_id = self._compute_next_client_id(try_client_id)
+                        self._next_client_id_hint = try_client_id
+                        continue
                     except Exception as conn_error:
                         if self._client_id_conflict_detected:
                             self._client_id_conflict_detected = False
@@ -893,7 +914,14 @@ class ConnectionManager:
                             self._last_connect_error = (
                                 f"连接超时 - 请检查TWS/Gateway是否启用API连接 (端口: {self.config.port})"
                             )
-                            raise Exception(self._last_connect_error) from conn_error
+                            connection_logger.warning(
+                                "IBKR connect attempt timed out; retrying with a new client ID",
+                                client_id=try_client_id,
+                            )
+                            await _safe_disconnect_after_failure()
+                            try_client_id = self._compute_next_client_id(try_client_id)
+                            self._next_client_id_hint = try_client_id
+                            continue
 
                         if "connectionrefusederror" in lower_error or "refused" in lower_error:
                             self._last_connect_error = (
@@ -935,6 +963,20 @@ class ConnectionManager:
                                 )
                             await asyncio.sleep(self._connect_handshake_poll_interval_sec)
 
+                    if not adapter.is_connected() and grace_deadline is not None:
+                        self._last_connect_error = (
+                            f"连接超时 - 请检查TWS/Gateway是否启用API连接 (端口: {self.config.port})"
+                        )
+                        connection_logger.warning(
+                            "IBKR handshake did not complete within grace period; advancing to next client ID",
+                            client_id=try_client_id,
+                            grace_sec=round(self._connect_handshake_grace_sec, 1),
+                        )
+                        await _safe_disconnect_after_failure()
+                        try_client_id = self._compute_next_client_id(try_client_id)
+                        self._next_client_id_hint = try_client_id
+                        continue
+
                     if adapter.is_connected():
                         connected = True
                         self._last_connect_error = None
@@ -946,9 +988,18 @@ class ConnectionManager:
                         break
 
                     if grace_deadline is not None:
-                        raise TimeoutError(
-                            f"IBKR handshake timed out after {self._connect_handshake_grace_sec:.1f}s",
+                        self._last_connect_error = (
+                            f"连接超时 - 请检查TWS/Gateway是否启用API连接 (端口: {self.config.port})"
                         )
+                        connection_logger.warning(
+                            "IBKR handshake timeout detected; retrying with next client ID",
+                            client_id=try_client_id,
+                            grace_sec=round(self._connect_handshake_grace_sec, 1),
+                        )
+                        await _safe_disconnect_after_failure()
+                        try_client_id = self._compute_next_client_id(try_client_id)
+                        self._next_client_id_hint = try_client_id
+                        continue
 
                     raise Exception(
                         f"连接建立失败 - 端口 {self.config.port} 不可达或TWS/Gateway未运行",

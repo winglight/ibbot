@@ -275,7 +275,17 @@ class IBAsyncAdapter:
         client = self._client
         if not client:
             return
-        await self._invoke(("disconnect", "close"))
+
+        await self._invoke(
+            (
+                "disconnect",
+                "disconnectAsync",
+                "disconnect_async",
+                "close",
+                "closeAsync",
+                "close_async",
+            )
+        )
 
     def is_connected(self) -> bool:
         """Return ``True`` if the adapter currently has an active connection."""
