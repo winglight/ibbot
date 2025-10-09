@@ -162,7 +162,10 @@ class IBAsyncAdapter:
                 **kwargs,
             }
             await self._invoke(
-                ("connect", "connectAsync"),
+                (
+                    "connectAsync",
+                    "connect",
+                ),
                 host,
                 port,
                 clientId=client_id,
