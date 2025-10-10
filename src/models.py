@@ -151,7 +151,7 @@ class StrategyRenameRequest(BaseModel):
     rename_file: Optional[bool] = False
 
 class StrategyDataPushRequest(BaseModel):
-    enabled: bool
+    enabled: Optional[bool] = None
     subscription: Optional[str] = None
     symbol: Optional[str] = None
     force_restart: Optional[bool] = False

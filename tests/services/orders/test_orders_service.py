@@ -7,6 +7,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from services.orders.main import OrderSubmission, OrdersRuntime, create_app
+from src.db.repositories.order import OrderRepositoryError
 from tests.services.redis_utils import InMemoryRedis
 
 
@@ -108,6 +109,11 @@ class RecordingRepository:
 
     async def close(self) -> None:
         self.closed = True
+
+
+class FailingRepository(RecordingRepository):
+    async def insert_order(self, payload: Mapping[str, Any]) -> int:  # type: ignore[override]
+        raise OrderRepositoryError("boom")
 
 
 async def _create_runtime(
@@ -322,6 +328,20 @@ async def test_submit_order_persists_to_repository_and_enqueues_command() -> Non
         payload = json.loads(raw_payload)
         assert payload["method"] == "place_order"
         assert payload["kwargs"]["symbol"] == "MSFT"
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_submit_order_raises_when_repository_insert_fails() -> None:
+    repository = FailingRepository()
+    runtime, redis, _ = await _create_runtime(repository=repository)
+    try:
+        submission = OrderSubmission(symbol="ES", quantity=1, action="BUY")
+        with pytest.raises(OrderRepositoryError):
+            await runtime.submit_order(submission)
+        queued = await redis.blpop(runtime.command_queue, timeout=0)
+        assert queued is None
     finally:
         await runtime.stop()
 

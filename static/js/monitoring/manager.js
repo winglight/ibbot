@@ -2594,10 +2594,18 @@
 
                                 if (response.success) {
                                     let orderSuffix = '';
-                                    if (response?.order_id !== undefined && response?.order_id !== null) {
-                                        const idInfo = this.app?.formatOrderIdDisplay?.(response.order_id);
-                                        const rawId = String(response.order_id).trim();
-                                        const shortId = idInfo?.short || (rawId ? rawId.slice(-3) : '');
+                                    const resolveIdentifiers = this.app?.orderManager?.getOrderIdentifiers;
+                                    const identifiers = typeof resolveIdentifiers === 'function'
+                                        ? resolveIdentifiers.call(this.app.orderManager, response || {})
+                                        : {
+                                            display: response?.id != null
+                                                ? String(response.id).trim()
+                                                : (response?.order_id != null ? String(response.order_id).trim() : ''),
+                                        };
+                                    const displayId = identifiers?.display;
+                                    if (displayId) {
+                                        const idInfo = this.app?.formatOrderIdDisplay?.(displayId);
+                                        const shortId = idInfo?.short || displayId.slice(-3);
                                         if (shortId) {
                                             orderSuffix = ` (订单ID: ${shortId})`;
                                         }

@@ -404,23 +404,61 @@ class StrategyRuntime:
         document = await self.get_strategy(name)
         if document is None:
             raise StrategyNotRegistered(name)
-        enabled = bool(payload.enabled)
-        subscription = payload.subscription
-        symbol = payload.symbol
+        existing_status = await self._default_status_payload(document.name)
+        current_state: dict[str, Any]
+        if isinstance(existing_status.get("data_push"), Mapping):
+            current_state = {
+                str(key): value for key, value in existing_status["data_push"].items()
+            }
+        else:
+            current_state = {}
+
+        raw_enabled = payload.enabled
+        enabled = bool(current_state.get("active")) if raw_enabled is None else bool(raw_enabled)
+        subscription = (
+            payload.subscription
+            if payload.subscription is not None
+            else current_state.get("subscription")
+        )
+        symbol = (
+            payload.symbol if payload.symbol is not None else current_state.get("symbol")
+        )
+
         if enabled:
             if not subscription:
                 raise ValueError("subscription is required when enabling data push")
             if not symbol:
                 raise ValueError("symbol is required when enabling data push")
-        state = {
-            "active": enabled,
-            "subscription": subscription,
-            "symbol": symbol,
-            "force_restart": bool(payload.force_restart),
-            "status_reason": "Enabled" if enabled else "Disabled",
-            "awaiting_data": enabled,
-            "updated_at": _utc_now().isoformat(),
-        }
+
+        state: dict[str, Any] = dict(current_state)
+        state.update(
+            {
+                "active": enabled,
+                "subscription": subscription,
+                "symbol": symbol,
+                "force_restart": (
+                    bool(payload.force_restart)
+                    if payload.force_restart is not None
+                    else bool(current_state.get("force_restart"))
+                ),
+                "status_reason": "Enabled" if enabled else "Disabled",
+                "updated_at": _utc_now().isoformat(),
+            }
+        )
+
+        mutation_requested = any(
+            value is not None
+            for value in (
+                payload.enabled,
+                payload.subscription,
+                payload.symbol,
+                payload.force_restart,
+            )
+        )
+        if mutation_requested:
+            state["awaiting_data"] = enabled
+        else:
+            state.setdefault("awaiting_data", enabled)
         if self._data_push_handler is not None:
             try:
                 result = self._data_push_handler(document.name, state)

@@ -1000,24 +1000,30 @@
                     const pnlText = `$${this.app.formatNumber(orderPnl)}`;
                     const executionPrice = order.avg_fill_price || 0;
 
-                    const rawOrderId = order?.order_id !== undefined && order?.order_id !== null
-                        ? String(order.order_id).trim()
-                        : '';
-                    const orderIdInfo = this.app?.formatOrderIdDisplay?.(rawOrderId);
+                    const resolveIdentifiers = this.app?.orderManager?.getOrderIdentifiers;
+                    const identifiers = typeof resolveIdentifiers === 'function'
+                        ? resolveIdentifiers.call(this.app.orderManager, order || {})
+                        : {
+                            display: order?.id != null
+                                ? String(order.id).trim()
+                                : (order?.order_id != null ? String(order.order_id).trim() : ''),
+                        };
+                    const displayOrderId = identifiers?.display;
+                    const orderIdInfo = this.app?.formatOrderIdDisplay?.(displayOrderId);
                     const orderIdCell = (() => {
                         if (orderIdInfo && typeof orderIdInfo.html === 'string') {
                             return orderIdInfo.html;
                         }
-                        if (!rawOrderId) {
+                        if (!displayOrderId) {
                             return '<span class="order-id-display text-muted">—</span>';
                         }
-                        const safeFull = escapeHtml(rawOrderId);
-                        const safeShort = escapeHtml(rawOrderId.slice(-3));
+                        const safeFull = escapeHtml(displayOrderId);
+                        const safeShort = escapeHtml(displayOrderId.slice(-3));
                         return `<span class="order-id-display" title="${safeFull}" aria-label="${safeFull}" data-full-order-id="${safeFull}">${safeShort}</span>`;
                     })();
                     const rowAttr = orderIdInfo?.hasValue
                         ? ` data-order-id="${orderIdInfo.escapedFull}"`
-                        : (rawOrderId ? ` data-order-id="${escapeHtml(rawOrderId)}"` : '');
+                        : (displayOrderId ? ` data-order-id="${escapeHtml(displayOrderId)}"` : '');
 
                     return `
                     <tr${rowAttr}>
