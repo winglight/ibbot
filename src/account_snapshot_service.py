@@ -66,7 +66,20 @@ class AccountSnapshotService:
         else:
             self._request_timeout_seconds = default_command_timeout
 
-        refresh_default = max(self._request_timeout_seconds * 2, 60)
+        self._command_retry_attempts = max(
+            1,
+            _read_interval_env("ACCOUNT_SNAPSHOT_COMMAND_ATTEMPTS", 2),
+        )
+        default_retry_backoff = max(1, self._request_timeout_seconds // 2)
+        self._command_retry_backoff_seconds = _read_interval_env(
+            "ACCOUNT_SNAPSHOT_COMMAND_RETRY_BACKOFF_SECONDS",
+            default_retry_backoff,
+        )
+        max_single_command_timeout = self._request_timeout_seconds + (
+            (self._command_retry_attempts - 1) * self._command_retry_backoff_seconds
+        )
+
+        refresh_default = max(max_single_command_timeout * 2, 60)
         self._refresh_timeout_seconds = (
             _read_interval_env(
                 "ACCOUNT_SNAPSHOT_REFRESH_TIMEOUT_SECONDS",
@@ -604,6 +617,18 @@ class AccountSnapshotService:
             next_refresh,
         )
 
+    def _command_timeout_for_attempt(self, attempt: int) -> int:
+        """Return the timeout to use for the given retry attempt."""
+
+        base_timeout = self._request_timeout_seconds
+        if attempt > 1:
+            base_timeout += (attempt - 1) * self._command_retry_backoff_seconds
+
+        max_timeout = self._refresh_timeout_seconds
+        if max_timeout > 0:
+            return min(base_timeout, max_timeout)
+        return max(base_timeout, 0)
+
     async def _execute_ib_command(
         self,
         method: str,
@@ -615,23 +640,127 @@ class AccountSnapshotService:
     ) -> Dict[str, Any]:
         """Execute an IB command and normalise the result for callers."""
 
-        started = time.perf_counter()
         arguments = args or []
         keyword_arguments = dict(kwargs or {})
-        try:
-            record = await request_ib_command(
-                method,
-                args=arguments,
-                kwargs=keyword_arguments,
-                timeout=self._request_timeout_seconds,
-            )
-        except IBCommandTimeout as exc:
+        attempts = max(1, self._command_retry_attempts)
+        attempt = 1
+        final_timeout_exc: Optional[IBCommandTimeout] = None
+        final_timeout_duration = 0.0
+
+        while attempt <= attempts:
+            started = time.perf_counter()
+            timeout_seconds = self._command_timeout_for_attempt(attempt)
+            try:
+                record = await request_ib_command(
+                    method,
+                    args=arguments,
+                    kwargs=keyword_arguments,
+                    timeout=timeout_seconds,
+                )
+            except IBCommandTimeout as exc:
+                duration = time.perf_counter() - started
+                if attempt < attempts:
+                    snapshot_service_logger.warning(
+                        "IB command %s timed out (command_id=%s, duration=%.3fs, attempt=%s/%s)",
+                        method,
+                        exc.command_id,
+                        duration,
+                        attempt,
+                        attempts,
+                    )
+                    await self._update_health(
+                        healthy=False,
+                        last_error="timeout",
+                        extra_metrics={
+                            "reason": reason,
+                            "scope": scope,
+                            "command_id": exc.command_id,
+                            "source": IB_COMMAND_SOURCE,
+                            "duration": f"{duration:.3f}",
+                            "state": "retry",
+                            "attempt": f"{attempt}/{attempts}",
+                        },
+                    )
+                    attempt += 1
+                    continue
+
+                final_timeout_exc = exc
+                final_timeout_duration = duration
+                break
+            except IBCommandExecutionError as exc:
+                duration = time.perf_counter() - started
+                error_message = str(exc.payload.get("error") or str(exc))
+                snapshot_service_logger.warning(
+                    "IB command %s failed (command_id=%s, duration=%.3fs, error=%s)",
+                    method,
+                    exc.command_id,
+                    duration,
+                    error_message,
+                )
+                await self._update_health(
+                    healthy=False,
+                    last_error=error_message,
+                    extra_metrics={
+                        "reason": reason,
+                        "scope": scope,
+                        "command_id": exc.command_id,
+                        "source": IB_COMMAND_SOURCE,
+                        "duration": f"{duration:.3f}",
+                        "state": "error",
+                    },
+                )
+                return {
+                    "status": "error",
+                    "command_id": exc.command_id,
+                    "result": None,
+                    "error": error_message,
+                    "duration": duration,
+                }
+            except Exception as exc:
+                duration = time.perf_counter() - started
+                snapshot_service_logger.warning(
+                    "IB command %s raised unexpected error (duration=%.3fs): %s",
+                    method,
+                    duration,
+                    exc,
+                )
+                await self._update_health(
+                    healthy=False,
+                    last_error=str(exc),
+                    extra_metrics={
+                        "reason": reason,
+                        "scope": scope,
+                        "source": IB_COMMAND_SOURCE,
+                        "duration": f"{duration:.3f}",
+                        "state": "exception",
+                    },
+                )
+                raise
+
             duration = time.perf_counter() - started
-            snapshot_service_logger.warning(
-                "IB command %s timed out (command_id=%s, duration=%.3fs)",
+            command_id = str(record.get("command_id") or "")
+            result_payload = record.get("result")
+            snapshot_service_logger.debug(
+                "IB command %s completed (command_id=%s, duration=%.3fs)",
                 method,
-                exc.command_id,
+                command_id,
                 duration,
+            )
+            return {
+                "status": "success",
+                "command_id": command_id,
+                "result": result_payload,
+                "duration": duration,
+            }
+
+        if final_timeout_exc is not None:
+            snapshot_service_logger.warning(
+                "IB command %s timed out (command_id=%s, duration=%.3fs, attempt=%s/%s)",
+                method,
+                final_timeout_exc.command_id,
+                final_timeout_duration,
+                attempts,
+                attempts,
             )
             await mark_all_snapshots_stale("ib-command-timeout")
             await self._update_health(
@@ -640,84 +769,26 @@ class AccountSnapshotService:
                 extra_metrics={
                     "reason": reason,
                     "scope": scope,
-                    "command_id": exc.command_id,
+                    "command_id": final_timeout_exc.command_id,
                     "source": IB_COMMAND_SOURCE,
-                    "duration": f"{duration:.3f}",
+                    "duration": f"{final_timeout_duration:.3f}",
                     "state": "timeout",
+                    "attempt": f"{attempts}/{attempts}",
                 },
             )
             return {
                 "status": "timeout",
-                "command_id": exc.command_id,
+                "command_id": final_timeout_exc.command_id,
                 "result": None,
                 "error": "timeout",
-                "duration": duration,
+                "duration": final_timeout_duration,
             }
-        except IBCommandExecutionError as exc:
-            duration = time.perf_counter() - started
-            error_message = str(exc.payload.get("error") or str(exc))
-            snapshot_service_logger.warning(
-                "IB command %s failed (command_id=%s, duration=%.3fs, error=%s)",
-                method,
-                exc.command_id,
-                duration,
-                error_message,
-            )
-            await self._update_health(
-                healthy=False,
-                last_error=error_message,
-                extra_metrics={
-                    "reason": reason,
-                    "scope": scope,
-                    "command_id": exc.command_id,
-                    "source": IB_COMMAND_SOURCE,
-                    "duration": f"{duration:.3f}",
-                    "state": "error",
-                },
-            )
-            return {
-                "status": "error",
-                "command_id": exc.command_id,
-                "result": None,
-                "error": error_message,
-                "duration": duration,
-            }
-        except Exception as exc:
-            duration = time.perf_counter() - started
-            snapshot_service_logger.warning(
-                "IB command %s raised unexpected error (duration=%.3fs): %s",
-                method,
-                duration,
-                exc,
-            )
-            await self._update_health(
-                healthy=False,
-                last_error=str(exc),
-                extra_metrics={
-                    "reason": reason,
-                    "scope": scope,
-                    "source": IB_COMMAND_SOURCE,
-                    "duration": f"{duration:.3f}",
-                    "state": "exception",
-                },
-            )
-            raise
 
-        duration = time.perf_counter() - started
-        command_id = str(record.get("command_id") or "")
-        result_payload = record.get("result")
-        snapshot_service_logger.debug(
-            "IB command %s completed (command_id=%s, duration=%.3fs)",
-            method,
-            command_id,
-            duration,
+        raise IBCommandTimeout(
+            f"Timed out waiting for IB command {method}",
+            command_id="unknown",
+            payload={"method": method},
         )
-        return {
-            "status": "success",
-            "command_id": command_id,
-            "result": result_payload,
-            "duration": duration,
-        }
 
 
 IB_COMMAND_SOURCE = "ib-command"
