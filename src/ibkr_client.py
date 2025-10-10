@@ -3313,34 +3313,6 @@ class IBKRClient:
         except Exception as e:
             ibkr_logger.error(f"Failed to get orders: {e}")
             return []
-    async def refresh_account(self, *, fast_positions: bool = True) -> Dict[str, Any]:
-        """Refresh core account data and return the collected snapshots.
-
-        The account service expects an ``ib-command`` named ``refresh_account``
-        to be available so it can proactively warm the cached snapshots right
-        after the gateway connection has been established.  Historically this
-        command was missing which meant the request triggered by
-        :class:`ConnectionManager` failed immediately, leaving the downstream
-        services without fresh data.  By orchestrating the two fundamental
-        refresh calls here we ensure the command succeeds and mirrors the
-        behaviour of the reference ``ib_async`` snippet provided by operators.
-        """
-
-        await self.ensure_connection(reason="refresh-account")
-
-        account_info = await self.get_account_info()
-        positions = await self.get_positions(fast=fast_positions)
-
-        refreshed_at = now_local()
-        payload: Dict[str, Any] = {
-            "account_info": account_info or {},
-            "positions": list(positions or []),
-            "success": bool(account_info) or bool(positions),
-            "refreshed_at": refreshed_at.isoformat(),
-        }
-
-        return payload
-
     async def get_account_info(self) -> Dict:
         """获取账户信息"""
         try:
@@ -3571,9 +3543,9 @@ class IBKRClient:
                     return []
 
                 def _portfolio_snapshot():
-                    # positions = ib.positions()
-                    # if positions:
-                    #     return positions
+                    positions = ib.positions()
+                    if positions:
+                        return positions
                     return ib.portfolio()
 
                 portfolio_items = await asyncio.to_thread(
