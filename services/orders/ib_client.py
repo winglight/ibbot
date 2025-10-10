@@ -145,7 +145,7 @@ class ServiceIBClient(BaseServiceIBClient):
             client_id_env=ORDERS_IB_CLIENT_ID_ENV,
         )
         self._order_status_waiters: dict[int, asyncio.Future[OrderStatusEvent]] = {}
-        self._cancel_waiters: dict[int, asyncio.Future[OrderStatusEvent]] = {}
+        self._cancel_order_waiters: dict[int, asyncio.Future[OrderStatusEvent]] = {}
         self._order_waiters_lock = threading.Lock()
         self._open_orders_tracker: _OpenOrdersTracker | None = None
         self._open_orders_lock = threading.Lock()
@@ -178,7 +178,7 @@ class ServiceIBClient(BaseServiceIBClient):
         loop = asyncio.get_running_loop()
         future: asyncio.Future[OrderStatusEvent] = loop.create_future()
         with self._order_waiters_lock:
-            self._cancel_waiters[order_id] = future
+            self._cancel_order_waiters[order_id] = future
         logger.debug("Cancelling order %s via IB", order_id)
         self.cancelOrder(order_id)
         return await asyncio.wait_for(future, self.DEFAULT_TIMEOUT)
@@ -390,7 +390,7 @@ class ServiceIBClient(BaseServiceIBClient):
         if status not in CANCELLED_STATUSES:
             return
         with self._order_waiters_lock:
-            future = self._cancel_waiters.pop(order_id, None)
+            future = self._cancel_order_waiters.pop(order_id, None)
         if future is not None:
             self._complete_future(future, event)
 
@@ -421,9 +421,9 @@ class ServiceIBClient(BaseServiceIBClient):
         pending: list[asyncio.Future[Any]] = []
         with self._order_waiters_lock:
             pending.extend(self._order_status_waiters.values())
-            pending.extend(self._cancel_waiters.values())
+            pending.extend(self._cancel_order_waiters.values())
             self._order_status_waiters.clear()
-            self._cancel_waiters.clear()
+            self._cancel_order_waiters.clear()
         with self._open_orders_lock:
             tracker = self._open_orders_tracker
             if tracker is not None:
