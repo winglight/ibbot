@@ -1027,11 +1027,17 @@
                     this.requestOrdersSnapshot({ force: true, reason: 'order_placed' });
                 }
                 (() => {
-                    const idInfo = this.app?.formatOrderIdDisplay?.(data.order_id);
-                    const rawId = data?.order_id !== undefined && data?.order_id !== null
-                        ? String(data.order_id).trim()
-                        : '';
-                    const shortId = idInfo?.short || (rawId ? rawId.slice(-3) : '');
+                    const resolveIdentifiers = this.app?.orderManager?.getOrderIdentifiers;
+                    const identifiers = typeof resolveIdentifiers === 'function'
+                        ? resolveIdentifiers.call(this.app.orderManager, data || {})
+                        : {
+                            display: data?.id != null
+                                ? String(data.id).trim()
+                                : (data?.order_id != null ? String(data.order_id).trim() : ''),
+                        };
+                    const displayId = identifiers?.display;
+                    const idInfo = this.app?.formatOrderIdDisplay?.(displayId);
+                    const shortId = idInfo?.short || (displayId ? displayId.slice(-3) : '');
                     this.app.showAlert('success', `订单${shortId ? ' ' + shortId : ''} 下单成功`);
                     if (idInfo?.full && idInfo.full !== shortId) {
                         console.info('Order placed with full ID:', idInfo.full);
@@ -1049,11 +1055,17 @@
                     this.requestOrdersSnapshot({ force: true, reason: 'order_cancelled' });
                 }
                 (() => {
-                    const idInfo = this.app?.formatOrderIdDisplay?.(data.order_id);
-                    const rawId = data?.order_id !== undefined && data?.order_id !== null
-                        ? String(data.order_id).trim()
-                        : '';
-                    const shortId = idInfo?.short || (rawId ? rawId.slice(-3) : '');
+                    const resolveIdentifiers = this.app?.orderManager?.getOrderIdentifiers;
+                    const identifiers = typeof resolveIdentifiers === 'function'
+                        ? resolveIdentifiers.call(this.app.orderManager, data || {})
+                        : {
+                            display: data?.id != null
+                                ? String(data.id).trim()
+                                : (data?.order_id != null ? String(data.order_id).trim() : ''),
+                        };
+                    const displayId = identifiers?.display;
+                    const idInfo = this.app?.formatOrderIdDisplay?.(displayId);
+                    const shortId = idInfo?.short || (displayId ? displayId.slice(-3) : '');
                     this.app.showAlert('success', `订单${shortId ? ' ' + shortId : ''} 已取消`);
                     if (idInfo?.full && idInfo.full !== shortId) {
                         console.info('Order cancellation full ID:', idInfo.full);

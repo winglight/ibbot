@@ -373,8 +373,8 @@
                     const at = a?.timestamp ? new Date(a.timestamp).getTime() : 0;
                     const bt = b?.timestamp ? new Date(b.timestamp).getTime() : 0;
                     if (bt !== at) return bt - at;
-                    const aid = Number(a?.order_id) || 0;
-                    const bid = Number(b?.order_id) || 0;
+                    const aid = Number(a?.id ?? a?.order_id) || 0;
+                    const bid = Number(b?.id ?? b?.order_id) || 0;
                     return bid - aid;
                 });
                 this.internalStrategyOrders = orders;

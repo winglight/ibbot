@@ -39,6 +39,33 @@ class OrderManager {
         this.debouncedLoadOrders = this.debounce(this._loadOrders.bind(this), 300);
     }
 
+    getOrderIdentifiers(order) {
+        if (!order || typeof order !== 'object') {
+            return { display: '', tracking: '' };
+        }
+        const normalise = (value) => {
+            if (value === null || value === undefined) return '';
+            const text = String(value).trim();
+            return text;
+        };
+        const displayCandidates = [
+            order.id,
+            order.order_id,
+            order.client_order_id,
+            order.command_id,
+        ];
+        const trackingCandidates = [
+            order.ib_order_id,
+            order.order_id,
+            order.command_id,
+            order.client_order_id,
+            order.id,
+        ];
+        const display = displayCandidates.map(normalise).find(Boolean) || '';
+        const tracking = trackingCandidates.map(normalise).find(Boolean) || '';
+        return { display, tracking };
+    }
+
     /**
      * 防抖函数
      */
@@ -193,7 +220,9 @@ class OrderManager {
                     priceText = '市价';
                 }
 
-                const needSyncButton = orderType === 'LMT' && order.status === 'Submitted';
+                const identifiers = this.getOrderIdentifiers(order);
+                const trackingId = identifiers.tracking || identifiers.display;
+                const needSyncButton = orderType === 'LMT' && order.status === 'Submitted' && trackingId;
 
                 html += `
                     <div class="border-bottom py-1">
@@ -204,7 +233,7 @@ class OrderManager {
                             </div>
                             <div class="text-end d-flex align-items-center">
                                 <small class="${sideClass} me-2">${priceText}</small>
-                                ${needSyncButton ? `<button class="btn btn-outline-primary btn-sm" onclick="app.orderManager.syncLimitOrder('${order.order_id}', null, event)" title="同步订单状态"><i class="fas fa-sync-alt"></i></button>` : ''}
+                                ${needSyncButton ? `<button class="btn btn-outline-primary btn-sm" onclick="app.orderManager.syncLimitOrder('${trackingId.replace(/'/g, "\\'")}', null, event)" title="同步订单状态"><i class="fas fa-sync-alt"></i></button>` : ''}
                             </div>
                         </div>
                     </div>
@@ -262,10 +291,10 @@ class OrderManager {
                 const actionText = response.action || 'CLOSE';
                 const quantityText = Number.isFinite(response.quantity) ? response.quantity : qty;
                 let orderIdText = '';
-                if (response?.order_id !== undefined && response?.order_id !== null) {
-                    const idInfo = this.app?.formatOrderIdDisplay?.(response.order_id);
-                    const rawId = String(response.order_id).trim();
-                    const shortId = idInfo?.short || (rawId ? rawId.slice(-3) : '');
+                const identifiers = this.getOrderIdentifiers(response || {});
+                if (identifiers.display) {
+                    const idInfo = this.app?.formatOrderIdDisplay?.(identifiers.display);
+                    const shortId = idInfo?.short || identifiers.display.slice(-3);
                     if (shortId) {
                         orderIdText = ` (订单ID: ${shortId})`;
                     }
@@ -342,20 +371,30 @@ class OrderManager {
             if (!tbody) return true;
 
             const sortedOrders = orders
-                .filter(order => order && order.order_id !== 0)
+                .filter(order => {
+                    if (!order) return false;
+                    const identifiers = this.getOrderIdentifiers(order);
+                    return Boolean(identifiers.display || identifiers.tracking);
+                })
                 .sort((a, b) => {
                     const at = a.submit_time ? new Date(a.submit_time).getTime() : 0;
                     const bt = b.submit_time ? new Date(b.submit_time).getTime() : 0;
                     if (bt !== at) return bt - at;
-                    const aid = Number(a.order_id) || 0;
-                    const bid = Number(b.order_id) || 0;
+                    const aIds = this.getOrderIdentifiers(a);
+                    const bIds = this.getOrderIdentifiers(b);
+                    const aid = Number(a?.id ?? aIds.display ?? aIds.tracking) || 0;
+                    const bid = Number(b?.id ?? bIds.display ?? bIds.tracking) || 0;
                     return bid - aid;
                 });
             this.orders = sortedOrders;
 
             sortedOrders.forEach(order => {
-                if (!order || !order.order_id) return;
-                this.ordersById.set(order.order_id.toString(), order);
+                if (!order) return;
+                const identifiers = this.getOrderIdentifiers(order);
+                const key = identifiers.display || identifiers.tracking;
+                if (key) {
+                    this.ordersById.set(key, order);
+                }
             });
 
             if (this.app) {
@@ -363,8 +402,10 @@ class OrderManager {
                     const at = a.submit_time ? new Date(a.submit_time).getTime() : 0;
                     const bt = b.submit_time ? new Date(b.submit_time).getTime() : 0;
                     if (bt !== at) return bt - at;
-                    const aid = Number(a.order_id) || 0;
-                    const bid = Number(b.order_id) || 0;
+                    const aIds = this.getOrderIdentifiers(a);
+                    const bIds = this.getOrderIdentifiers(b);
+                    const aid = Number(a?.id ?? aIds.display ?? aIds.tracking) || 0;
+                    const bid = Number(b?.id ?? bIds.display ?? bIds.tracking) || 0;
                     return bid - aid;
                 });
                 this.app.orders = aggregated;
@@ -546,14 +587,10 @@ class OrderManager {
         
         // 处理每个新订单
         newOrders.forEach((order, index) => {
-            const rawOrderId = order?.order_id;
-            if (rawOrderId === null || rawOrderId === undefined) {
-                console.warn('Skipping order without order_id field:', order);
-                return;
-            }
-            const orderId = String(rawOrderId).trim();
+            const identifiers = this.getOrderIdentifiers(order);
+            const orderId = identifiers.tracking || identifiers.display;
             if (!orderId) {
-                console.warn('Skipping order with blank order_id:', order);
+                console.warn('Skipping order without resolvable identifier:', order);
                 return;
             }
             const existingRow = this.findOrderRow(tbody, orderId);
@@ -845,10 +882,10 @@ class OrderManager {
         const escapedAction = actionStr.replace(/'/g, '&#39;').replace(/"/g, '&quot;');
         const escapedOrderType = orderTypeStr.replace(/'/g, '&#39;').replace(/"/g, '&quot;');
         
-        const rawOrderId = order?.order_id !== undefined && order?.order_id !== null
-            ? String(order.order_id).trim()
-            : '';
-        const orderIdInfo = this.app?.formatOrderIdDisplay?.(rawOrderId);
+        const identifiers = this.getOrderIdentifiers(order);
+        const displayOrderId = identifiers.display;
+        const trackingOrderId = identifiers.tracking || identifiers.display;
+        const orderIdInfo = this.app?.formatOrderIdDisplay?.(displayOrderId);
         const escapeHtml = (value) => {
             if (this.app && typeof this.app.escapeHtml === 'function') {
                 return this.app.escapeHtml(value);
@@ -865,28 +902,29 @@ class OrderManager {
             if (orderIdInfo && typeof orderIdInfo.html === 'string') {
                 return orderIdInfo.html;
             }
-            if (!rawOrderId) {
+            if (!displayOrderId) {
                 return '<span class="order-id-display text-muted">—</span>';
             }
-            const safeFull = escapeHtml(rawOrderId);
-            const safeShort = escapeHtml(rawOrderId.slice(-3));
+            const safeFull = escapeHtml(displayOrderId);
+            const safeShort = escapeHtml(displayOrderId.slice(-3));
             return `<span class="order-id-display" title="${safeFull}" aria-label="${safeFull}" data-full-order-id="${safeFull}">${safeShort}</span>`;
         })();
-        const safeOrderIdForJs = rawOrderId.replace(/'/g, "\\'");
+        const safeOrderIdForJs = (trackingOrderId || '').replace(/'/g, "\\'");
 
         const detailsButton = `<button class="btn btn-sm btn-info me-1" onclick="app.openOrderDetails('${safeOrderIdForJs}')" title="Details"><i class="fas fa-info-circle"></i></button>`;
 
         const createdAtInfo = this.formatOrderTimestamp(order.submit_time || order.created_at);
         const createdTitleAttr = createdAtInfo.title ? ` title="${createdAtInfo.title}"` : '';
 
-        const editButton = canEdit ?
-            `<button class="btn btn-sm btn-primary me-1" onclick="app.editOrder(${order.order_id}, '${escapedSymbol}', '${escapedAction}', ${order.quantity}, '${escapedOrderType}', ${(order.limit_price || order.price) || 0})" title="Edit"><i class="fas fa-edit"></i></button>` : '';
+        const editIdForJs = trackingOrderId ? `'${trackingOrderId.replace(/'/g, "\\'")}'` : 'null';
+        const editButton = canEdit && trackingOrderId ?
+            `<button class="btn btn-sm btn-primary me-1" onclick="app.editOrder(${editIdForJs}, '${escapedSymbol}', '${escapedAction}', ${order.quantity}, '${escapedOrderType}', ${(order.limit_price || order.price) || 0})" title="Edit"><i class="fas fa-edit"></i></button>` : '';
 
-        const syncButton = (order.order_type === 'LMT' && order.status === 'Submitted') ?
+        const syncButton = (order.order_type === 'LMT' && order.status === 'Submitted' && trackingOrderId) ?
             `<button class="btn btn-sm btn-outline-primary me-1" onclick="app.orderManager.syncLimitOrder('${safeOrderIdForJs}', null, event)" title="同步订单状态"><i class="fas fa-sync-alt"></i></button>` : '';
-        
-        const cancelButton = canCancel ? 
-            `<button class="btn btn-sm btn-danger" onclick="app.orderManager.cancelOrder(${order.order_id}, this)" title="Cancel"><i class="fas fa-times"></i></button>` : '';
+
+        const cancelButton = canCancel && trackingOrderId ?
+            `<button class="btn btn-sm btn-danger" onclick="app.orderManager.cancelOrder('${trackingOrderId.replace(/'/g, "\\'")}', this)" title="Cancel"><i class="fas fa-times"></i></button>` : '';
         
         // 使用模板构建一个实际的tr元素，避免返回非元素节点
         const trElement = document.createElement('tr');
@@ -895,18 +933,23 @@ class OrderManager {
             trElement.setAttribute('data-created-at', createdAtInfo.raw);
         }
         if (orderIdInfo?.full) {
-            trElement.dataset.orderId = orderIdInfo.full;
+            trElement.dataset.displayOrderId = orderIdInfo.full;
             if (orderIdInfo.short) {
                 trElement.dataset.shortOrderId = orderIdInfo.short;
             } else {
                 delete trElement.dataset.shortOrderId;
             }
-        } else if (rawOrderId) {
-            trElement.dataset.orderId = rawOrderId;
-            trElement.dataset.shortOrderId = rawOrderId.slice(-3);
+        } else if (displayOrderId) {
+            trElement.dataset.displayOrderId = displayOrderId;
+            trElement.dataset.shortOrderId = displayOrderId.slice(-3);
+        } else {
+            delete trElement.dataset.displayOrderId;
+            delete trElement.dataset.shortOrderId;
+        }
+        if (trackingOrderId) {
+            trElement.dataset.orderId = trackingOrderId;
         } else {
             delete trElement.dataset.orderId;
-            delete trElement.dataset.shortOrderId;
         }
         trElement.onmouseenter = (event) => this.app.showNotesTooltip(event, trElement);
         trElement.onmouseleave = () => this.app.hideNotesTooltip();
@@ -1070,7 +1113,7 @@ class OrderManager {
             // 发送订单
             let response;
             if (isEdit) {
-                orderData.order_id = parseInt(isEdit);
+                orderData.order_id = isEdit;
                 response = await this.app.apiCall('/orders/modify', {
                     method: 'POST',
                     body: JSON.stringify(orderData)
@@ -1267,6 +1310,7 @@ class OrderManager {
                 || order.timestamp
                 || null;
             const normalized = {
+                id: order.id ?? order.order_id,
                 order_id: order.order_id,
                 symbol: order.symbol,
                 action: order.action,

@@ -2576,7 +2576,12 @@ class TradingApp {
             return escapeText(str).replace(/\n/g, '<br>');
         })();
 
-        const orderIdDisplay = this.formatOrderIdDisplay(orderData.order_id, {
+        const displayOrderId = (
+            orderData?.id !== undefined && orderData?.id !== null
+                ? orderData.id
+                : (orderData?.order_id ?? orderData?.command_id)
+        );
+        const orderIdDisplay = this.formatOrderIdDisplay(displayOrderId, {
             className: 'order-id-display fw-semibold',
         });
         const parentOrderDisplay = this.formatOrderIdDisplay(orderData.parent_order_id);

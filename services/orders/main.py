@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo
 from fastapi import Depends, FastAPI, HTTPException, status
 from pydantic import BaseModel, ConfigDict, model_validator
 
-from src.db.repositories.order import OrderNotFoundError
+from src.db.repositories.order import OrderNotFoundError, OrderRepositoryError
 from src.ibbot import update_service_health
 from src.ibbot.redis import DEFAULT_COMMAND_QUEUE, enqueue_ib_command, get_redis_client
 
@@ -700,34 +700,44 @@ class OrdersRuntime:
             raise RuntimeError("Orders runtime not started")
 
         command_id = uuid.uuid4().hex
-        payload = {
-            "command_id": command_id,
-            "method": "place_order",
-            "args": [],
-            "kwargs": request.model_dump(mode="json"),
-        }
-        await enqueue_ib_command(payload, redis=self._redis, queue_key=self.command_queue)
-
         request_payload = request.model_dump(mode="json")
         entry = _initial_order_record(command_id, request_payload)
+        persist_snapshot = _clone_order_record(entry)
+        persist_result = await self._persist_order_record(
+            persist_snapshot,
+            timestamp=persist_snapshot.get("requested_at"),
+            mode="insert",
+        )
+        if self.order_repository_factory is not None and persist_result.inserted_id is None:
+            message = self._repository_last_error or "failed to persist order record"
+            raise OrderRepositoryError(message)
+
+        inserted_id = persist_result.inserted_id
+        if inserted_id is not None:
+            entry["id"] = inserted_id
+
         entry_snapshot: dict[str, Any] | None = None
         async with self._lock:
             self._active_orders[command_id] = entry
             self._command_to_order[command_id] = command_id
+            if inserted_id is not None:
+                self._command_to_order[str(inserted_id)] = command_id
             self._last_updated_at = _utc_now()
             entry_snapshot = _clone_order_record(entry)
-        if entry_snapshot is not None:
-            persist_result = await self._persist_order_record(
+        if inserted_id is not None and entry_snapshot is not None:
+            await self._register_persisted_order_id(
+                command_id,
                 entry_snapshot,
-                timestamp=entry_snapshot.get("requested_at"),
-                mode="insert",
+                persist_result,
             )
-            if persist_result.inserted_id is not None:
-                await self._register_persisted_order_id(
-                    command_id,
-                    entry_snapshot,
-                    persist_result,
-                )
+
+        payload = {
+            "command_id": command_id,
+            "method": "place_order",
+            "args": [],
+            "kwargs": dict(request_payload),
+        }
+        await enqueue_ib_command(payload, redis=self._redis, queue_key=self.command_queue)
         await self._publish_health()
         return command_id
 
@@ -2108,7 +2118,14 @@ def create_app(runtime: OrdersRuntime | None = None, *, enable_events: bool = Tr
         request: OrderSubmission,
         runtime: OrdersRuntime = Depends(get_runtime),
     ) -> Mapping[str, Any]:
-        command_id = await runtime.submit_order(request)
+        try:
+            command_id = await runtime.submit_order(request)
+        except OrderRepositoryError as exc:
+            message = str(exc) or "failed to persist order"
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=message,
+            ) from exc
         return {"command_id": command_id, "status": "accepted"}
 
     @app.patch("/orders/{order_id}/fills", status_code=status.HTTP_200_OK)
