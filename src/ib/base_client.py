@@ -356,9 +356,17 @@ class BaseServiceIBClient(EWrapper, EClient):
             # simulator defaults (4002) or live trading defaults (7496/4001)
             # without forcing users to configure environment variables in
             # local setups.
+            fallback_ports: list[int] = []
             for fallback in (4002, 7496, 4001):
                 if fallback not in ports:
                     ports.append(fallback)
+                    fallback_ports.append(fallback)
+            logger.info(
+                "%s using default IB port candidates %s because %s is unset",
+                self._service_name,
+                ports,
+                self._port_env,
+            )
         deduped: list[int] = []
         for port in ports:
             if port not in deduped:
