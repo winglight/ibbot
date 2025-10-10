@@ -30,6 +30,7 @@ class RecordingDockerController(DockerComposeController):
 @pytest.mark.parametrize(
     ("slug", "expected"),
     (
+        ("ib_command", "ib-command"),
         ("market_data", "market-data"),
         ("market_data_feed", "ib-feed"),
         ("queue_monitor", "queue-monitor"),

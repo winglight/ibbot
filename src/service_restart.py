@@ -74,6 +74,7 @@ def _default_compose_dir() -> Path:
 
 
 _DEFAULT_SERVICE_NAME_MAP: Mapping[str, str] = {
+    "ib_command": "ib-command",
     "market_data_feed": "ib-feed",
     "market_data": "market-data",
     "queue_monitor": "queue-monitor",
