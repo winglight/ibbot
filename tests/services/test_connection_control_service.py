@@ -13,32 +13,8 @@ class DummyRedis:
         return None
 
 
-class DummyProvider:
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        self.modules: dict[str, dict[str, Any]] = {}
-
-    async def start(self) -> None:
-        return None
-
-    async def close(self) -> None:
-        return None
-
-    async def get_module(self, module: str, *, use_cache: bool = True) -> dict[str, Any]:
-        return dict(self.modules.get(module, {}))
-
-    async def set_module(self, module: str, values: dict[str, Any]) -> dict[str, Any]:
-        self.modules[module] = dict(values)
-        return dict(values)
-
-    async def get(self, module: str, key: str, *, default: Any = None, use_cache: bool = True) -> Any:
-        return default
-
-
 @pytest.fixture(autouse=True)
 def _patch_dependencies(monkeypatch: pytest.MonkeyPatch):
-    provider = DummyProvider()
-    monkeypatch.setattr(service_module, "ConfigProvider", lambda *args, **kwargs: provider)
-
     async def fake_get_redis_client(*args: Any, **kwargs: Any) -> DummyRedis:
         return DummyRedis()
 
@@ -63,18 +39,17 @@ def _patch_dependencies(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setattr(service_module, "enqueue_ib_command", fake_enqueue)
 
-    return {"provider": provider, "commands": commands}
+    monkeypatch.setenv("IBKR_HOST", "env-host")
+    monkeypatch.setenv("IBKR_PORT", "4102")
+    monkeypatch.setenv("IBKR_CLIENT_ID", "12")
+    monkeypatch.setenv("IBKR_CLIENT_ID_MIN", "10")
+    monkeypatch.setenv("IBKR_CLIENT_ID_MAX", "19")
+    monkeypatch.setenv("IBKR_PAPER_TRADING", "false")
+
+    return {"commands": commands}
 
 
-def test_connection_config_roundtrip(monkeypatch: pytest.MonkeyPatch, _patch_dependencies) -> None:
-    provider: DummyProvider = _patch_dependencies["provider"]
-    provider.modules[service_module.CONFIG_MODULE] = {
-        "host": "redis-host",
-        "port": "4002",
-        "client_id": "3",
-        "paper_trading": "false",
-    }
-
+def test_connection_config_uses_environment(_patch_dependencies) -> None:
     app = service_module.create_app(health_interval=0)
 
     with TestClient(app) as client:
@@ -82,15 +57,14 @@ def test_connection_config_roundtrip(monkeypatch: pytest.MonkeyPatch, _patch_dep
 
     assert response.status_code == 200
     assert response.json() == {
-        "host": "redis-host",
-        "port": 4002,
-        "client_id": 3,
+        "host": "env-host",
+        "port": 4102,
+        "client_id": 12,
         "paper_trading": False,
     }
 
 
-def test_connect_endpoint_persists_config_and_enqueues(_patch_dependencies) -> None:
-    provider: DummyProvider = _patch_dependencies["provider"]
+def test_connect_endpoint_uses_env_and_enqueues(_patch_dependencies) -> None:
     commands: list[dict[str, Any]] = _patch_dependencies["commands"]
 
     app = service_module.create_app(health_interval=0)
@@ -110,11 +84,13 @@ def test_connect_endpoint_persists_config_and_enqueues(_patch_dependencies) -> N
     assert body["status"] == "queued"
     assert body["command_id"]
 
-    # ensure config persisted via provider
-    stored = provider.modules[service_module.CONFIG_MODULE]
-    assert stored["host"] == payload["host"]
-
     assert commands, "expected connect command to be enqueued"
     command = commands[0]
     assert command["method"] == "connect"
-    assert command["metadata"]["config"]["client_id"] == payload["client_id"]
+    metadata_config = command["metadata"]["config"]
+    assert metadata_config == {
+        "host": "env-host",
+        "port": 4102,
+        "client_id": 12,
+        "paper_trading": False,
+    }

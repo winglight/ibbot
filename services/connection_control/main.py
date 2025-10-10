@@ -13,7 +13,6 @@ from pydantic import BaseModel, Field
 
 from src.connection_manager import ConnectionConfig
 from src.ibbot import update_service_health
-from src.ibbot.config import ConfigProvider
 from src.ibbot.logging import get_logger
 from src.ibbot.redis import (
     DEFAULT_COMMAND_QUEUE,
@@ -25,8 +24,6 @@ from src.ibbot.redis import (
 )
 
 SERVICE_NAME = "connection_control"
-CONFIG_MODULE = "ib-connection"
-QUEUE_CONFIG_MODULE = "ib-command"
 HEALTH_INTERVAL = 30.0
 
 
@@ -85,40 +82,20 @@ def _coerce_bool(value: Any, default: bool) -> bool:
     return default
 
 
-def _normalise_config(values: Mapping[str, Any]) -> dict[str, Any]:
-    fallback = ConnectionConfig.from_env().to_dict()
+def _connection_config_from_env() -> dict[str, Any]:
+    config = ConnectionConfig.from_env().to_dict()
 
-    host = (
-        values.get("host")
-        or values.get("IBKR_HOST")
-        or values.get("ibkr_host")
-        or fallback["host"]
-    )
-    port = _coerce_int(
-        values.get("port")
-        or values.get("IBKR_PORT")
-        or values.get("ibkr_port"),
-        fallback["port"],
-    )
-    client_id = _coerce_int(
-        values.get("client_id")
-        or values.get("IBKR_CLIENT_ID")
-        or values.get("clientId"),
-        fallback["client_id"],
-    )
-    paper_trading = _coerce_bool(
-        values.get("paper_trading")
-        or values.get("paperTrading")
-        or values.get("IBKR_PAPER_TRADING"),
-        fallback["paper_trading"],
-    )
+    env_port = os.getenv("IBKR_PORT")
+    env_client_id = os.getenv("IBKR_CLIENT_ID")
+    env_paper = os.getenv("IBKR_PAPER_TRADING")
+    env_host = os.getenv("IBKR_HOST")
 
-    return {
-        "host": str(host or fallback["host"]),
-        "port": int(port),
-        "client_id": int(client_id),
-        "paper_trading": bool(paper_trading),
-    }
+    config["host"] = str(env_host.strip()) if isinstance(env_host, str) and env_host.strip() else config["host"]
+    config["port"] = _coerce_int(env_port, config["port"])
+    config["client_id"] = _coerce_int(env_client_id, config["client_id"])
+    config["paper_trading"] = _coerce_bool(env_paper, config["paper_trading"])
+
+    return config
 
 
 async def _resolve_queue_key(app: FastAPI) -> str:
@@ -126,18 +103,13 @@ async def _resolve_queue_key(app: FastAPI) -> str:
     if isinstance(cached, str) and cached.strip():
         return cached
 
-    provider: ConfigProvider | None = getattr(app.state, "config_provider", None)
     default = DEFAULT_COMMAND_QUEUE
-    if provider is None:
-        app.state.queue_key = default
-        return default
+    override = os.getenv("CONNECTION_CONTROL_QUEUE_KEY") or os.getenv("IB_COMMAND_QUEUE")
+    if isinstance(override, str) and override.strip():
+        queue_key_str = override.strip()
+    else:
+        queue_key_str = default
 
-    try:
-        queue_key = await provider.get(QUEUE_CONFIG_MODULE, "queue_key", default=default)
-    except Exception:
-        queue_key = default
-
-    queue_key_str = str(queue_key or "").strip() or default
     app.state.queue_key = queue_key_str
     return queue_key_str
 
@@ -166,45 +138,15 @@ async def _enqueue_command(app: FastAPI, method: str, *, metadata: Mapping[str, 
 
 
 async def _load_config(app: FastAPI) -> dict[str, Any]:
-    provider: ConfigProvider | None = getattr(app.state, "config_provider", None)
-    cached = getattr(app.state, "cached_config", None)
-
-    if provider is not None:
-        try:
-            values = await provider.get_module(CONFIG_MODULE)
-        except Exception:
-            values = None
-        if values:
-            try:
-                config = _normalise_config(values)
-            except Exception:
-                config = None
-            if config:
-                app.state.cached_config = config
-                return config
-
-    if isinstance(cached, dict):
-        return dict(cached)
-
-    config = ConnectionConfig.from_env().to_dict()
-    normalised = _normalise_config(config)
-    app.state.cached_config = normalised
-    return normalised
+    config = _connection_config_from_env()
+    app.state.cached_config = dict(config)
+    return dict(config)
 
 
 async def _persist_config(app: FastAPI, values: Mapping[str, Any]) -> dict[str, Any]:
-    provider: ConfigProvider | None = getattr(app.state, "config_provider", None)
-    normalised = _normalise_config(values)
-
-    if provider is not None:
-        try:
-            await provider.set_module(CONFIG_MODULE, normalised)
-        except Exception:
-            logger = get_logger(SERVICE_NAME)
-            logger.warning("Failed to persist connection config via provider", exc_info=True)
-
-    app.state.cached_config = normalised
-    return normalised
+    _ = values
+    config = await _load_config(app)
+    return config
 
 
 async def _publish_health(app: FastAPI, *, healthy: bool = True, last_error: str | None = None) -> None:
@@ -263,11 +205,7 @@ def create_app(*, health_interval: float = HEALTH_INTERVAL) -> FastAPI:
     async def lifespan(app: FastAPI):
         redis_url = _resolve_redis_url()
         redis = await get_redis_client(redis_url)
-        provider = ConfigProvider(redis_client=redis, hash_prefix="hash:config")
-        await provider.start()
-
         app.state.redis = redis
-        app.state.config_provider = provider
         app.state.queue_key = None
         app.state.cached_config = None
 
@@ -292,10 +230,6 @@ def create_app(*, health_interval: float = HEALTH_INTERVAL) -> FastAPI:
                     await task
                 except asyncio.CancelledError:  # pragma: no cover - depends on runtime timing
                     pass
-
-            provider_ctx: ConfigProvider | None = getattr(app.state, "config_provider", None)
-            if provider_ctx is not None:
-                await provider_ctx.close()
 
             await close_global_client()
 
