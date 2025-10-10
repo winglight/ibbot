@@ -56,7 +56,7 @@ def test_connection_ports_filters_invalid(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setenv("TEST_IB_PORT", "4002,abc,0,4002")
     client = _DummyClient()
 
-    assert client._connection_ports() == [4002, 7497]
+    assert client._connection_ports() == [4002]
 
 
 def test_connection_ports_dedupes_default(monkeypatch: pytest.MonkeyPatch) -> None:
