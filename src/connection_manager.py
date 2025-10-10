@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import threading
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -44,6 +44,11 @@ class ConnectionConfig:
         client_id = int(os.getenv("IBKR_CLIENT_ID", cls.client_id))
         paper = _parse_bool(os.getenv("IBKR_PAPER_TRADING"), cls.paper_trading)
         return cls(host=host, port=port, client_id=client_id, paper_trading=paper)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the configuration as a plain dictionary."""
+
+        return dict(asdict(self))
 
 
 class ConnectionManager:
