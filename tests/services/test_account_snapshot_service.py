@@ -102,8 +102,16 @@ async def test_refresh_account_info_timeout_marks_stale(
     async def fake_get_client() -> FakeRedis:
         return fake_redis
 
+    call_count = 0
+
     async def fake_request(method: str, **_: Any) -> Dict[str, Any]:
-        raise IBCommandTimeout("timeout", command_id="cmd-timeout", payload={"method": method})
+        nonlocal call_count
+        call_count += 1
+        raise IBCommandTimeout(
+            "timeout",
+            command_id=f"cmd-timeout-{call_count}",
+            payload={"method": method},
+        )
 
     monkeypatch.setattr("src.account_snapshot_service.get_redis_client", fake_get_client)
     monkeypatch.setattr("src.account_snapshot_service.request_ib_command", fake_request)
@@ -121,11 +129,12 @@ async def test_refresh_account_info_timeout_marks_stale(
     assert result is None
     assert repository.account_snapshots == []
     assert repository.stale_reasons == ["ib-command-timeout"]
+    assert call_count == service._command_retry_attempts
     assert fake_redis.calls, "Expected health update call"
     _, mapping = fake_redis.calls[-1]
     assert mapping["healthy"] == "false"
     assert mapping["last_error"] == "timeout"
-    assert mapping["command_id"] == "cmd-timeout"
+    assert mapping["command_id"].startswith("cmd-timeout-")
     assert mapping["source"] == IB_COMMAND_SOURCE
     assert mapping["scope"] == "account_info"
 
@@ -168,5 +177,58 @@ async def test_refresh_positions_execution_error(
     assert mapping["healthy"] == "false"
     assert mapping["last_error"] == "boom"
     assert mapping["command_id"] == "cmd-error"
+    assert mapping["source"] == IB_COMMAND_SOURCE
+    assert mapping["scope"] == "positions"
+
+
+async def test_refresh_positions_timeout_then_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = AccountSnapshotService()
+    fake_redis = FakeRedis()
+    repository = RecordingSnapshotRepository()
+
+    async def fake_get_client() -> FakeRedis:
+        return fake_redis
+
+    call_count = 0
+
+    async def fake_request(method: str, **_: Any) -> Dict[str, Any]:
+        nonlocal call_count
+        call_count += 1
+        assert method == "get_positions"
+        if call_count == 1:
+            raise IBCommandTimeout(
+                "timeout",
+                command_id="cmd-timeout-1",
+                payload={"method": method},
+            )
+        return {
+            "status": "success",
+            "command_id": "cmd-success",
+            "result": [{"symbol": "AAPL", "position": 10}],
+        }
+
+    monkeypatch.setattr("src.account_snapshot_service.get_redis_client", fake_get_client)
+    monkeypatch.setattr("src.account_snapshot_service.request_ib_command", fake_request)
+    monkeypatch.setattr(
+        "src.account_snapshot_service.write_positions_snapshot",
+        repository.write_positions_snapshot,
+    )
+    monkeypatch.setattr(
+        "src.account_snapshot_service.mark_all_snapshots_stale",
+        repository.mark_all_snapshots_stale,
+    )
+
+    result = await service.refresh_positions(reason="unit-test", fast=True)
+
+    assert call_count == 2
+    assert result is not None
+    assert repository.position_snapshots, "Expected positions to be persisted"
+    assert repository.stale_reasons == []
+    assert fake_redis.calls, "Expected health update call"
+    _, mapping = fake_redis.calls[-1]
+    assert mapping["healthy"] == "true"
+    assert mapping["command_id"] == "cmd-success"
     assert mapping["source"] == IB_COMMAND_SOURCE
     assert mapping["scope"] == "positions"

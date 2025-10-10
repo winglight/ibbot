@@ -83,43 +83,93 @@ class SimpleIBKRClient:
         """添加断开连接监听器"""
         self._disconnect_listeners.append(callback)
     
+    def _resolve_managed_account(self) -> Optional[str]:
+        if not self.ib:
+            return None
+
+        try:
+            accounts = self.ib.managedAccounts()
+        except Exception as exc:
+            logger.error(f"Error resolving managed accounts: {exc}")
+            return None
+
+        if not accounts:
+            return None
+
+        if isinstance(accounts, str):
+            parts = [part.strip() for part in accounts.split(',') if part.strip()]
+            return parts[0] if parts else None
+
+        try:
+            for item in accounts:
+                text = str(item).strip()
+                if text:
+                    return text
+        except TypeError:
+            pass
+        return None
+
+    def _call_account_method(self, name: str, account: Optional[str]) -> Sequence[Any]:
+        if not self.ib:
+            return ()
+
+        method = getattr(self.ib, name, None)
+        if method is None:
+            return ()
+
+        if account:
+            try:
+                result = method(account)
+                if result:
+                    return result
+            except TypeError:
+                pass
+            except Exception as exc:
+                logger.error(f"Error calling {name} with account {account}: {exc}")
+
+        try:
+            result = method()
+        except TypeError:
+            return ()
+        except Exception as exc:
+            logger.error(f"Error calling {name}: {exc}")
+            return ()
+
+        return result if result else ()
+
     def get_account_info(self) -> Dict[str, Any]:
         """获取账户信息"""
         if not self.is_connected():
             logger.warning("Not connected to IBKR")
             return {}
-        
-        try:
-            account_values = self.ib.accountValues()
-            account_summary = self.ib.accountSummary()
-            
-            # 转换为字典格式
-            account_info = {
-                'account_values': [
-                    {
-                        'tag': av.tag,
-                        'value': av.value,
-                        'currency': av.currency,
-                        'account': av.account
-                    }
-                    for av in account_values
-                ],
-                'account_summary': [
-                    {
-                        'tag': summary.tag,
-                        'value': summary.value,
-                        'currency': summary.currency,
-                        'account': summary.account
-                    }
-                    for summary in account_summary
-                ]
-            }
-            
-            return account_info
-            
-        except Exception as e:
-            logger.error(f"Error getting account info: {e}")
-            return {}
+
+        account_id = self._resolve_managed_account()
+
+        summary_items = self._call_account_method("accountSummary", account_id)
+        value_items = self._call_account_method("accountValues", account_id)
+
+        account_info = {
+            'account_values': [
+                {
+                    'tag': getattr(av, 'tag', None),
+                    'value': getattr(av, 'value', None),
+                    'currency': getattr(av, 'currency', None),
+                    'account': getattr(av, 'account', None)
+                }
+                for av in value_items
+            ],
+            'account_summary': [
+                {
+                    'tag': getattr(summary, 'tag', None),
+                    'value': getattr(summary, 'value', None),
+                    'currency': getattr(summary, 'currency', None),
+                    'account': getattr(summary, 'account', None)
+                }
+                for summary in summary_items
+            ]
+        }
+
+        return account_info
     
     def get_positions(self) -> List[Dict[str, Any]]:
         """获取持仓信息"""

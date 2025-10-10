@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import os
 import uuid
 from typing import Any, Callable, Dict, List, Mapping, Optional
@@ -94,34 +95,137 @@ class IBKRClient:
     # ------------------------------------------------------------------
     # Data retrieval helpers
 
+    async def _invoke_ib_method(self, ib: Any, name: str, *args: Any) -> Any:
+        """Invoke an ``ib_async`` method, awaiting if necessary."""
+
+        method = getattr(ib, name, None)
+        if method is None:
+            raise AttributeError(f"IB client has no attribute '{name}'")
+
+        if inspect.iscoroutinefunction(method):
+            return await method(*args)
+
+        result = await asyncio.to_thread(method, *args)
+        if inspect.isawaitable(result):
+            return await result
+        return result
+
+    async def _resolve_managed_account(self, ib: Any) -> Optional[str]:
+        """Return the default managed account identifier."""
+
+        for candidate in ("managedAccountsAsync", "managedAccounts"):
+            try:
+                managed_accounts = await self._invoke_ib_method(ib, candidate)
+            except AttributeError:
+                continue
+            except TypeError:
+                continue
+            except Exception as exc:  # pragma: no cover - defensive
+                self._logger.warning(
+                    "Failed to fetch managed accounts", extra={"error": str(exc)}
+                )
+                continue
+
+            if managed_accounts is None:
+                continue
+
+            accounts: list[str] = []
+            if isinstance(managed_accounts, str):
+                accounts = [
+                    item.strip()
+                    for item in managed_accounts.split(",")
+                    if item.strip()
+                ]
+            elif isinstance(managed_accounts, (list, tuple, set)):
+                accounts = [str(item).strip() for item in managed_accounts if item]
+
+            if accounts:
+                return accounts[0]
+
+        return None
+
+    async def _call_account_method(
+        self,
+        ib: Any,
+        method_names: tuple[str, ...],
+        account: Optional[str],
+    ) -> list[Any]:
+        """Call an account helper with the managed account when required."""
+
+        last_error: Optional[Exception] = None
+        for name in method_names:
+            try:
+                if account:
+                    return list(await self._invoke_ib_method(ib, name, account))
+                return list(await self._invoke_ib_method(ib, name))
+            except TypeError as exc:
+                last_error = exc
+                if account:
+                    try:
+                        return list(await self._invoke_ib_method(ib, name))
+                    except Exception as inner_exc:  # pragma: no cover - defensive
+                        last_error = inner_exc if isinstance(inner_exc, Exception) else exc
+                        continue
+            except AttributeError:
+                continue
+            except Exception as exc:  # pragma: no cover - defensive
+                last_error = exc
+                continue
+
+        if last_error is not None:
+            self._logger.debug(
+                "Account helper invocation failed", extra={"error": str(last_error)}
+            )
+        return []
+
     async def get_account_info(self) -> Dict[str, Any]:
-        """Return account summary and values."""
+        """Return account summary and values using ``ib_async`` helpers."""
 
         await self.ensure_connection(reason="account_info")
         ib = self.get_ib_instance()
         if ib is None:
             raise IBKRConnectionError("IB session unavailable")
 
-        account_summary = await asyncio.to_thread(ib.accountSummary)
-        account_values = await asyncio.to_thread(ib.accountValues)
+        account_id = await self._resolve_managed_account(ib)
+
+        summary_items = await self._call_account_method(
+            ib,
+            (
+                "accountSummaryAsync",
+                "account_summary_async",
+                "account_summary",
+                "accountSummary",
+            ),
+            account_id,
+        )
+        value_items = await self._call_account_method(
+            ib,
+            (
+                "accountValuesAsync",
+                "account_values_async",
+                "account_values",
+                "accountValues",
+            ),
+            account_id,
+        )
 
         summary_payload = [
             {
-                "account": item.account,
-                "tag": item.tag,
-                "value": item.value,
+                "account": getattr(item, "account", None),
+                "tag": getattr(item, "tag", None),
+                "value": getattr(item, "value", None),
                 "currency": getattr(item, "currency", None),
             }
-            for item in account_summary
+            for item in summary_items
         ]
         values_payload = [
             {
-                "account": item.account,
-                "tag": item.tag,
-                "value": item.value,
+                "account": getattr(item, "account", None),
+                "tag": getattr(item, "tag", None),
+                "value": getattr(item, "value", None),
                 "currency": getattr(item, "currency", None),
             }
-            for item in account_values
+            for item in value_items
         ]
         return {"account_summary": summary_payload, "account_values": values_payload}
 
