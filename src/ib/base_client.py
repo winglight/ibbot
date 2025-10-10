@@ -351,6 +351,14 @@ class BaseServiceIBClient(EWrapper, EClient):
             ports.append(port)
         if not ports:
             ports = [self.DEFAULT_PORT]
+            # Try commonly used IB Gateway/TWS ports by default so the
+            # service can connect even when the gateway is running with the
+            # simulator defaults (4002) or live trading defaults (7496/4001)
+            # without forcing users to configure environment variables in
+            # local setups.
+            for fallback in (4002, 7496, 4001):
+                if fallback not in ports:
+                    ports.append(fallback)
         deduped: list[int] = []
         for port in ports:
             if port not in deduped:
