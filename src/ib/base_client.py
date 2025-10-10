@@ -355,6 +355,8 @@ class BaseServiceIBClient(EWrapper, EClient):
         for port in ports:
             if port not in deduped:
                 deduped.append(port)
+        if self.DEFAULT_PORT not in deduped:
+            deduped.append(self.DEFAULT_PORT)
         return deduped
 
     def _build_connection_targets(self) -> list[tuple[str, int]]:

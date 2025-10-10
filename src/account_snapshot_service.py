@@ -793,7 +793,7 @@ class AccountSnapshotService:
             duration = time.perf_counter() - started
             message = str(exc)
             snapshot_service_logger.warning(
-                "Account IB client unavailable for method %s (duration=%.3fs)",
+                "Account IB client unavailable for method {} (duration={:.3f}s)",
                 method,
                 duration,
             )
