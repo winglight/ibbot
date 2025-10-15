@@ -17,6 +17,7 @@ from .account_snapshot_cache import (
     write_positions_snapshot,
 )
 from .utils import now_local, to_local_iso
+from src.ib.price_scale import resolve_price_scale
 from src.ibbot import update_service_health
 from src.ibbot.redis import LegacyIBCommandUnavailableError, get_redis_client
 
@@ -296,6 +297,45 @@ class AccountSnapshotService:
             else:
                 normalised[key] = value
         normalised.setdefault("timestamp", self._timestamp_to_iso(data.get("timestamp")))
+
+        symbol = str(data.get("symbol") or "")
+        security_type = str(data.get("security_type") or "")
+        raw_multiplier = data.get("contract_multiplier") or data.get("multiplier")
+
+        price_scale = self._coerce_optional_float(normalised.get("price_scale"))
+        price_scale_source = normalised.get("price_scale_source")
+        contract_multiplier = self._coerce_optional_float(
+            normalised.get("contract_multiplier") or raw_multiplier
+        )
+
+        if price_scale is None or price_scale <= 0:
+            multiplier, derived_scale, derived_source = resolve_price_scale(
+                symbol,
+                security_type,
+                raw_multiplier,
+            )
+            price_scale = derived_scale
+            contract_multiplier = multiplier
+            price_scale_source = derived_source
+        else:
+            if contract_multiplier is None or contract_multiplier <= 0:
+                contract_multiplier = 1.0 / price_scale if price_scale else 1.0
+
+        if price_scale is None or price_scale <= 0:
+            price_scale = 1.0
+            price_scale_source = price_scale_source or "default"
+
+        if contract_multiplier is not None:
+            normalised["contract_multiplier"] = contract_multiplier
+        normalised["price_scale"] = price_scale
+        if price_scale_source is not None:
+            normalised["price_scale_source"] = price_scale_source
+
+        if price_scale != 1.0:
+            avg_cost_value = normalised.get("average_cost")
+            if isinstance(avg_cost_value, (int, float)):
+                normalised["average_cost"] = avg_cost_value * price_scale
+
         return normalised
 
     # ------------------------------------------------------------------
