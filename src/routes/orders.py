@@ -7,6 +7,8 @@ from typing import Any, Awaitable, Callable, Mapping, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from loguru import logger
 
+from pydantic import BaseModel, Field, field_validator
+
 from src.models import OrderRequest
 from src.ibbot.redis import DEFAULT_COMMAND_QUEUE, enqueue_ib_command
 from src.utils import parse_local_datetime
@@ -22,6 +24,40 @@ router = APIRouter()
 
 _ORDERS_SERVICE_CLIENT = OrdersServiceClient()
 _WEBSOCKET_BROADCAST_OVERRIDE: Optional[Callable[[Mapping[str, Any]], Awaitable[None]]] = None
+
+
+_ALLOWED_ORDER_SOURCES = {"manual", "strategy", "risk", "system", "close-position"}
+
+
+class ClosePositionRequest(BaseModel):
+    """Request payload for closing a position via the orders API."""
+
+    symbol: str = Field(..., description="Instrument symbol to close")
+    order_source: str | None = Field(
+        default=None, description="Originator of the close command"
+    )
+
+    @field_validator("symbol")
+    @classmethod
+    def _validate_symbol(cls, value: str) -> str:
+        text = str(value or "").strip()
+        if not text:
+            raise ValueError("Symbol is required")
+        return text
+
+    @field_validator("order_source")
+    @classmethod
+    def _validate_order_source(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        text = str(value or "").strip().lower()
+        if not text:
+            return None
+        normalised = text.replace("_", "-")
+        if normalised not in _ALLOWED_ORDER_SOURCES:
+            allowed = ", ".join(sorted(_ALLOWED_ORDER_SOURCES))
+            raise ValueError(f"order_source must be one of: {allowed}")
+        return normalised
 
 
 def get_orders_service_client() -> OrdersServiceClient:
@@ -85,11 +121,16 @@ async def _broadcast_event(message: Mapping[str, Any]) -> None:
 
 def _normalise_detail(detail: Any) -> Any:
     if isinstance(detail, str):
-        try:
-            parsed = json.loads(detail)
-        except (TypeError, ValueError):
-            return detail or "Orders service error"
-        return _normalise_detail(parsed)
+        text = detail.strip()
+        if not text:
+            return "Orders service error"
+        if text.startswith("{") or text.startswith("["):
+            try:
+                parsed = json.loads(text)
+            except (TypeError, ValueError):
+                return text
+            return _normalise_detail(parsed)
+        return text
     if isinstance(detail, Mapping):
         inner = detail.get("detail")
         if inner is not None:
@@ -291,22 +332,28 @@ async def cancel_all_orders(
 
 @router.post("/api/close_position")
 async def close_position(
-    payload: Mapping[str, Any],
+    payload: ClosePositionRequest,
     request: Request,
     user: Optional[str] = Depends(
         require_roles("admin", "operator", action="orders.close_position")
     ),
 ):
-    symbol = str(payload.get("symbol") or "").strip()
-    if not symbol:
-        raise HTTPException(status_code=400, detail="Symbol is required")
+    symbol = payload.symbol
+
+    command_kwargs: dict[str, Any] = {"symbol": symbol}
+    if payload.order_source:
+        command_kwargs["order_source"] = payload.order_source
+
+    audit_extra = {"symbol": symbol, "submitted_by": user or "anonymous"}
+    if payload.order_source:
+        audit_extra["order_source"] = payload.order_source
 
     return await _enqueue_order_command(
         request=request,
         action="orders.close_position",
         method="close_position",
-        kwargs={"symbol": symbol},
-        audit_success_extra={"symbol": symbol, "submitted_by": user or "anonymous"},
+        kwargs=command_kwargs,
+        audit_success_extra=audit_extra,
         broadcast_payload={"type": "position_close_requested", "symbol": symbol},
     )
 
