@@ -1,13 +1,20 @@
 import asyncio
 import contextlib
+import json
 import os
 from datetime import timedelta
-from typing import Dict, Any, Optional, Mapping
+from typing import Any, Dict, Mapping, Optional
 
 import httpx
-import websockets
 
-from fastapi import APIRouter, HTTPException, Depends, WebSocket, WebSocketDisconnect, Query
+from fastapi import (
+    APIRouter,
+    HTTPException,
+    Depends,
+    WebSocket,
+    WebSocketDisconnect,
+    Query,
+)
 from loguru import logger
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -30,7 +37,6 @@ router = APIRouter()
 
 # Cache controls
 CURRENT_PRICE_CACHE_ONLY = os.getenv("CURRENT_PRICE_CACHE_ONLY", "False").lower() == "true"
-MARKET_DATA_SERVICE_WS_URL = os.getenv("MARKET_DATA_SERVICE_WS_URL")
 historical_data_cache: Dict[str, Dict[str, Any]] = {}
 CACHE_DURATION_MINUTES = 1  # 缓存1分钟
 
@@ -66,17 +72,6 @@ def _get_market_data_service_client() -> MarketDataServiceClient:
 def _market_service_base_url(client: Optional[MarketDataServiceClient] = None) -> str:
     resolved = client.base_url if client else _MARKET_DATA_SERVICE_CLIENT.base_url
     return resolved or MarketDataServiceClient.default_base_url
-
-
-def _market_service_ws_url(client: Optional[MarketDataServiceClient] = None) -> str:
-    if MARKET_DATA_SERVICE_WS_URL:
-        return MARKET_DATA_SERVICE_WS_URL.rstrip("/")
-    base = _market_service_base_url(client)
-    if "://" not in base:
-        base = f"http://{base}"
-    scheme, rest = base.split("://", 1)
-    ws_scheme = "wss" if scheme == "https" else "ws"
-    return f"{ws_scheme}://{rest.rstrip('/')}/ws/market"
 
 
 async def _market_service_get(
@@ -482,56 +477,267 @@ async def get_current_price(
 
     return response
 
-@router.websocket("/ws/market")
-async def proxy_market_data_stream(websocket: WebSocket) -> None:
-    """Proxy websocket updates from the market data service to UI clients."""
+class _MarketDataWebsocketSession:
+    """Manage a single market data websocket connection."""
 
-    client = _get_market_data_service_client()
-    upstream_url = _market_service_ws_url(client)
-    await websocket.accept()
+    def __init__(
+        self,
+        websocket: WebSocket,
+        *,
+        client: Optional[MarketDataServiceClient] = None,
+        poll_interval: float = 1.0,
+    ) -> None:
+        self._websocket = websocket
+        self._client = client or _get_market_data_service_client()
+        self._interval = max(poll_interval, 0.2)
+        self._symbols: set[str] = set()
+        self._poll_task: asyncio.Task | None = None
+        self._closed = asyncio.Event()
+        self._send_lock = asyncio.Lock()
 
-    async def _client_to_upstream(upstream: websockets.WebSocketClientProtocol) -> None:
+    async def start(self) -> None:
+        await self._websocket.accept()
+        self._poll_task = asyncio.create_task(self._poll_loop())
         try:
             while True:
-                message = await websocket.receive_text()
-                await upstream.send(message)
-        except WebSocketDisconnect:
-            await upstream.close()
-        except Exception:
-            await upstream.close()
+                try:
+                    message = await self._websocket.receive_text()
+                except WebSocketDisconnect:
+                    break
+                await self._handle_message(message)
+        finally:
+            await self.close()
 
-    async def _upstream_to_client(upstream: websockets.WebSocketClientProtocol) -> None:
+    async def close(self) -> None:
+        if self._closed.is_set():
+            return
+        self._closed.set()
+        if self._poll_task is not None:
+            self._poll_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._poll_task
+        with contextlib.suppress(Exception):
+            await self._websocket.close()
+
+    async def _handle_message(self, raw_message: str) -> None:
         try:
-            async for message in upstream:
-                if isinstance(message, bytes):
-                    await websocket.send_bytes(message)
-                else:
-                    await websocket.send_text(message)
-        except websockets.ConnectionClosed:
-            raise WebSocketDisconnect()
+            payload = json.loads(raw_message)
+        except ValueError:
+            await self._send_error("invalid_payload", "Message must be JSON encoded")
+            return
 
-    try:
-        async with websockets.connect(upstream_url, ping_interval=None) as upstream:
-            forward_tasks = {
-                asyncio.create_task(_client_to_upstream(upstream)),
-                asyncio.create_task(_upstream_to_client(upstream)),
-            }
-            done, pending = await asyncio.wait(forward_tasks, return_when=asyncio.FIRST_EXCEPTION)
-            for task in pending:
-                task.cancel()
-            for task in done:
-                with contextlib.suppress(Exception):
-                    task.result()
-    except WebSocketDisconnect:
-        pass
-    except Exception as exc:
-        logger.error("Market data websocket proxy error: {}", exc)
-        with contextlib.suppress(Exception):
-            await websocket.send_json(
-                {"type": "error", "detail": "Market data service unavailable"}
+        message_type = (
+            str(payload.get("type") or payload.get("action") or "")
+            .strip()
+            .lower()
+        )
+
+        if message_type in {"subscribe", "subscribe_quotes"}:
+            await self._handle_subscribe(payload)
+        elif message_type in {"unsubscribe", "unsubscribe_quotes"}:
+            await self._handle_unsubscribe(payload)
+        elif message_type in {"set_interval", "interval"}:
+            await self._handle_set_interval(payload)
+        elif message_type == "ping":
+            await self._safe_send({"type": "pong", "source": "market_ws"})
+        else:
+            await self._send_error("unsupported", f"Unsupported message type: {message_type or 'unknown'}")
+
+    async def _handle_subscribe(self, payload: Mapping[str, Any]) -> None:
+        raw_symbols = payload.get("symbols")
+        if isinstance(raw_symbols, str):
+            symbols = [raw_symbols]
+        elif isinstance(raw_symbols, (list, tuple, set)):
+            symbols = list(raw_symbols)
+        else:
+            symbol = payload.get("symbol")
+            symbols = [symbol] if isinstance(symbol, str) else []
+
+        cleaned = {
+            symbol.strip().upper()
+            for symbol in symbols
+            if isinstance(symbol, str) and symbol.strip()
+        }
+
+        if not cleaned:
+            await self._send_error("invalid_subscription", "symbols is required")
+            return
+
+        new_symbols = cleaned - self._symbols
+        if not new_symbols:
+            await self._safe_send(
+                {
+                    "type": "subscription_ack",
+                    "action": "subscribe",
+                    "symbols": sorted(self._symbols),
+                    "success": True,
+                    "source": "market_ws",
+                    "message": "Already subscribed",
+                }
             )
-        with contextlib.suppress(Exception):
-            await websocket.close(code=1011, reason="Upstream connection failed")
-    finally:
-        with contextlib.suppress(Exception):
-            await websocket.close()
+            return
+
+        self._symbols.update(new_symbols)
+        await self._safe_send(
+            {
+                "type": "subscription_ack",
+                "action": "subscribe",
+                "symbols": sorted(new_symbols),
+                "success": True,
+                "source": "market_ws",
+            }
+        )
+        asyncio.create_task(self._send_snapshot())
+
+    async def _handle_unsubscribe(self, payload: Mapping[str, Any]) -> None:
+        raw_symbols = payload.get("symbols")
+        if isinstance(raw_symbols, str):
+            symbols = [raw_symbols]
+        elif isinstance(raw_symbols, (list, tuple, set)):
+            symbols = list(raw_symbols)
+        else:
+            symbol = payload.get("symbol")
+            symbols = [symbol] if isinstance(symbol, str) else []
+
+        cleaned = {
+            symbol.strip().upper()
+            for symbol in symbols
+            if isinstance(symbol, str) and symbol.strip()
+        }
+        removed = cleaned & self._symbols
+        if removed:
+            self._symbols.difference_update(removed)
+
+        await self._safe_send(
+            {
+                "type": "subscription_ack",
+                "action": "unsubscribe",
+                "symbols": sorted(removed or cleaned),
+                "success": True,
+                "source": "market_ws",
+            }
+        )
+
+    async def _handle_set_interval(self, payload: Mapping[str, Any]) -> None:
+        interval_ms = payload.get("interval_ms")
+        if interval_ms is None:
+            interval_ms = payload.get("intervalMs")
+        if interval_ms is None:
+            interval_ms = payload.get("interval")
+
+        try:
+            interval_value = float(interval_ms) / 1000.0
+        except (TypeError, ValueError):
+            await self._send_error("invalid_interval", "interval_ms must be numeric")
+            return
+
+        self._interval = max(interval_value, 0.2)
+        await self._safe_send(
+            {
+                "type": "interval_ack",
+                "interval_ms": int(self._interval * 1000),
+                "success": True,
+                "source": "market_ws",
+            }
+        )
+
+    async def _poll_loop(self) -> None:
+        try:
+            while not self._closed.is_set():
+                try:
+                    await asyncio.wait_for(
+                        self._closed.wait(), timeout=self._interval
+                    )
+                except asyncio.TimeoutError:
+                    if self._closed.is_set():
+                        break
+                    await self._send_snapshot()
+        except asyncio.CancelledError:
+            pass
+
+    async def _send_snapshot(self) -> None:
+        if not self._symbols or self._closed.is_set():
+            return
+
+        symbols = sorted(self._symbols)
+        quotes: Dict[str, Any] = {}
+        errors: list[str] = []
+
+        tasks = [self._client.fetch_current_price(symbol) for symbol in symbols]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        for symbol, result in zip(symbols, results):
+            if isinstance(result, Exception):
+                logger.debug(
+                    "Failed to fetch market price", symbol=symbol, error=str(result)
+                )
+                errors.append(symbol)
+                continue
+
+            if isinstance(result, Mapping):
+                quotes[symbol] = self._normalize_quote(symbol, result)
+            else:
+                quotes[symbol] = {
+                    "symbol": symbol,
+                    "last": result,
+                    "timestamp": now_local().isoformat(),
+                    "source": "market_data_service",
+                }
+
+        if not quotes and errors:
+            await self._send_error(
+                "fetch_failed",
+                f"Failed to load quotes for: {', '.join(sorted(errors))}",
+            )
+            return
+
+        payload: Dict[str, Any] = {
+            "type": "market_quotes",
+            "source": "market_ws",
+            "symbols": symbols,
+            "quotes": quotes,
+            "timestamp": now_local().isoformat(),
+        }
+        if errors:
+            payload["partial"] = True
+            payload["errors"] = sorted(errors)
+
+        await self._safe_send(payload)
+
+    async def _safe_send(self, payload: Mapping[str, Any]) -> None:
+        if self._closed.is_set():
+            return
+        async with self._send_lock:
+            try:
+                await self._websocket.send_text(json.dumps(payload))
+            except WebSocketDisconnect:
+                await self.close()
+
+    async def _send_error(self, code: str, detail: str) -> None:
+        await self._safe_send(
+            {
+                "type": "error",
+                "code": code,
+                "detail": detail,
+                "source": "market_ws",
+            }
+        )
+
+    @staticmethod
+    def _normalize_quote(symbol: str, payload: Mapping[str, Any]) -> Dict[str, Any]:
+        data = dict(payload)
+        data.setdefault("symbol", symbol)
+        if "price" in data and "last" not in data:
+            data["last"] = data.get("price")
+        if "timestamp" not in data:
+            data["timestamp"] = now_local().isoformat()
+        data.setdefault("source", "market_data_service")
+        return data
+
+
+@router.websocket("/ws/market")
+async def proxy_market_data_stream(websocket: WebSocket) -> None:
+    """Stream market data updates to UI clients using a single websocket."""
+
+    session = _MarketDataWebsocketSession(websocket)
+    await session.start()
