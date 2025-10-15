@@ -104,6 +104,15 @@ def _normalise_detail(detail: Any) -> Any:
     return detail
 
 
+def _detail_to_text(detail: Any) -> str:
+    if isinstance(detail, str):
+        return detail
+    try:
+        return json.dumps(detail, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return str(detail)
+
+
 async def _call_orders_service(
     func: Callable[..., Awaitable[Mapping[str, Any]]],
     *args: Any,
@@ -309,19 +318,45 @@ async def reverse_position(
     user: Optional[str] = Depends(
         require_roles("admin", "operator", action="orders.reverse_position")
     ),
+    client: OrdersServiceClient = Depends(get_orders_service_client),
 ):
     symbol = str(payload.get("symbol") or "").strip()
     if not symbol:
         raise HTTPException(status_code=400, detail="Symbol is required")
 
-    return await _enqueue_order_command(
-        request=request,
+    try:
+        response = await _call_orders_service(client.reverse_position, symbol=symbol)
+    except HTTPException as exc:
+        extra = {"symbol": symbol, "submitted_by": user or "anonymous"}
+        await audit_log_failure(
+            request,
+            action="orders.reverse_position",
+            detail=f"reverse position failed: {_detail_to_text(exc.detail)}",
+            extra=extra,
+        )
+        raise
+
+    extra: dict[str, Any] = {"symbol": symbol, "submitted_by": user or "anonymous"}
+    order_info = response.get("order")
+    order_id: Any = response.get("order_id")
+    if isinstance(order_info, Mapping):
+        order_id = order_id or order_info.get("id") or order_info.get("order_id")
+    if order_id:
+        extra["order_id"] = order_id
+
+    await audit_log_success(
+        request,
         action="orders.reverse_position",
-        method="reverse_position",
-        kwargs={"symbol": symbol},
-        audit_success_extra={"symbol": symbol, "submitted_by": user or "anonymous"},
-        broadcast_payload={"type": "position_reverse_requested", "symbol": symbol},
+        detail=f"reverse position for {symbol}",
+        extra=extra,
     )
+
+    event_payload: dict[str, Any] = {"type": "position_reverse_requested", "symbol": symbol}
+    if order_id:
+        event_payload["order_id"] = order_id
+    await _broadcast_event(event_payload)
+
+    return response
 
 
 @router.get("/api/orders")
