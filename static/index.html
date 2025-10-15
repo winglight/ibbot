@@ -799,7 +799,72 @@
                         </div>
                     </div>
                 </div>
-                
+                <div class="card mt-4">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h5><i class="fas fa-shield-alt"></i> Risk Rules</h5>
+                        <div class="d-flex align-items-center gap-2">
+                            <span class="panel-loading-indicator text-white-50 d-none" data-panel-spinner="risk-rules" aria-hidden="true">
+                                <i class="fas fa-circle-notch fa-spin"></i>
+                            </span>
+                            <button class="btn btn-sm btn-warning" id="addRiskRuleBtn2">
+                                <i class="fas fa-plus"></i>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div class="table-responsive" style="max-height: 300px;">
+                            <table class="table table-sm" id="riskRulesTable2">
+                                <thead>
+                                    <tr>
+                                        <th>Symbol</th>
+                                        <th>Type</th>
+                                        <th>Stop Loss</th>
+                                        <th>Take Profit</th>
+                                        <th>Max Time</th>
+                                        <th>Status</th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+                <div class="card mt-4" id="strategiesCard">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0">Strategies</h5>
+                        <div class="d-flex align-items-center gap-2">
+                            <span class="panel-loading-indicator text-white-50 d-none" data-panel-spinner="strategies" aria-hidden="true">
+                                <i class="fas fa-circle-notch fa-spin"></i>
+                            </span>
+                            <button class="btn btn-outline-secondary btn-sm" id="strategySettingsBtn">
+                                <i class="fas fa-cog"></i>
+                            </button>
+                            <button class="btn btn-primary btn-sm" id="addStrategyBtn">
+                                <i class="fas fa-plus"></i>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div class="table-responsive">
+                            <table class="table" id="strategiesTable">
+                                <thead>
+                                    <tr>
+                                        <th>Name</th>
+                                        <th>Symbol</th>
+                                        <th>Status</th>
+                                        <th>Data Reception Status</th>
+                                        <th>P&L</th>
+                                        <th>Trades</th>
+                                        <th>Performance Meta</th>
+                                    </tr>
+                                </thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
 
             </div>
             <div class="col-md-6">
@@ -832,80 +897,6 @@
                     </div>
                 </div>
             </div>
-        </div>
-
-        <div class="row mt-4">
-            <div class="col-md-6">
-                <!-- Risk Rules Panel -->
-                <div class="card">
-                    <div class="card-header d-flex justify-content-between align-items-center">
-                        <h5><i class="fas fa-shield-alt"></i> Risk Rules</h5>
-                        <div class="d-flex align-items-center gap-2">
-                            <span class="panel-loading-indicator text-white-50 d-none" data-panel-spinner="risk-rules" aria-hidden="true">
-                                <i class="fas fa-circle-notch fa-spin"></i>
-                            </span>
-                            <button class="btn btn-sm btn-warning" id="addRiskRuleBtn2">
-                                <i class="fas fa-plus"></i>
-                            </button>
-                        </div>
-                    </div>
-                    <div class="card-body">
-                        <div class="table-responsive" style="max-height: 300px;">
-                            <table class="table table-sm" id="riskRulesTable2">
-                                <thead>
-                                    <tr>
-                                        <th>Symbol</th>
-                                        <th>Type</th>
-                                        <th>Stop Loss</th>
-                                        <th>Take Profit</th>
-                                        <th>Max Time</th>
-                                        <th>Status</th>
-                                        <th>Actions</th>
-                                    </tr>
-                                </thead>
-                                <tbody></tbody>
-                            </table>
-                        </div>
-                    </div>
-                </div>
-            </div>
-            <div class="col-md-6">
-                <div class="card" id="strategiesCard">
-                  <div class="card-header d-flex justify-content-between align-items-center">
-                    <h5 class="mb-0">Strategies</h5>
-                    <div class="d-flex align-items-center gap-2">
-                      <span class="panel-loading-indicator text-white-50 d-none" data-panel-spinner="strategies" aria-hidden="true">
-                        <i class="fas fa-circle-notch fa-spin"></i>
-                      </span>
-                      <button class="btn btn-outline-secondary btn-sm" id="strategySettingsBtn">
-                        <i class="fas fa-cog"></i>
-                      </button>
-                      <button class="btn btn-primary btn-sm" id="addStrategyBtn">
-                        <i class="fas fa-plus"></i>
-                      </button>
-                    </div>
-                  </div>
-                  <div class="card-body">
-                    <div class="table-responsive">
-                      <table class="table" id="strategiesTable">
-                        <thead>
-                          <tr>
-                            <th>Name</th>
-                            <th>Symbol</th>
-                            <th>Status</th>
-                            <th>Data Reception Status</th>
-                            <th>P&L</th>
-                            <th>Trades</th>
-                            <th>Performance Meta</th>
-                          </tr>
-                        </thead>
-                        <tbody></tbody>
-                      </table>
-                    </div>
-                  </div>
-                </div>
-            </div>
-
         </div>
 
     </div>
