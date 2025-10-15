@@ -84,10 +84,21 @@ async def _broadcast_event(message: Mapping[str, Any]) -> None:
 
 
 def _normalise_detail(detail: Any) -> Any:
+    if isinstance(detail, str):
+        try:
+            parsed = json.loads(detail)
+        except (TypeError, ValueError):
+            return detail or "Orders service error"
+        return _normalise_detail(parsed)
     if isinstance(detail, Mapping):
-        return detail.get("detail") or detail
-    if isinstance(detail, list) and detail:
-        return detail[0]
+        inner = detail.get("detail")
+        if inner is not None:
+            return _normalise_detail(inner)
+        return detail
+    if isinstance(detail, list):
+        if not detail:
+            return "Orders service error"
+        return _normalise_detail(detail[0])
     if detail is None:
         return "Orders service error"
     return detail

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from typing import Any, Mapping
 
@@ -289,6 +290,38 @@ def test_get_order_propagates_404(
 
     assert response.status_code == status.HTTP_404_NOT_FOUND
     assert response.json()["detail"] == "missing"
+
+
+def test_get_order_normalises_stringified_error_detail(
+    orders_app: tuple[FastAPI, StubOrdersClient, list[tuple[str, Mapping[str, Any]]]]
+) -> None:
+    app, client_stub, _ = orders_app
+    detail_payload = json.dumps(
+        {
+            "detail": [
+                {
+                    "type": "enum",
+                    "loc": ["body", "order_source"],
+                    "msg": "Input should be 'manual', 'strategy', 'risk' or 'system'",
+                    "input": "reverse-position",
+                }
+            ]
+        }
+    )
+    client_stub.get_order_error = ServiceResponseError(
+        "orders", status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=detail_payload
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/api/orders/invalid")
+
+    assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+    assert response.json()["detail"] == {
+        "type": "enum",
+        "loc": ["body", "order_source"],
+        "msg": "Input should be 'manual', 'strategy', 'risk' or 'system'",
+        "input": "reverse-position",
+    }
 
 
 def test_get_order_propagates_503(
