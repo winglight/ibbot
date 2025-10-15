@@ -161,20 +161,31 @@ def test_get_historical_data_returns_price_history(market_data_app: tuple[FastAP
     app, stub_client = market_data_app
     client = TestClient(app)
 
+    stub_client.historical_response = {
+        "data": [
+            {
+                "timestamp": "2024-01-15T09:30:00Z",
+                "open": 50.0,
+                "high": 51.0,
+                "low": 49.0,
+                "close": 50.5,
+                "price_scale": 0.5,
+                "volume": 100000,
+            }
+        ]
+    }
+
     response = client.get("/api/market-data/historical/AAPL")
 
     assert response.status_code == status.HTTP_200_OK
     data = response.json()
     assert "data" in data
     assert len(data["data"]) > 0
-    
+
     historical_point = data["data"][0]
-    assert "timestamp" in historical_point
-    assert "open" in historical_point
-    assert "high" in historical_point
-    assert "low" in historical_point
-    assert "close" in historical_point
-    assert "volume" in historical_point
+    assert historical_point["open"] == 100.0
+    assert historical_point["close"] == 101.0
+    assert "price_scale" not in historical_point
     assert stub_client.calls == [("get_historical_data", {"symbol": "AAPL"})]
 
 
@@ -208,6 +219,47 @@ def test_get_historical_data_returns_503_when_service_unavailable(market_data_ap
     response = client.get("/api/market-data/historical/AAPL")
 
     assert response.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
+
+
+def test_chart_data_price_scale_normalised(
+    market_data_app: tuple[FastAPI, StubMarketDataServiceClient]
+) -> None:
+    app, stub_client = market_data_app
+    client = TestClient(app)
+
+    stub_client.chart_payload = {
+        "success": True,
+        "data": [
+            {
+                "time": "2024-01-02T10:30:00-05:00",
+                "open": 10.0,
+                "high": 11.0,
+                "low": 9.5,
+                "close": 10.5,
+                "price_scale": 0.5,
+                "metadata": {"timeframe": "5m", "price_scale": 0.5},
+            }
+        ],
+    }
+
+    response = client.post(
+        "/api/chart_data",
+        json={
+            "symbol": "TEST",
+            "duration": "1 D",
+            "bar_size": "5 mins",
+            "exchange": "CME",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    bar = payload["data"][0]
+    assert bar["open"] == 20.0
+    assert bar["close"] == 21.0
+    assert "price_scale" not in bar
+    assert "price_scale" not in bar.get("metadata", {})
+    assert stub_client.calls and stub_client.calls[0][0] == "request_chart_data"
 
 
 def test_get_symbols_returns_available_symbols(market_data_app: tuple[FastAPI, StubMarketDataServiceClient]) -> None:
