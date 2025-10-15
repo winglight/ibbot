@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import timedelta
+from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
 import pytest
@@ -14,6 +15,8 @@ from services.account.main import (
     _state,
     app,
 )
+from src.account_snapshot_service import AccountSnapshotService
+from src.ib.events import PortfolioPositionEvent
 from src.utils import now_local
 
 
@@ -75,6 +78,9 @@ async def test_startup_manages_snapshot_service_lifecycle(monkeypatch: pytest.Mo
             stopped.append(True)
 
         def request_immediate_refresh(self, reason: str = "connection_restored") -> None:
+            return None
+
+        def set_ib_client(self, client: Any) -> None:
             return None
 
     async def _fake_get_redis_client(*_: Any, **__: Any) -> _RecorderRedis:
@@ -157,6 +163,55 @@ async def test_watchdog_triggers_refresh_when_snapshots_stale(
     assert latest_call["mapping"]["last_error"]
     assert latest_call["mapping"]["stale"] is True
 
+
+def test_normalise_position_event_scales_average_cost() -> None:
+    service = AccountSnapshotService()
+    event = PortfolioPositionEvent(
+        account="DU123",
+        contract_id=123,
+        symbol="MNQ",
+        security_type="FUT",
+        position=Decimal("1"),
+        average_cost=Decimal("24883.50"),
+        market_price=Decimal("12441.75"),
+        market_value=Decimal("12441.75"),
+        realized_pnl=Decimal("0"),
+        unrealized_pnl=Decimal("0"),
+        currency="USD",
+        price_scale=Decimal("0.5"),
+        price_scale_source="rule.FUT:MNQ",
+        contract_multiplier=Decimal("2"),
+    )
+
+    result = service._normalise_position_event(event)
+
+    assert result["price_scale"] == pytest.approx(0.5)
+    assert result["average_cost"] == pytest.approx(12441.75)
+    assert result["price_scale_source"] == "rule.FUT:MNQ"
+
+
+def test_normalise_position_event_derives_price_scale_from_multiplier() -> None:
+    service = AccountSnapshotService()
+    event = PortfolioPositionEvent(
+        account="DU123",
+        contract_id=456,
+        symbol="MES",
+        security_type="FUT",
+        position=Decimal("1"),
+        average_cost=Decimal("21000"),
+        market_price=Decimal("4200"),
+        market_value=Decimal("4200"),
+        realized_pnl=Decimal("0"),
+        unrealized_pnl=Decimal("0"),
+        currency="USD",
+        contract_multiplier=Decimal("5"),
+    )
+
+    result = service._normalise_position_event(event)
+
+    assert result["price_scale"] == pytest.approx(0.2)
+    assert result["average_cost"] == pytest.approx(4200.0)
+    assert result["price_scale_source"] == "rule.FUT:MES"
 
 def test_evaluate_snapshot_freshness_detects_staleness() -> None:
     current = now_local()

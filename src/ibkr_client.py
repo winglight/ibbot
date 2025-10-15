@@ -21,6 +21,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from src.ib.insync_compat import IB, LimitOrder, MarketOrder, Order
+from src.ib.price_scale import resolve_price_scale
 
 try:  # pragma: no cover - exercised indirectly in CI when ibapi is unavailable
     from ibapi.contract import Contract as IBAPIContract, ContractDetails as IBAPIContractDetails
@@ -4143,35 +4144,22 @@ class IBKRClient:
                 current_price = None
                 price_source = None
 
-                # 合约乘数用于期货/期权的名义价值和PnL计算
-                contract_multiplier = 1.0
-                raw_multiplier = getattr(item.contract, "multiplier", None)
-                if raw_multiplier is not None:
-                    try:
-                        contract_multiplier = float(raw_multiplier) or 1.0
-                    except (TypeError, ValueError):
-                        contract_multiplier = 1.0
-
-                # 额外的乘数映射，确保常见期货合约的乘数正确
-                multiplier_overrides = {
-                    "MNQ": 2.0,   # Micro E-mini Nasdaq-100
-                    "NQ": 20.0,   # E-mini Nasdaq-100
-                    "MES": 5.0,
-                    "ES": 50.0,
-                    "MYM": 0.5,
-                    "YM": 5.0,
-                    "M2K": 5.0,
-                    "RTY": 50.0,
-                    "MCL": 100.0,
-                    "CL": 1000.0,
-                    "MGC": 10.0,
-                    "GC": 100.0,
-                }
-                if sym in multiplier_overrides:
-                    contract_multiplier = multiplier_overrides[sym]
+                contract = getattr(item, "contract", None)
+                security_type = getattr(contract, "secType", None)
+                contract_multiplier, price_scale, price_scale_source = resolve_price_scale(
+                    sym,
+                    security_type,
+                    getattr(contract, "multiplier", None),
+                )
                 if not math.isfinite(contract_multiplier) or contract_multiplier <= 0:
                     contract_multiplier = 1.0
-                
+                if not math.isfinite(price_scale) or price_scale <= 0:
+                    price_scale = 1.0
+                    price_scale_source = price_scale_source or "default"
+
+                avg_cost_raw = float(item.averageCost or 0.0)
+                avg_cost_adjusted = avg_cost_raw * price_scale
+
                 # 1) 首先检查缓存是否有效
                 ts = self.price_cache_timestamp.get(sym)
                 if ts and now_local() - ts < timedelta(seconds=self.price_cache_ttl_seconds):
@@ -4222,7 +4210,7 @@ class IBKRClient:
                 # 4) 最后兜底 averageCost
                 if current_price is None:
                     if item.averageCost and item.averageCost > 0:
-                        current_price = item.averageCost
+                        current_price = avg_cost_adjusted
                         price_source = "averageCost"
                         ibkr_logger.debug(f"Using averageCost as fallback for {sym}: {current_price}")
                     else:
@@ -4234,13 +4222,6 @@ class IBKRClient:
                 ibkr_logger.debug(f"Price for {sym}: {current_price} (source: {price_source})")
                 
                 position_qty = float(item.position or 0)
-
-                # IBKR 对期货返回的 averageCost 已经乘以乘数，因此除以乘数得到每份合约的成本价
-                avg_cost_raw = float(item.averageCost or 0.0)
-                if contract_multiplier != 0:
-                    avg_cost_adjusted = avg_cost_raw / contract_multiplier
-                else:
-                    avg_cost_adjusted = avg_cost_raw
 
                 if not math.isfinite(avg_cost_adjusted):
                     avg_cost_adjusted = 0.0
@@ -4279,6 +4260,8 @@ class IBKRClient:
                     'current_price': current_price,
                     'market_value': market_value,
                     'contract_multiplier': contract_multiplier,
+                    'price_scale': price_scale,
+                    'price_scale_source': price_scale_source,
                     'unrealized_pnl': unrealized_pnl,
                     'unrealized_pnl_percent': unrealized_pnl_percent,
                     'price_source': price_source,
