@@ -463,6 +463,10 @@
             if (logSearchText) {
                 logSearchText.addEventListener('keydown', (event) => {
                     if (event.key === 'Enter') {
+                        if (event.isComposing || event.keyCode === 229) {
+                            return;
+                        }
+                        event.preventDefault();
                         this.loadLogs({ reset: true });
                     }
                 });
