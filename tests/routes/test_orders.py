@@ -200,6 +200,23 @@ def test_bulk_commands_enqueued(
     assert methods == ["cancel_all_orders", "close_position", "reverse_position"]
 
 
+def test_close_position_accepts_close_position_source(
+    orders_app: tuple[FastAPI, StubOrdersClient, list[tuple[str, Mapping[str, Any]]]]
+) -> None:
+    app, _, enqueued = orders_app
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/close_position",
+            json={"symbol": "ES", "order_source": "close-position"},
+        )
+
+    assert response.status_code == status.HTTP_200_OK
+    command = enqueued[-1][1]
+    assert command["kwargs"]["symbol"] == "ES"
+    assert command["kwargs"]["order_source"] == "close-position"
+
+
 def test_list_orders_uses_service_client(
     orders_app: tuple[FastAPI, StubOrdersClient, list[tuple[str, Mapping[str, Any]]]]
 ) -> None:
