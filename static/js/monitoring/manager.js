@@ -4277,55 +4277,118 @@
 
                 // 创建SVG可视化
                 const svgHeight = 14;
+                const labelPadding = 16;
                 const widthCandidate = container.offsetWidth || container.clientWidth;
                 const svgWidth = widthCandidate && widthCandidate > 0 ? widthCandidate : 200;
+                const wrapperHeight = svgHeight + labelPadding * 2;
+
+                const fmt = (v) => Number.isFinite(v) ? v.toFixed(2) : '-';
+
+                const basePoints = [
+                    { key: 'L', value: low, pos: lowPos, accent: '#6c757d' },
+                    { key: 'O', value: open, pos: openPos, accent: '#0d6efd' },
+                    { key: 'C', value: close, pos: closePos, accent: segmentColor },
+                    { key: 'H', value: high, pos: highPos, accent: '#6c757d' },
+                ];
+
+                for (const point of basePoints) {
+                    point.text = `${point.key}: $${fmt(point.value)}`;
+                    point.x = (point.pos / 100) * svgWidth;
+                    point.estimatedWidth = point.text.length * 6.5;
+                    point.row = 1; // 默认位于下方
+                }
+
+                const sortedByPos = [...basePoints].sort((a, b) => a.pos - b.pos);
+                const lastInRow = [null, null];
+                sortedByPos.forEach((point, index) => {
+                    const preferredRow = index % 2; // 尝试交替分布
+                    const candidateRows = preferredRow === 0 ? [0, 1] : [1, 0];
+                    let assignedRow = candidateRows[0];
+
+                    for (const row of candidateRows) {
+                        const last = lastInRow[row];
+                        if (!last) {
+                            assignedRow = row;
+                            break;
+                        }
+
+                        const gap = Math.abs(point.x - last.x);
+                        const minGap = (point.estimatedWidth + last.estimatedWidth) / 2 + 8;
+                        if (gap >= minGap) {
+                            assignedRow = row;
+                            break;
+                        }
+                    }
+
+                    point.row = assignedRow;
+                    lastInRow[assignedRow] = point;
+                });
 
                 const svg = `
-                    <svg width="${svgWidth}" height="${svgHeight}" style="display: block;">
+                    <svg width="${svgWidth}" height="${svgHeight}" style="position: absolute; left: 0; top: ${labelPadding}px; display: block;">
                         <!-- 背景线段 -->
-                        <line x1="0" y1="${svgHeight/2}" x2="${svgWidth}" y2="${svgHeight/2}" 
+                        <line x1="0" y1="${svgHeight/2}" x2="${svgWidth}" y2="${svgHeight/2}"
                               stroke="#dee2e6" stroke-width="2"/>
-                        
+
                         <!-- 开盘价到当前价的彩色线段 -->
-                        <line x1="${(openPos/100) * svgWidth}" y1="${svgHeight/2}" 
-                              x2="${(closePos/100) * svgWidth}" y2="${svgHeight/2}" 
+                        <line x1="${(openPos/100) * svgWidth}" y1="${svgHeight/2}"
+                              x2="${(closePos/100) * svgWidth}" y2="${svgHeight/2}"
                               stroke="${segmentColor}" stroke-width="3"/>
-                        
+
                         <!-- 最低价点 -->
-                        <circle cx="${(lowPos/100) * svgWidth}" cy="${svgHeight/2}" r="3" 
+                        <circle cx="${(lowPos/100) * svgWidth}" cy="${svgHeight/2}" r="3"
                                 fill="#6c757d" stroke="white" stroke-width="1"/>
-                        
+
                         <!-- 开盘价点 -->
-                        <circle cx="${(openPos/100) * svgWidth}" cy="${svgHeight/2}" r="3" 
+                        <circle cx="${(openPos/100) * svgWidth}" cy="${svgHeight/2}" r="3"
                                 fill="#007bff" stroke="white" stroke-width="1"/>
-                        
+
                         <!-- 当前价点 -->
-                        <circle cx="${(closePos/100) * svgWidth}" cy="${svgHeight/2}" r="3" 
+                        <circle cx="${(closePos/100) * svgWidth}" cy="${svgHeight/2}" r="3"
                                 fill="${segmentColor}" stroke="white" stroke-width="1"/>
-                        
+
                         <!-- 最高价点 -->
-                        <circle cx="${(highPos/100) * svgWidth}" cy="${svgHeight/2}" r="3" 
+                        <circle cx="${(highPos/100) * svgWidth}" cy="${svgHeight/2}" r="3"
                                 fill="#6c757d" stroke="white" stroke-width="1"/>
                     </svg>
                 `;
 
-                const fmt = (v) => Number.isFinite(v) ? v.toFixed(2) : '-';
+                const labelOverlay = basePoints.map((point) => {
+                    const verticalOffset = point.row === 0
+                        ? labelPadding - 2
+                        : labelPadding + svgHeight + 2;
+                    const translateY = point.row === 0 ? '-100%' : '0';
+                    const textColor = point.accent || '#495057';
+                    const content = this.escapeHtml(point.text);
+                    return `
+                        <div style="position: absolute; left: ${point.x}px; top: ${verticalOffset}px; transform: translate(-50%, ${translateY}); font-size: 10px; color: ${textColor}; background: rgba(255, 255, 255, 0.92); border: 1px solid rgba(0, 0, 0, 0.08); border-radius: 8px; padding: 1px 6px; white-space: nowrap; pointer-events: none; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);">
+                            ${content}
+                        </div>
+                    `;
+                }).join('');
 
-                // 生成按价格从低到高排序的标签
-                const points = [
-                    { key: 'L', value: low, style: '' },
-                    { key: 'O', value: open, style: '' },
-                    { key: 'C', value: close, style: `color: ${segmentColor};` },
-                    { key: 'H', value: high, style: '' },
-                ].sort((a, b) => a.value - b.value);
-
-                const labels = `
-                    <div class="d-flex justify-content-between mt-1" style="font-size: 10px; color: #6c757d;">
-                        ${points.map(p => `<span style="${p.style}">${p.key}: $${fmt(p.value)}</span>`).join('')}
+                const wrapper = `
+                    <div style="position: relative; width: ${svgWidth}px; height: ${wrapperHeight}px; margin: 0 auto;">
+                        ${svg}
+                        ${labelOverlay}
                     </div>
                 `;
 
-                container.innerHTML = svg + labels;
+                const sortedPoints = [...basePoints].sort((a, b) => a.value - b.value);
+                const summary = `
+                    <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 12px; font-size: 10px; color: #6c757d; margin-top: 8px;">
+                        ${sortedPoints.map(p => {
+                            const accentColor = p.accent || '#495057';
+                            const weight = p.key === 'C' ? 'font-weight: 600;' : '';
+                            return `<div style="white-space: nowrap;">${this.escapeHtml(p.key)}: <span style="color: ${accentColor}; ${weight}">$${fmt(p.value)}</span></div>`;
+                        }).join('')}
+                    </div>
+                `;
+
+                container.style.height = '';
+                container.style.minHeight = `${wrapperHeight + 32}px`;
+                container.style.position = 'relative';
+                container.innerHTML = wrapper + summary;
             } catch (error) {
                 console.error('Failed to render OHLC price strip:', error);
                 const container = document.getElementById('monitorOhlcStrip');
