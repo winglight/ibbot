@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from typing import Any, Mapping
 
@@ -22,6 +23,8 @@ class StubOrdersClient:
         self.get_order_events_error: Exception | None = None
         self.default_start_date: str | None = None
         self.default_start_date_timezone: str | None = None
+        self.reverse_position_response: Mapping[str, Any] | None = None
+        self.reverse_position_error: Exception | None = None
 
     async def list_orders(self, **kwargs: Any) -> Mapping[str, Any]:
         self.calls.append(("list_orders", dict(kwargs)))
@@ -53,6 +56,19 @@ class StubOrdersClient:
         if self.get_order_events_response is not None:
             return self.get_order_events_response
         return {"success": True, "order_id": order_id, "events": []}
+
+    async def reverse_position(self, symbol: str) -> Mapping[str, Any]:
+        self.calls.append(("reverse_position", {"symbol": symbol}))
+        if self.reverse_position_error:
+            raise self.reverse_position_error
+        if self.reverse_position_response is not None:
+            return self.reverse_position_response
+        return {
+            "success": True,
+            "order_id": f"reverse-{symbol.lower()}",
+            "action": "REVERSE",
+            "quantity": 0,
+        }
 
 @pytest.fixture()
 def orders_app(
@@ -179,25 +195,30 @@ def test_cancel_order_delete_enqueues_command(
     assert enqueued[-1][1]["kwargs"]["order_id"] == "456"
 
 
-def test_bulk_commands_enqueued(
+def test_bulk_commands_use_queue_and_orders_service(
     orders_app: tuple[FastAPI, StubOrdersClient, list[tuple[str, Mapping[str, Any]]]]
 ) -> None:
-    app, _, enqueued = orders_app
+    app, client_stub, enqueued = orders_app
+
+    response_payload = {"success": True, "order_id": "rev-001", "action": "SELL", "quantity": 4}
+    client_stub.reverse_position_response = response_payload
 
     with TestClient(app) as client:
         cancel_all = client.delete("/api/cancel_all_orders")
         close_position = client.post("/api/close_position", json={"symbol": "ES"})
-        reverse_position = client.post(
-            "/api/reverse_position",
-            json={"symbol": "NQ"},
-        )
+        reverse_position = client.post("/api/reverse_position", json={"symbol": "NQ"})
 
     assert cancel_all.status_code == status.HTTP_200_OK
     assert close_position.status_code == status.HTTP_200_OK
     assert reverse_position.status_code == status.HTTP_200_OK
+    assert reverse_position.json() == response_payload
 
-    methods = [entry[1]["method"] for entry in enqueued[-3:]]
-    assert methods == ["cancel_all_orders", "close_position", "reverse_position"]
+    methods = [entry[1]["method"] for entry in enqueued]
+    assert methods == ["cancel_all_orders", "close_position"]
+    assert client_stub.calls and client_stub.calls[-1] == (
+        "reverse_position",
+        {"symbol": "NQ"},
+    )
 
 
 def test_list_orders_uses_service_client(
@@ -210,6 +231,50 @@ def test_list_orders_uses_service_client(
 
     assert response.status_code == status.HTTP_200_OK
     assert client_stub.calls and client_stub.calls[-1][0] == "list_orders"
+
+
+def test_reverse_position_requires_symbol(
+    orders_app: tuple[FastAPI, StubOrdersClient, list[tuple[str, Mapping[str, Any]]]]
+) -> None:
+    app, _, _ = orders_app
+
+    with TestClient(app) as client:
+        response = client.post("/api/reverse_position", json={})
+
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
+    assert response.json()["detail"] == "Symbol is required"
+
+
+def test_reverse_position_normalises_service_error_detail(
+    orders_app: tuple[FastAPI, StubOrdersClient, list[tuple[str, Mapping[str, Any]]]]
+) -> None:
+    app, client_stub, _ = orders_app
+    detail_payload = json.dumps(
+        {
+            "detail": [
+                {
+                    "type": "enum",
+                    "loc": ["body", "order_source"],
+                    "msg": "Input should be 'manual', 'strategy', 'risk' or 'system'",
+                    "input": "reverse-position",
+                }
+            ]
+        }
+    )
+    client_stub.reverse_position_error = ServiceResponseError(
+        "orders", status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=detail_payload
+    )
+
+    with TestClient(app) as client:
+        response = client.post("/api/reverse_position", json={"symbol": "NQ"})
+
+    assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+    assert response.json()["detail"] == {
+        "type": "enum",
+        "loc": ["body", "order_source"],
+        "msg": "Input should be 'manual', 'strategy', 'risk' or 'system'",
+        "input": "reverse-position",
+    }
 
 
 def test_list_orders_normalises_start_date(
@@ -289,6 +354,38 @@ def test_get_order_propagates_404(
 
     assert response.status_code == status.HTTP_404_NOT_FOUND
     assert response.json()["detail"] == "missing"
+
+
+def test_get_order_normalises_stringified_error_detail(
+    orders_app: tuple[FastAPI, StubOrdersClient, list[tuple[str, Mapping[str, Any]]]]
+) -> None:
+    app, client_stub, _ = orders_app
+    detail_payload = json.dumps(
+        {
+            "detail": [
+                {
+                    "type": "enum",
+                    "loc": ["body", "order_source"],
+                    "msg": "Input should be 'manual', 'strategy', 'risk' or 'system'",
+                    "input": "reverse-position",
+                }
+            ]
+        }
+    )
+    client_stub.get_order_error = ServiceResponseError(
+        "orders", status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=detail_payload
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/api/orders/invalid")
+
+    assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+    assert response.json()["detail"] == {
+        "type": "enum",
+        "loc": ["body", "order_source"],
+        "msg": "Input should be 'manual', 'strategy', 'risk' or 'system'",
+        "input": "reverse-position",
+    }
 
 
 def test_get_order_propagates_503(
