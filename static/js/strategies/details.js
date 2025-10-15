@@ -72,6 +72,255 @@
             this.performanceViewState = this.createEmptyPerformanceViewState();
         }
 
+        formatNumericValue(value) {
+            if (value === null || value === undefined || value === '') {
+                return '—';
+            }
+            const numeric = Number(value);
+            if (!Number.isFinite(numeric)) {
+                return String(value);
+            }
+            return numeric.toLocaleString('en-US', {
+                minimumFractionDigits: 0,
+                maximumFractionDigits: 6,
+            });
+        }
+
+        formatBooleanValue(value) {
+            if (value === null || value === undefined) {
+                return '—';
+            }
+            return value ? 'Yes' : 'No';
+        }
+
+        formatParameterValue(rawValue, meta) {
+            if (rawValue === null || rawValue === undefined || rawValue === '') {
+                return meta?.allow_null ? '—' : '—';
+            }
+            if (typeof rawValue === 'boolean') {
+                return this.formatBooleanValue(rawValue);
+            }
+            if (typeof rawValue === 'number') {
+                return this.formatNumericValue(rawValue);
+            }
+            if (typeof rawValue === 'string') {
+                const trimmed = rawValue.trim();
+                if (!trimmed) {
+                    return '—';
+                }
+                const numeric = Number(trimmed);
+                if (Number.isFinite(numeric)) {
+                    return this.formatNumericValue(numeric);
+                }
+                return trimmed;
+            }
+            const numeric = Number(rawValue);
+            if (Number.isFinite(numeric)) {
+                return this.formatNumericValue(numeric);
+            }
+            return String(rawValue);
+        }
+
+        formatParameterRange(meta) {
+            if (!meta || typeof meta !== 'object') {
+                return '—';
+            }
+            const parts = [];
+            if (meta.min !== undefined && meta.min !== null) {
+                parts.push(`≥ ${this.formatNumericValue(meta.min)}`);
+            }
+            if (meta.max !== undefined && meta.max !== null) {
+                parts.push(`≤ ${this.formatNumericValue(meta.max)}`);
+            }
+            return parts.length ? parts.join(' / ') : '—';
+        }
+
+        formatParameterLabel(name, meta) {
+            if (meta?.label) {
+                return meta.label;
+            }
+            if (!name) {
+                return '';
+            }
+            const friendlyMap = {
+                trend_threshold: 'Trend Score Threshold',
+                cooldown_seconds: 'Signal Cooldown (s)',
+                signal_frequency_seconds: 'Execution Frequency (s)',
+                max_loss_streak: 'Breaker (Max Loss Streak)',
+                structure_window_seconds: 'Structure Window (s)',
+                structure_tolerance_ticks: 'Zone Tolerance (ticks)',
+                min_signal_conditions: 'Confirmation Count',
+                default_quantity: 'Base Quantity',
+                min_processing_interval: 'Metrics Sampling Interval (s)',
+            };
+            if (friendlyMap[name]) {
+                return friendlyMap[name];
+            }
+            return String(name)
+                .split('_')
+                .map((segment) => segment ? segment.charAt(0).toUpperCase() + segment.slice(1) : segment)
+                .join(' ');
+        }
+
+        normaliseArray(value) {
+            if (Array.isArray(value)) {
+                return value.filter((item) => typeof item === 'string' && item.trim()).map((item) => item.trim());
+            }
+            return [];
+        }
+
+        normaliseObject(value) {
+            if (value && typeof value === 'object') {
+                return value;
+            }
+            return {};
+        }
+
+        renderSummaryHighlights(highlights) {
+            const highlightList = document.getElementById('summaryHighlights');
+            if (!highlightList) {
+                return;
+            }
+            highlightList.innerHTML = '';
+            if (!highlights.length) {
+                highlightList.innerHTML = '<li class="text-muted">暂无摘要</li>';
+                return;
+            }
+            highlights.forEach((point) => {
+                const li = document.createElement('li');
+                li.textContent = point;
+                highlightList.appendChild(li);
+            });
+        }
+
+        renderRiskParameters(info, baseInfo, paramDefinitions) {
+            const riskList = document.getElementById('summaryRiskParams');
+            if (!riskList) {
+                return;
+            }
+            const riskParams = this.normaliseObject(info?.risk_parameters);
+            const fallbackMeta = this.normaliseObject(baseInfo?.metadata?.risk_parameters);
+            const params = this.normaliseObject(info?.params);
+            const fallbackParams = this.normaliseObject(baseInfo?.params);
+            const keys = [
+                'trend_threshold',
+                'cooldown_seconds',
+                'max_loss_streak',
+                'default_quantity',
+                'structure_window_seconds',
+                'structure_tolerance_ticks',
+                'min_signal_conditions',
+                'signal_frequency_seconds',
+                'min_processing_interval',
+            ];
+            riskList.innerHTML = '';
+            const items = [];
+            keys.forEach((key) => {
+                const definition = paramDefinitions.get(key) || {};
+                let rawValue = riskParams[key];
+                if (rawValue === undefined) rawValue = fallbackMeta[key];
+                if (rawValue === undefined) rawValue = params[key];
+                if (rawValue === undefined) rawValue = fallbackParams[key];
+                if (rawValue === undefined) rawValue = definition.value;
+                if (rawValue === undefined) rawValue = definition.default;
+                if (rawValue === undefined) {
+                    return;
+                }
+                const label = this.formatParameterLabel(key, definition);
+                const display = this.formatParameterValue(rawValue, definition);
+                const li = document.createElement('li');
+                const labelSpan = document.createElement('span');
+                labelSpan.className = 'text-muted';
+                labelSpan.textContent = `${label}:`;
+                const valueSpan = document.createElement('span');
+                valueSpan.className = 'fw-semibold';
+                valueSpan.textContent = display;
+                li.appendChild(labelSpan);
+                li.appendChild(document.createTextNode(' '));
+                li.appendChild(valueSpan);
+                items.push(li);
+            });
+            if (!items.length) {
+                riskList.innerHTML = '<li class="text-muted">暂无数据</li>';
+                return;
+            }
+            items.forEach((item) => riskList.appendChild(item));
+        }
+
+        renderConfigurableParameters(info, baseInfo) {
+            const summaryParamBody = document.querySelector('#summaryParameterTable tbody');
+            if (!summaryParamBody) {
+                return;
+            }
+            const configs = Array.isArray(info?.configurable_parameters)
+                ? info.configurable_parameters
+                : [];
+            if (!configs.length) {
+                summaryParamBody.innerHTML = '<tr><td colspan="4" class="text-muted">暂无可调整参数</td></tr>';
+                return;
+            }
+            const params = this.normaliseObject(info?.params);
+            const fallbackParams = this.normaliseObject(baseInfo?.params);
+            summaryParamBody.innerHTML = '';
+            configs.forEach((param) => {
+                if (!param || typeof param !== 'object') {
+                    return;
+                }
+                const definition = param;
+                const currentValue = param.value !== undefined ? param.value : (params[param.name] ?? fallbackParams[param.name]);
+                const defaultValue = param.default;
+                const row = document.createElement('tr');
+
+                const nameCell = document.createElement('td');
+                nameCell.textContent = this.formatParameterLabel(param.name, definition);
+                row.appendChild(nameCell);
+
+                const currentCell = document.createElement('td');
+                currentCell.textContent = this.formatParameterValue(currentValue, definition);
+                row.appendChild(currentCell);
+
+                const defaultCell = document.createElement('td');
+                defaultCell.textContent = this.formatParameterValue(defaultValue, definition);
+                row.appendChild(defaultCell);
+
+                const rangeCell = document.createElement('td');
+                rangeCell.textContent = this.formatParameterRange(definition);
+                row.appendChild(rangeCell);
+
+                summaryParamBody.appendChild(row);
+            });
+        }
+
+        renderSummaryOverview(info, baseInfo) {
+            const descEl = document.getElementById('summaryDescription');
+            if (descEl) {
+                const description = info?.description ?? baseInfo?.description ?? '';
+                descEl.textContent = description || '—';
+            }
+            const pathEl = document.getElementById('summaryPath');
+            if (pathEl) {
+                const metaPath = baseInfo?.metadata && typeof baseInfo.metadata === 'object'
+                    ? baseInfo.metadata.file_path || baseInfo.metadata.path
+                    : null;
+                const filePath = info?.file_path || metaPath || baseInfo?.file_path || '';
+                pathEl.textContent = filePath || '-';
+            }
+            const highlights = this.normaliseArray(info?.summary_points);
+            const fallbackHighlights = this.normaliseArray(
+                baseInfo?.metadata && Array.isArray(baseInfo.metadata.summary_points)
+                    ? baseInfo.metadata.summary_points
+                    : baseInfo?.summary_points
+            );
+            this.renderSummaryHighlights(highlights.length ? highlights : fallbackHighlights);
+
+            const configs = Array.isArray(info?.configurable_parameters)
+                ? info.configurable_parameters
+                : [];
+            const paramDefinitions = new Map(configs.map((entry) => [entry.name, entry]));
+            this.renderRiskParameters(info, baseInfo, paramDefinitions);
+            this.renderConfigurableParameters(info, baseInfo);
+        }
+
         prepareStrategyDetailsModal(name) {
             this.initializeStrategyDetailsState(name);
             this.currentStrategyDetails = name;
@@ -787,10 +1036,12 @@
                 this.app.summaryPushAwaitingTimer = null;
             }
 
+            let summaryInfo = null;
             try {
                 const info = await this.fetchStrategyInternalInfo(name);
                 if (info) {
                     state.internalInfo = info;
+                    summaryInfo = info;
                     if (infoStatus) {
                         const usedCached = Boolean(state.internalInfoCached || info?.stale);
                         if (usedCached) {
@@ -872,6 +1123,8 @@
             } catch (err) {
                 console.error('Failed to load internal strategy info:', err);
             }
+
+            this.renderSummaryOverview(summaryInfo || {}, baseInfo);
 
             await this.manager?.loadStrategyStatus?.(name, { force: true });
         }
