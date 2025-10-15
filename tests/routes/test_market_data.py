@@ -89,6 +89,22 @@ class StubMarketDataServiceClient:
             raise ServiceUnavailableError("Market data service unavailable")
         return self.backfill_response
 
+    async def fetch_current_price(self, symbol: str) -> Mapping[str, Any]:
+        self.calls.append(("fetch_current_price", {"symbol": symbol}))
+        if self.should_fail:
+            raise ServiceUnavailableError("Market data service unavailable")
+        base_price = 150.0
+        offset = float(len(symbol) % 5)
+        return {
+            "symbol": symbol,
+            "bid": base_price - 0.1 + offset,
+            "ask": base_price + 0.1 + offset,
+            "last": base_price + offset,
+            "volume": 100000,
+            "timestamp": "2024-01-15T10:00:00Z",
+            "source": "market_data_service",
+        }
+
 
 @pytest.fixture()
 def market_data_app(monkeypatch: pytest.MonkeyPatch) -> tuple[FastAPI, StubMarketDataServiceClient]:
@@ -371,3 +387,53 @@ def test_quotes_response_format(market_data_app: tuple[FastAPI, StubMarketDataSe
         assert isinstance(quote["last"], (int, float))
         assert isinstance(quote["volume"], int)
         assert isinstance(quote["timestamp"], str)
+
+
+def test_market_data_websocket_delivers_quotes(
+    market_data_app: tuple[FastAPI, StubMarketDataServiceClient],
+) -> None:
+    app, stub_client = market_data_app
+    client = TestClient(app)
+
+    with client.websocket_connect("/ws/market") as websocket:
+        websocket.send_json({"type": "subscribe", "symbols": ["AAPL", "MSFT"]})
+        ack = websocket.receive_json()
+        assert ack["type"] == "subscription_ack"
+        assert ack["action"] == "subscribe"
+        assert sorted(ack["symbols"]) == ["AAPL", "MSFT"]
+
+        update = websocket.receive_json()
+        assert update["type"] == "market_quotes"
+        assert set(update["quotes"].keys()) == {"AAPL", "MSFT"}
+
+        websocket.send_json({"type": "unsubscribe", "symbols": ["AAPL"]})
+        ack_unsub = websocket.receive_json()
+        assert ack_unsub["action"] == "unsubscribe"
+        assert "AAPL" in ack_unsub["symbols"]
+
+    fetch_calls = [entry for entry in stub_client.calls if entry[0] == "fetch_current_price"]
+    assert fetch_calls
+    assert {call[1]["symbol"] for call in fetch_calls} == {"AAPL", "MSFT"}
+
+
+def test_market_data_websocket_handles_invalid_messages(
+    market_data_app: tuple[FastAPI, StubMarketDataServiceClient],
+) -> None:
+    app, _ = market_data_app
+    client = TestClient(app)
+
+    with client.websocket_connect("/ws/market") as websocket:
+        websocket.send_text("not-json")
+        error = websocket.receive_json()
+        assert error["type"] == "error"
+        assert error["code"] == "invalid_payload"
+
+        websocket.send_json({"type": "set_interval", "interval_ms": "foo"})
+        interval_error = websocket.receive_json()
+        assert interval_error["type"] == "error"
+        assert interval_error["code"] == "invalid_interval"
+
+        websocket.send_json({"type": "subscribe", "symbols": []})
+        subscription_error = websocket.receive_json()
+        assert subscription_error["type"] == "error"
+        assert subscription_error["code"] == "invalid_subscription"

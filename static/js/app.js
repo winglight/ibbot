@@ -160,6 +160,11 @@ function ensureCoreDependencies() {
     }
 
     const UIControllerClass = resolveModule(['ui', 'controller'], 'UIController', globalScope.UIController);
+    const MarketDataWebSocketClientClass = resolveModule(
+        ['marketData', 'ws'],
+        'MarketDataWebSocketClient',
+        globalScope.MarketDataWebSocketClient
+    );
 
     return {
         MonitoringManagerClass,
@@ -176,6 +181,7 @@ function ensureCoreDependencies() {
         OrdersManagerClass,
         NotificationsManagerClass,
         UIControllerClass,
+        MarketDataWebSocketClientClass,
     };
 }
 
@@ -226,6 +232,7 @@ class TradingApp {
             OrdersManagerClass,
             NotificationsManagerClass,
             UIControllerClass,
+            MarketDataWebSocketClientClass,
         } = ensureCoreDependencies();
 
         this.ws = null;
@@ -245,6 +252,8 @@ class TradingApp {
         this.serviceRestartController = null;
         this.configCenterManager = null;
         this.configCenterInitRetry = null;
+        this.marketDataClient = null;
+        this.latestMarketQuotes = {};
 
         if (typeof MonitoringManagerClass !== 'function') {
             throw new Error('MonitoringManager module is required');
@@ -323,6 +332,25 @@ class TradingApp {
             this.formatNumber.bind(this)
         );
         this.notificationsManager = new NotificationsManagerClass(this);
+        if (typeof MarketDataWebSocketClientClass === 'function') {
+            try {
+                if (typeof MarketDataWebSocketClientClass.getInstance === 'function') {
+                    this.marketDataClient = MarketDataWebSocketClientClass.getInstance();
+                } else {
+                    this.marketDataClient = new MarketDataWebSocketClientClass();
+                }
+            } catch (error) {
+                console.error('Failed to initialize market data websocket client:', error);
+                this.marketDataClient = null;
+            }
+        }
+        if (this.marketDataClient && typeof this.marketDataClient.onQuotesUpdate === 'function') {
+            try {
+                this.marketDataClient.onQuotesUpdate((payload) => this._handleMarketQuotesUpdate(payload));
+            } catch (error) {
+                console.error('Failed to bind market data websocket handler:', error);
+            }
+        }
         this.lastKnownOrderPrice = null;
         this.logsManagerInitialized = false;
         this.notificationsManagerInitialized = false;
@@ -786,6 +814,73 @@ class TradingApp {
             }
         });
         return handled;
+    }
+
+    _handleMarketQuotesUpdate(payload) {
+        if (!payload || payload.type !== 'market_quotes') return;
+        if (payload && typeof payload.quotes === 'object') {
+            this.latestMarketQuotes = { ...payload.quotes };
+        } else {
+            this.latestMarketQuotes = {};
+        }
+        this._updateMarketQuoteElements();
+    }
+
+    _updateMarketQuoteElements() {
+        if (!this.latestMarketQuotes || typeof document === 'undefined') {
+            return;
+        }
+        const elements = document.querySelectorAll('[data-market-symbol]');
+        if (!elements || elements.length === 0) {
+            return;
+        }
+        elements.forEach((element) => {
+            try {
+                const symbol = (element.dataset.marketSymbol || '').trim().toUpperCase();
+                if (!symbol) return;
+                const quote = this.latestMarketQuotes[symbol];
+                if (!quote) return;
+                const field = (element.dataset.marketField || 'last').trim();
+                const rawValue = quote[field];
+                if (rawValue === undefined || rawValue === null) return;
+                if (typeof rawValue === 'number') {
+                    if (field === 'volume' || field === 'size') {
+                        element.textContent = this.formatNumber(Math.round(rawValue));
+                    } else {
+                        element.textContent = this.formatNumber(rawValue);
+                    }
+                } else {
+                    element.textContent = String(rawValue);
+                }
+            } catch (error) {
+                console.error('Failed to update market data element', error);
+            }
+        });
+    }
+
+    subscribeMarketQuotes(symbols, handler, options = {}) {
+        if (!this.marketDataClient || typeof this.marketDataClient.subscribe !== 'function') {
+            return () => {};
+        }
+        return this.marketDataClient.subscribe(symbols, handler, options);
+    }
+
+    unsubscribeMarketQuotes(symbols, handler) {
+        if (!this.marketDataClient || typeof this.marketDataClient.unsubscribe !== 'function') {
+            return;
+        }
+        this.marketDataClient.unsubscribe(symbols, handler);
+    }
+
+    onMarketQuotesUpdate(handler) {
+        if (!this.marketDataClient || typeof this.marketDataClient.onQuotesUpdate !== 'function') {
+            return () => {};
+        }
+        return this.marketDataClient.onQuotesUpdate(handler);
+    }
+
+    getLatestMarketQuotes() {
+        return { ...this.latestMarketQuotes };
     }
 
     handleStrategyPerformanceMessage(message) {

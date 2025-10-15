@@ -7,6 +7,8 @@ from typing import Any, Awaitable, Callable, Mapping, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from loguru import logger
 
+from pydantic import BaseModel, Field, field_validator
+
 from src.models import OrderRequest
 from src.ibbot.redis import DEFAULT_COMMAND_QUEUE, enqueue_ib_command
 from src.utils import parse_local_datetime
@@ -22,6 +24,40 @@ router = APIRouter()
 
 _ORDERS_SERVICE_CLIENT = OrdersServiceClient()
 _WEBSOCKET_BROADCAST_OVERRIDE: Optional[Callable[[Mapping[str, Any]], Awaitable[None]]] = None
+
+
+_ALLOWED_ORDER_SOURCES = {"manual", "strategy", "risk", "system", "close-position"}
+
+
+class ClosePositionRequest(BaseModel):
+    """Request payload for closing a position via the orders API."""
+
+    symbol: str = Field(..., description="Instrument symbol to close")
+    order_source: str | None = Field(
+        default=None, description="Originator of the close command"
+    )
+
+    @field_validator("symbol")
+    @classmethod
+    def _validate_symbol(cls, value: str) -> str:
+        text = str(value or "").strip()
+        if not text:
+            raise ValueError("Symbol is required")
+        return text
+
+    @field_validator("order_source")
+    @classmethod
+    def _validate_order_source(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        text = str(value or "").strip().lower()
+        if not text:
+            return None
+        normalised = text.replace("_", "-")
+        if normalised not in _ALLOWED_ORDER_SOURCES:
+            allowed = ", ".join(sorted(_ALLOWED_ORDER_SOURCES))
+            raise ValueError(f"order_source must be one of: {allowed}")
+        return normalised
 
 
 def get_orders_service_client() -> OrdersServiceClient:
@@ -84,13 +120,38 @@ async def _broadcast_event(message: Mapping[str, Any]) -> None:
 
 
 def _normalise_detail(detail: Any) -> Any:
+    if isinstance(detail, str):
+        text = detail.strip()
+        if not text:
+            return "Orders service error"
+        if text.startswith("{") or text.startswith("["):
+            try:
+                parsed = json.loads(text)
+            except (TypeError, ValueError):
+                return text
+            return _normalise_detail(parsed)
+        return text
     if isinstance(detail, Mapping):
-        return detail.get("detail") or detail
-    if isinstance(detail, list) and detail:
-        return detail[0]
+        inner = detail.get("detail")
+        if inner is not None:
+            return _normalise_detail(inner)
+        return detail
+    if isinstance(detail, list):
+        if not detail:
+            return "Orders service error"
+        return _normalise_detail(detail[0])
     if detail is None:
         return "Orders service error"
     return detail
+
+
+def _detail_to_text(detail: Any) -> str:
+    if isinstance(detail, str):
+        return detail
+    try:
+        return json.dumps(detail, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return str(detail)
 
 
 async def _call_orders_service(
@@ -271,22 +332,28 @@ async def cancel_all_orders(
 
 @router.post("/api/close_position")
 async def close_position(
-    payload: Mapping[str, Any],
+    payload: ClosePositionRequest,
     request: Request,
     user: Optional[str] = Depends(
         require_roles("admin", "operator", action="orders.close_position")
     ),
 ):
-    symbol = str(payload.get("symbol") or "").strip()
-    if not symbol:
-        raise HTTPException(status_code=400, detail="Symbol is required")
+    symbol = payload.symbol
+
+    command_kwargs: dict[str, Any] = {"symbol": symbol}
+    if payload.order_source:
+        command_kwargs["order_source"] = payload.order_source
+
+    audit_extra = {"symbol": symbol, "submitted_by": user or "anonymous"}
+    if payload.order_source:
+        audit_extra["order_source"] = payload.order_source
 
     return await _enqueue_order_command(
         request=request,
         action="orders.close_position",
         method="close_position",
-        kwargs={"symbol": symbol},
-        audit_success_extra={"symbol": symbol, "submitted_by": user or "anonymous"},
+        kwargs=command_kwargs,
+        audit_success_extra=audit_extra,
         broadcast_payload={"type": "position_close_requested", "symbol": symbol},
     )
 
@@ -298,19 +365,45 @@ async def reverse_position(
     user: Optional[str] = Depends(
         require_roles("admin", "operator", action="orders.reverse_position")
     ),
+    client: OrdersServiceClient = Depends(get_orders_service_client),
 ):
     symbol = str(payload.get("symbol") or "").strip()
     if not symbol:
         raise HTTPException(status_code=400, detail="Symbol is required")
 
-    return await _enqueue_order_command(
-        request=request,
+    try:
+        response = await _call_orders_service(client.reverse_position, symbol=symbol)
+    except HTTPException as exc:
+        extra = {"symbol": symbol, "submitted_by": user or "anonymous"}
+        await audit_log_failure(
+            request,
+            action="orders.reverse_position",
+            detail=f"reverse position failed: {_detail_to_text(exc.detail)}",
+            extra=extra,
+        )
+        raise
+
+    extra: dict[str, Any] = {"symbol": symbol, "submitted_by": user or "anonymous"}
+    order_info = response.get("order")
+    order_id: Any = response.get("order_id")
+    if isinstance(order_info, Mapping):
+        order_id = order_id or order_info.get("id") or order_info.get("order_id")
+    if order_id:
+        extra["order_id"] = order_id
+
+    await audit_log_success(
+        request,
         action="orders.reverse_position",
-        method="reverse_position",
-        kwargs={"symbol": symbol},
-        audit_success_extra={"symbol": symbol, "submitted_by": user or "anonymous"},
-        broadcast_payload={"type": "position_reverse_requested", "symbol": symbol},
+        detail=f"reverse position for {symbol}",
+        extra=extra,
     )
+
+    event_payload: dict[str, Any] = {"type": "position_reverse_requested", "symbol": symbol}
+    if order_id:
+        event_payload["order_id"] = order_id
+    await _broadcast_event(event_payload)
+
+    return response
 
 
 @router.get("/api/orders")
