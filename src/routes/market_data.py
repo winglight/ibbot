@@ -1,8 +1,9 @@
 import asyncio
 import contextlib
+import math
 import os
 from datetime import timedelta
-from typing import Dict, Any, Optional, Mapping
+from typing import Dict, Any, Optional, Mapping, Iterable
 
 import httpx
 import websockets
@@ -95,6 +96,70 @@ async def _market_service_get(
         return await request("GET", path)
 
 
+_PRICE_FIELDS: tuple[str, ...] = (
+    "open",
+    "high",
+    "low",
+    "close",
+    "last",
+    "bid",
+    "ask",
+    "mid",
+    "mid_price",
+    "midPrice",
+    "previous_close",
+    "previousClose",
+    "mark_price",
+    "markPrice",
+)
+
+
+def _is_effective_scale(value: Any) -> bool:
+    try:
+        scale = float(value)
+    except (TypeError, ValueError):
+        return False
+    if scale == 0 or not math.isfinite(scale):
+        return False
+    return abs(scale - 1.0) > 1e-9
+
+
+def _normalise_price_scale(mapping: Mapping[str, Any]) -> Dict[str, Any]:
+    """Return *mapping* with price fields restored to raw values if scaled."""
+
+    result: Dict[str, Any] = dict(mapping)
+    scale_value = result.get("price_scale")
+    if _is_effective_scale(scale_value):
+        scale = float(scale_value)
+        factor = 1.0 / scale
+        for field in _PRICE_FIELDS:
+            if field in result:
+                value = result[field]
+                if isinstance(value, (int, float)) and math.isfinite(value):
+                    result[field] = float(value) * factor
+        # Clean up nested metadata that may also carry scale hints.
+        metadata = result.get("metadata")
+        if isinstance(metadata, Mapping):
+            result["metadata"] = _normalise_price_scale(metadata)
+        result.pop("price_scale", None)
+        result.pop("price_scale_source", None)
+    else:
+        metadata = result.get("metadata")
+        if isinstance(metadata, Mapping):
+            result["metadata"] = _normalise_price_scale(metadata)
+    return result
+
+
+def _normalise_price_scaled_series(items: Iterable[Any]) -> list[Any]:
+    normalised: list[Any] = []
+    for item in items:
+        if isinstance(item, Mapping):
+            normalised.append(_normalise_price_scale(item))
+        else:
+            normalised.append(item)
+    return normalised
+
+
 def _clean_expired_cache() -> None:
     """清理过期的内存缓存"""
     global historical_data_cache
@@ -169,6 +234,17 @@ async def get_historical_data(
         response_payload = dict(service_result)
         cached_data = response_payload.get("data")
         if isinstance(cached_data, list):
+            normalised = _normalise_price_scaled_series(cached_data)
+            response_payload["data"] = normalised
+            historical_data_cache[cache_key] = {
+                "payload": dict(response_payload),
+                "timestamp": now,
+                "expires_at": now + timedelta(minutes=CACHE_DURATION_MINUTES),
+                "source": response_payload.get("source", "market_data_service"),
+            }
+        elif isinstance(cached_data, Mapping):
+            normalised = _normalise_price_scale(cached_data)
+            response_payload["data"] = normalised
             historical_data_cache[cache_key] = {
                 "payload": dict(response_payload),
                 "timestamp": now,
@@ -260,6 +336,13 @@ async def _fetch_chart_data_payload(request: ChartDataRequest) -> Dict[str, Any]
 
     response_payload = dict(service_result)
     data = response_payload.get("data")
+    if isinstance(data, list):
+        response_payload["data"] = _normalise_price_scaled_series(data)
+        data = response_payload["data"]
+    elif isinstance(data, Mapping):
+        response_payload["data"] = _normalise_price_scale(data)
+        data = response_payload["data"]
+
     if not data:
         raise HTTPException(status_code=404, detail="No chart data available")
 

@@ -15,6 +15,7 @@ from src.ib.events import (
     account_update_from_ib,
     portfolio_position_from_ib,
 )
+from src.ib.price_scale import resolve_price_scale
 
 
 ACCOUNT_IB_HOST_ENV = "ACCOUNT_IB_HOST"
@@ -260,11 +261,18 @@ class ServiceIBClient(BaseServiceIBClient):
             realizedPNL,
             accountName,
         )
+        symbol = str(getattr(contract, "symbol", "") or "")
+        security_type = str(getattr(contract, "secType", "") or "")
+        multiplier, price_scale, price_scale_source = resolve_price_scale(
+            symbol,
+            security_type,
+            getattr(contract, "multiplier", None),
+        )
         event = portfolio_position_from_ib(
             account=accountName,
             contract_id=int(getattr(contract, "conId", 0) or 0),
-            symbol=str(getattr(contract, "symbol", "") or ""),
-            security_type=str(getattr(contract, "secType", "") or ""),
+            symbol=symbol,
+            security_type=security_type,
             position=position,
             average_cost=averageCost,
             market_price=marketPrice,
@@ -272,6 +280,9 @@ class ServiceIBClient(BaseServiceIBClient):
             realized_pnl=realizedPNL,
             unrealized_pnl=unrealizedPNL,
             currency=getattr(contract, "currency", None),
+            contract_multiplier=multiplier,
+            price_scale=price_scale,
+            price_scale_source=price_scale_source,
         )
         self.publish_event("portfolio", event)
 
@@ -315,11 +326,18 @@ class ServiceIBClient(BaseServiceIBClient):
         avgCost: float,
     ) -> None:  # noqa: N802 - IB API signature
         super().position(account, contract, position, avgCost)
+        symbol = str(getattr(contract, "symbol", "") or "")
+        security_type = str(getattr(contract, "secType", "") or "")
+        multiplier, price_scale, price_scale_source = resolve_price_scale(
+            symbol,
+            security_type,
+            getattr(contract, "multiplier", None),
+        )
         event = portfolio_position_from_ib(
             account=account,
             contract_id=int(getattr(contract, "conId", 0) or 0),
-            symbol=str(getattr(contract, "symbol", "") or ""),
-            security_type=str(getattr(contract, "secType", "") or ""),
+            symbol=symbol,
+            security_type=security_type,
             position=position,
             average_cost=avgCost,
             market_price=None,
@@ -327,6 +345,9 @@ class ServiceIBClient(BaseServiceIBClient):
             realized_pnl=None,
             unrealized_pnl=None,
             currency=getattr(contract, "currency", None),
+            contract_multiplier=multiplier,
+            price_scale=price_scale,
+            price_scale_source=price_scale_source,
         )
         with self._cache_lock:
             if self._positions_buffer is not None:

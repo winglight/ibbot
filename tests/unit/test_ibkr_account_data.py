@@ -178,3 +178,73 @@ async def test_get_positions_uses_controller_snapshot(monkeypatch: pytest.Monkey
     assert positions[0]["unrealized_pnl"] == pytest.approx(400.0)
     assert controller.update_calls
     assert controller.positions_calls
+
+
+class _NoMarketPriceController(_FakeAccountController):
+    def __init__(self) -> None:
+        super().__init__()
+        self._contract = SimpleNamespace(
+            symbol="MNQ",
+            multiplier="2",
+            secType="FUT",
+            exchange="CME",
+            currency="USD",
+        )
+
+    async def request_account_updates(self, *, account: str, timeout: float) -> Dict[str, Any]:
+        self.update_calls.append({"account": account, "timeout": timeout})
+        return {
+            "account": account or "DU123",
+            "account_values": [],
+            "portfolio": [
+                {
+                    "contract": self._contract,
+                    "position": 1.0,
+                    "market_price": 0.0,
+                    "market_value": 0.0,
+                    "average_cost": 24883.5,
+                    "unrealized_pnl": 0.0,
+                    "realized_pnl": 0.0,
+                    "account": account or "DU123",
+                }
+            ],
+        }
+
+    async def request_positions(self, *, timeout: float) -> List[Dict[str, Any]]:
+        self.positions_calls.append({"timeout": timeout})
+        return [
+            {
+                "account": "DU123",
+                "contract": self._contract,
+                "position": 1.0,
+                "avg_cost": 24883.5,
+            }
+        ]
+
+
+@pytest.mark.asyncio
+async def test_get_positions_scales_average_cost_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    manager = _StubConnectionManager()
+    client = IBKRClient(connection_manager=manager)
+
+    controller = _NoMarketPriceController()
+
+    async def _ensure(self):
+        return controller
+
+    async def _fail_active_ib(self, **kwargs):  # pragma: no cover - should not run
+        raise AssertionError("_ensure_active_ib should not be invoked when controller is available")
+
+    monkeypatch.setattr(IBKRClient, "_ensure_ibapi_controller", _ensure, raising=False)
+    monkeypatch.setattr(IBKRClient, "_ensure_active_ib", _fail_active_ib, raising=False)
+
+    positions = await client.get_positions(fast=True)
+
+    assert positions
+    position = positions[0]
+    assert position["symbol"] == "MNQ"
+    # price_scale derived from multiplier=2 should be 0.5 so avg_cost becomes half the raw value
+    assert position["avg_cost"] == pytest.approx(12441.75)
+    assert position["current_price"] == pytest.approx(12441.75)
+    assert position["price_scale"] == pytest.approx(0.5)
+    assert position["price_source"] == "averageCost"

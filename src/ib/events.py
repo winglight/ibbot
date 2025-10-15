@@ -69,6 +69,9 @@ class PortfolioPositionEvent(IBBaseModel):
     market_value: Decimal | None = Field(default=None, allow_inf_nan=True)
     realized_pnl: Decimal | None = Field(default=None, allow_inf_nan=True)
     unrealized_pnl: Decimal | None = Field(default=None, allow_inf_nan=True)
+    contract_multiplier: Decimal | None = Field(default=None, allow_inf_nan=True)
+    price_scale: Decimal | None = Field(default=None, allow_inf_nan=True)
+    price_scale_source: str | None = None
     currency: str | None = None
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -79,6 +82,8 @@ class PortfolioPositionEvent(IBBaseModel):
         "market_value",
         "realized_pnl",
         "unrealized_pnl",
+        "contract_multiplier",
+        "price_scale",
         mode="before",
     )
     @classmethod
@@ -295,6 +300,10 @@ def portfolio_position_from_ib(
     unrealized_pnl: Any,
     currency: str | None,
     timestamp: Any = None,
+    *,
+    contract_multiplier: Any | None = None,
+    price_scale: Any | None = None,
+    price_scale_source: str | None = None,
 ) -> PortfolioPositionEvent:
     return PortfolioPositionEvent(
         account=account,
@@ -307,6 +316,9 @@ def portfolio_position_from_ib(
         market_value=market_value,
         realized_pnl=realized_pnl,
         unrealized_pnl=unrealized_pnl,
+        contract_multiplier=contract_multiplier,
+        price_scale=price_scale,
+        price_scale_source=price_scale_source,
         currency=currency,
         timestamp=timestamp,
     )
