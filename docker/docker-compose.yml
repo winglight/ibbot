@@ -89,7 +89,7 @@ services:
     ports:
       - "4001:4003"
       - "4002:4004"
-      - "5900:5900"
+      - "5901:5900"
     volumes:
       - ../data/ibgateway:/config:rw
       - /etc/localtime:/etc/localtime:ro
