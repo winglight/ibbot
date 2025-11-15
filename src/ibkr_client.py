@@ -1,30 +1,146 @@
 import asyncio
-from typing import List, Optional, Dict, Any
-from datetime import datetime, timedelta
+import itertools
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, Dict, List, Optional, Tuple
+
 import pandas as pd
-from ib_insync import IB, Stock, Future, Order, MarketOrder, LimitOrder, Contract
+
+try:  # pragma: no cover - fallback used when ib_insync is unavailable
+    from ib_insync import Contract, Future, IB, LimitOrder, MarketOrder, Order, Stock
+except ImportError:  # pragma: no cover - exercised only in minimal environments
+    from test.ib_insync_stub import Contract, Future, IB, LimitOrder, MarketOrder, Order, Stock
 from loguru import logger
+from zoneinfo import ZoneInfo
+
+from src.utils import is_trading_disabled, now_local, to_local_time
+from src.data_layer import (
+    DataSubscriptionRequest,
+    DataSubscriptionToken,
+    DataSourceError,
+    get_data_layer_mode,
+    get_data_source_manager,
+    is_dual_mode,
+    is_legacy_mode,
+)
+
 # Module-specific logger for ibkr_client
 ibkr_logger = logger.bind(module="ibkr_client", request_id="-")
 import time
 import threading
-import asyncio
 import os
 import csv
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
 import math
-from .connection_manager import connection_manager, ConnectionConfig
+import subprocess
+from .connection_manager import connection_manager, connection_logger
 from .database import get_db_manager
+from .restart_utils import restart_program
+
+NY_TZ = ZoneInfo("America/New_York")
+
+
+INDEX_FUTURE_DETAILS: Dict[str, Dict[str, str]] = {
+    "ES": {"exchange": "CME", "multiplier": "50", "tradingClass": "ES"},
+    "MES": {"exchange": "CME", "multiplier": "5", "tradingClass": "MES"},
+    "NQ": {"exchange": "CME", "multiplier": "20", "tradingClass": "NQ"},
+    "MNQ": {"exchange": "CME", "multiplier": "2", "tradingClass": "MNQ"},
+    "YM": {"exchange": "ECBOT", "multiplier": "5", "tradingClass": "YM"},
+    "MYM": {"exchange": "ECBOT", "multiplier": "0.5", "tradingClass": "MYM"},
+    "RTY": {"exchange": "CME", "multiplier": "50", "tradingClass": "RTY"},
+    "M2K": {"exchange": "CME", "multiplier": "5", "tradingClass": "M2K"},
+    "VX": {"exchange": "CFE", "multiplier": "1000", "tradingClass": "VX"},
+}
+
+INDEX_FUTURE_SYMBOLS = frozenset(INDEX_FUTURE_DETAILS.keys())
+_QUARTERLY_CONTRACT_MONTHS = (3, 6, 9, 12)
+
+
+def _third_friday_datetime(year: int, month: int) -> datetime:
+    """Return the datetime (NY timezone) of the contract's third Friday open."""
+
+    first_day = datetime(year, month, 1, tzinfo=NY_TZ)
+    # ``weekday`` -> Monday=0 ... Sunday=6; Friday is 4
+    days_until_friday = (4 - first_day.weekday()) % 7
+    third_friday_day = 1 + days_until_friday + 14
+    # CME 股指期货在合约到期当日美东早盘停止交易
+    return datetime(year, month, third_friday_day, 9, 30, tzinfo=NY_TZ)
+
+
+def _front_quarter_contract(now: datetime) -> Tuple[int, int]:
+    """Determine the nearest active quarterly contract (year, month)."""
+
+    ny_now = now.astimezone(NY_TZ)
+    year = ny_now.year
+    month = ny_now.month
+
+    # Evaluate the remaining quarterly contracts for the current year first,
+    # then fall back to the next year's cycle.  This avoids skipping the
+    # current-year contracts when ``month`` is greater than the candidate
+    # (e.g. October should still select December, not next March).
+    for year_offset in (0, 1):
+        candidate_year = year + year_offset
+        for candidate_month in _QUARTERLY_CONTRACT_MONTHS:
+            if year_offset == 0 and candidate_month < month:
+                continue
+
+            expiry = _third_friday_datetime(candidate_year, candidate_month)
+            if ny_now < expiry:
+                return candidate_year, candidate_month
+
+    # Fallback – should not be hit because the loop above covers current and
+    # next year, but keep a defensive default.
+    return year + 1, _QUARTERLY_CONTRACT_MONTHS[0]
 
 class IBKRClient:
+    @staticmethod
+    def _parse_env_float(key: str, default: float) -> float:
+        raw = os.getenv(key)
+        if raw is None:
+            return float(default)
+        try:
+            cleaned = raw.split('#', 1)[0].strip()
+            if not cleaned:
+                return float(default)
+            return max(0.0, float(cleaned))
+        except Exception:
+            try:
+                ibkr_logger.warning(f"Invalid float for {key}='{raw}', falling back to {default}")
+            except Exception:
+                pass
+            return float(default)
+
+    @staticmethod
+    def _parse_env_bool(key: str, default: bool) -> bool:
+        raw = os.getenv(key)
+        if raw is None:
+            return bool(default)
+
+        try:
+            cleaned = raw.split('#', 1)[0].strip().lower()
+        except Exception:
+            return bool(default)
+
+        if cleaned == "":
+            return bool(default)
+
+        return cleaned in {"1", "true", "yes", "y", "on"}
+
     def __init__(self):
         self.connection_manager = connection_manager
-        
+
         # 设置ConnectionManager对IBKRClient的弱引用，用于错误处理
         import weakref
         self.connection_manager._ibkr_client_ref = weakref.ref(self)
-        
+
+        self._process_restart_enabled = self._parse_env_bool(
+            "IBKR_ENABLE_PROCESS_RESTART",
+            False,
+        )
+        self._self_restart_suppressed_logged = False
+
         self.order_backup_file = "data/orders_backup.csv"
         self._ensure_backup_directory()
         # Price cache to track real-time prices
@@ -34,12 +150,50 @@ class IBKRClient:
         self.price_cache_ttl_seconds = 5  # 减少到5秒，确保实时按钮能获取最新价格
         # 映射reqId到订单ID，用于错误处理
         self.req_id_to_order_id = {}
-        
+        self._data_layer_manager = None
+        self._market_data_tokens: Dict[str, DataSubscriptionToken] = {}
+
         # Positions cache to smooth transient portfolio emptiness (e.g., after reconnect)
         # 防止IBKR偶发返回空portfolio快照导致前端仓位闪烁或误判
         self.positions_cache = []
         self.positions_cache_timestamp = None
         self.positions_cache_ttl_seconds = 15
+
+        # Cache the last successful account snapshot for downstream fallbacks
+        self._cached_account_info: Dict[str, Any] = {}
+        self._cached_account_info_timestamp: Optional[datetime] = None
+
+        # Counter for simulated order identifiers when trading is disabled
+        self._simulated_order_id = itertools.count(start=-1, step=-1)
+
+        # --- Connection monitoring & resilience state ---
+        self._async_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._connection_monitor_task: Optional[asyncio.Task] = None
+        self._reconnect_task: Optional[asyncio.Task] = None
+        self._disconnect_time: Optional[datetime] = None
+        self._reconnect_attempt: int = 0
+        self._gateway_restart_triggered: bool = False
+        self._self_restart_triggered: bool = False
+        self._needs_cleanup: bool = False
+
+        self._monitor_interval_seconds = max(1.0, self._parse_env_float('IBKR_CONNECTION_MONITOR_INTERVAL', 5.0))
+        base_delay = self._parse_env_float('IBKR_RECONNECT_BASE_DELAY', 5.0) or 5.0
+        self._reconnect_base_delay = max(0.5, base_delay)
+        self._reconnect_max_delay = max(self._reconnect_base_delay, self._parse_env_float('IBKR_RECONNECT_MAX_DELAY', 60.0))
+        self._gateway_restart_timeout = max(30.0, self._parse_env_float('IBKR_GATEWAY_RESTART_TIMEOUT', 120.0))
+        self._self_restart_timeout = max(self._gateway_restart_timeout + 30.0, self._parse_env_float('IBKR_SELF_RESTART_TIMEOUT', 300.0))
+        self._gateway_restart_cmd = os.getenv('IBKR_GATEWAY_RESTART_CMD')
+        self._gateway_service_name = os.getenv('IBKR_GATEWAY_SERVICE_NAME', 'ib-gateway')
+
+        self._data_farm_wakeup_lock = threading.Lock()
+        self._data_farm_wakeup_future: Optional[concurrent.futures.Future] = None
+        self._last_data_farm_wakeup: Optional[datetime] = None
+        self._data_farm_wakeup_min_interval = max(
+            15.0, self._parse_env_float('IBKR_DATA_FARM_WAKEUP_INTERVAL_SEC', 60.0)
+        )
+        self._data_farm_wakeup_symbol = os.getenv('IBKR_DATA_FARM_WAKEUP_SYMBOL', 'SPY')
+
+        self._setup_async_components()
     
     def _sanitize_float(self, value):
         """清理无效的浮点数值，将NaN和Infinity转换为None"""
@@ -55,27 +209,564 @@ class IBKRClient:
     @property
     def connected(self) -> bool:
         """检查连接状态 - 为兼容性提供connected属性"""
+        self._setup_async_components()
         return self.connection_manager.is_connected()
         
     def connect(self) -> bool:
         """连接到IBKR"""
-        return self.connection_manager.connect()
+        self._setup_async_components()
+        previous_flag = getattr(self.connection_manager, "_ibkr_connect_in_progress", False)
+        self.connection_manager._ibkr_connect_in_progress = True  # type: ignore[attr-defined]
+        try:
+            result = self.connection_manager.connect()
+        finally:
+            self.connection_manager._ibkr_connect_in_progress = previous_flag  # type: ignore[attr-defined]
+
+        if result:
+            self._handle_connection_restored()
+        else:
+            self._schedule_reconnect_task()
+        return result
     
     def disconnect(self):
         """断开连接"""
+        self._schedule_market_data_cleanup()
         self.connection_manager.disconnect()
-    
+
     def is_connected(self) -> bool:
         """检查连接状态"""
+        self._setup_async_components()
         return self.connection_manager.is_connected()
-    
+
+    def _schedule_reconnect_task(self) -> None:
+        """Ensure the reconnect monitor restarts after manual connection attempts."""
+
+        loop = self._async_loop
+        if loop is None:
+            return
+
+        if loop.is_running():
+            try:
+                loop.call_soon_threadsafe(self._start_connection_monitor_task)
+            except RuntimeError:
+                self._start_connection_monitor_task()
+        else:
+            self._start_connection_monitor_task()
+
     @property
     def ib(self) -> Optional[IB]:
         """获取IB实例"""
         return self.connection_manager.get_ib_instance()
+
+    def _return_cached_account_info(self) -> Dict[str, Any]:
+        """Return the most recent account snapshot if we have one cached."""
+        if getattr(self, "_cached_account_info", None):
+            return dict(self._cached_account_info)
+        return {}
+
+    # ------------------------------------------------------------------
+    # Connection monitoring & resilience helpers
+
+    def _setup_async_components(self) -> None:
+        """Ensure we capture the running event loop and start monitor tasks."""
+
+        loop = self._async_loop
+        if loop is None or loop.is_closed():
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                return
+            self._async_loop = loop
+
+        if loop.is_closed():
+            return
+
+        try:
+            loop.call_soon_threadsafe(self._start_connection_monitor_task)
+        except RuntimeError:
+            if loop.is_running():
+                self._start_connection_monitor_task()
+
+    def _on_connection_manager_connected(self, *, external: bool) -> None:
+        """ConnectionManager callback when a connection succeeds."""
+
+        if not external:
+            return
+
+        self._setup_async_components()
+        try:
+            self._handle_connection_restored(initial=True)
+        except Exception as exc:  # pragma: no cover - defensive guard
+            ibkr_logger.debug(
+                "Failed to finalize external connection restoration",
+                error=str(exc),
+            )
+
+    def handle_data_farm_status(self, code: int, message: str) -> None:
+        """Handle data farm status notifications by issuing a gentle wake-up request."""
+
+        ibkr_logger.info(
+            "IBKR data farm status update",
+            code=code,
+            message=message,
+        )
+        self._schedule_data_farm_wakeup(code=code, message=message)
+
+    def handle_gateway_broken(self, code: int, message: str) -> None:
+        """Schedule recovery when IB reports a broken data farm connection."""
+
+        loop = self._async_loop
+        if loop is None or loop.is_closed():
+            ibkr_logger.debug(
+                "Skipping gateway-broken handling; async loop unavailable",
+                code=code,
+            )
+            return
+
+        def _dispatch() -> None:
+            ibkr_logger.warning(
+                "IBKR gateway reported broken connection",
+                code=code,
+                message=message,
+            )
+            self._handle_disconnect_detected(f"ib-error-{code}")
+            asyncio.create_task(self._ensure_reconnect_task())
+
+        try:
+            loop.call_soon_threadsafe(_dispatch)
+        except RuntimeError:
+            if loop.is_running():
+                _dispatch()
+            else:
+                ibkr_logger.debug(
+                    "Async loop not running; cannot dispatch gateway-broken handler",
+                    code=code,
+                )
+
+    def _schedule_data_farm_wakeup(self, *, code: int, message: str) -> None:
+        loop = self._async_loop
+        if loop is None or loop.is_closed():
+            ibkr_logger.debug(
+                "Skipping data farm wake-up scheduling; async loop unavailable",
+                code=code,
+            )
+            return
+
+        now = now_local()
+        future: Optional[concurrent.futures.Future]
+        with self._data_farm_wakeup_lock:
+            if self._data_farm_wakeup_future and not self._data_farm_wakeup_future.done():
+                ibkr_logger.debug(
+                    "Skipping data farm wake-up; previous request still pending",
+                    code=code,
+                )
+                return
+
+            if self._last_data_farm_wakeup is not None:
+                elapsed = (now - self._last_data_farm_wakeup).total_seconds()
+                if elapsed < self._data_farm_wakeup_min_interval:
+                    ibkr_logger.debug(
+                        "Skipping data farm wake-up; throttled",
+                        code=code,
+                        elapsed_seconds=round(elapsed, 1),
+                    )
+                    return
+
+            try:
+                future = asyncio.run_coroutine_threadsafe(
+                    self._send_data_farm_wakeup(code=code, message=message),
+                    loop,
+                )
+            except RuntimeError as exc:
+                ibkr_logger.debug(
+                    "Failed to submit data farm wake-up coroutine",
+                    code=code,
+                    error=str(exc),
+                )
+                return
+
+            self._data_farm_wakeup_future = future
+            self._last_data_farm_wakeup = now
+
+        def _finalise(fut: concurrent.futures.Future) -> None:
+            with self._data_farm_wakeup_lock:
+                if self._data_farm_wakeup_future is fut:
+                    self._data_farm_wakeup_future = None
+            try:
+                fut.result()
+            except Exception as exc:  # pragma: no cover - defensive logging
+                ibkr_logger.debug(
+                    "Data farm wake-up request completed with error",
+                    code=code,
+                    error=str(exc),
+                )
+
+        future.add_done_callback(_finalise)
+
+    async def _send_data_farm_wakeup(self, *, code: int, message: str) -> None:
+        ib = self.connection_manager.ib
+        if ib is None or not ib.isConnected():
+            ibkr_logger.debug(
+                "Skipping data farm wake-up; IB connection unavailable",
+                code=code,
+            )
+            return
+
+        symbol = (self._data_farm_wakeup_symbol or "SPY").strip() or "SPY"
+        symbol = symbol.upper()
+        contract = self.get_stock_contract(symbol, 'SMART')
+        qualified_contract = contract
+
+        try:
+            qualified = await ib.qualifyContractsAsync(contract)
+            if qualified:
+                qualified_contract = qualified[0]
+        except Exception as exc:
+            ibkr_logger.debug(
+                "Data farm wake-up contract qualification failed",
+                code=code,
+                symbol=symbol,
+                error=str(exc),
+            )
+
+        try:
+            await ib.reqHistoricalDataAsync(
+                contract=qualified_contract,
+                endDateTime='',
+                durationStr='60 S',
+                barSizeSetting='1 min',
+                whatToShow='MIDPOINT',
+                useRTH=False,
+                keepUpToDate=False,
+                formatDate=1,
+            )
+            ibkr_logger.debug(
+                "Submitted data farm wake-up historical request",
+                code=code,
+                symbol=symbol,
+            )
+        except Exception as exc:
+            ibkr_logger.debug(
+                "Data farm wake-up historical request failed",
+                code=code,
+                symbol=symbol,
+                error=str(exc),
+            )
+
+    def _start_connection_monitor_task(self) -> None:
+        loop = self._async_loop
+        if loop is None or loop.is_closed():
+            return
+        if self._connection_monitor_task and not self._connection_monitor_task.done():
+            return
+        self._connection_monitor_task = loop.create_task(
+            self._connection_monitor_loop(),
+            name="ibkr-connection-monitor",
+        )
+
+    async def _connection_monitor_loop(self) -> None:
+        """Background loop that keeps an eye on connection state."""
+
+        ibkr_logger.debug(
+            "IBKR connection monitor started", interval=self._monitor_interval_seconds
+        )
+
+        previous_state = False
+        try:
+            previous_state = self.is_connected()
+        except Exception as exc:
+            ibkr_logger.debug(f"Initial connection check failed: {exc}")
+            previous_state = False
+
+        if previous_state:
+            self._handle_connection_restored(initial=True)
+        else:
+            self._handle_disconnect_detected("monitor-start")
+            await self._ensure_reconnect_task()
+
+        try:
+            while True:
+                try:
+                    await asyncio.sleep(self._monitor_interval_seconds)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    ibkr_logger.debug(f"Monitor sleep interrupted: {exc}")
+                    continue
+
+                try:
+                    connected = self.is_connected()
+                except Exception as exc:
+                    ibkr_logger.warning(f"IBKR connection check failed: {exc}")
+                    connected = False
+
+                if connected:
+                    if not previous_state:
+                        self._handle_connection_restored()
+                    previous_state = True
+                    continue
+
+                # Connection is down
+                if previous_state:
+                    self._handle_disconnect_detected("connection-lost")
+                await self._ensure_reconnect_task()
+                previous_state = False
+        except asyncio.CancelledError:
+            ibkr_logger.debug("IBKR connection monitor cancelled")
+            raise
+
+    def _handle_disconnect_detected(self, trigger: str) -> None:
+        now = now_local()
+        if self._disconnect_time is None:
+            self._disconnect_time = now
+            self._reconnect_attempt = 0
+            self._gateway_restart_triggered = False
+            self._self_restart_triggered = False
+            self._needs_cleanup = True
+            ibkr_logger.warning(
+                "IBKR connection lost; starting auto-reconnect",
+                trigger=trigger,
+            )
+        else:
+            ibkr_logger.debug(
+                "IBKR connection still unavailable",
+                trigger=trigger,
+                attempts=self._reconnect_attempt,
+            )
+
+    def _handle_connection_restored(self, *, initial: bool = False) -> None:
+        if self._disconnect_time is not None and not initial:
+            elapsed = (now_local() - self._disconnect_time).total_seconds()
+            ibkr_logger.info(
+                "IBKR connection restored",
+                downtime_seconds=round(elapsed, 1),
+                attempts=self._reconnect_attempt,
+            )
+        elif not initial:
+            ibkr_logger.info("IBKR connection confirmed active")
+
+        self._disconnect_time = None
+        self._reconnect_attempt = 0
+        self._gateway_restart_triggered = False
+        self._self_restart_triggered = False
+        self._needs_cleanup = False
+        self._self_restart_suppressed_logged = False
+
+        task = self._reconnect_task
+        if task and not task.done():
+            loop = self._async_loop
+            try:
+                if loop and not loop.is_closed():
+                    loop.call_soon_threadsafe(task.cancel)
+                else:
+                    task.cancel()
+            except RuntimeError:
+                task.cancel()
+        self._reconnect_task = None
+
+    async def _ensure_reconnect_task(self) -> None:
+        task = self._reconnect_task
+        if task and not task.done():
+            return
+        self._reconnect_task = asyncio.create_task(
+            self._reconnect_loop(),
+            name="ibkr-reconnect-loop",
+        )
+
+    def _compute_backoff_delay(self, attempt_index: int) -> float:
+        if attempt_index <= 0:
+            return 0.0
+        delay = self._reconnect_base_delay * (2 ** max(0, attempt_index - 1))
+        return min(delay, self._reconnect_max_delay)
+
+    async def _reconnect_loop(self) -> None:
+        ibkr_logger.debug("IBKR reconnect loop started")
+        try:
+            while True:
+                if self.is_connected():
+                    return
+
+                delay = self._compute_backoff_delay(self._reconnect_attempt)
+                if delay > 0:
+                    ibkr_logger.debug(
+                        "Waiting before reconnect attempt",
+                        delay_seconds=round(delay, 1),
+                        attempt=self._reconnect_attempt + 1,
+                    )
+                    try:
+                        await asyncio.sleep(delay)
+                    except asyncio.CancelledError:
+                        raise
+
+                if self.is_connected():
+                    return
+
+                attempt_number = self._reconnect_attempt + 1
+                ibkr_logger.info(
+                    "Attempting IBKR reconnection",
+                    attempt=attempt_number,
+                )
+                success = await self._attempt_connection(attempt_number)
+                if success:
+                    self._reconnect_attempt = 0
+                    self._handle_connection_restored()
+                    return
+
+                self._reconnect_attempt = attempt_number
+                await self._after_failed_attempt()
+        except asyncio.CancelledError:
+            ibkr_logger.debug("IBKR reconnect loop cancelled")
+            raise
+
+    async def _attempt_connection(self, attempt_number: int) -> bool:
+        if self._needs_cleanup:
+            try:
+                await asyncio.to_thread(self.connection_manager.disconnect)
+            except Exception as exc:
+                ibkr_logger.debug(f"Cleanup disconnect failed: {exc}")
+            finally:
+                self._needs_cleanup = False
+
+        try:
+            result = await asyncio.to_thread(self.connection_manager.connect)
+        except Exception as exc:
+            ibkr_logger.error(
+                "Reconnect attempt raised error",
+                attempt=attempt_number,
+                error=str(exc),
+            )
+            return False
+
+        if result:
+            return True
+
+        ibkr_logger.warning(
+            "Reconnect attempt did not succeed",
+            attempt=attempt_number,
+        )
+        return False
+
+    async def _after_failed_attempt(self) -> None:
+        if self._disconnect_time is None:
+            self._disconnect_time = now_local()
+
+        elapsed = (now_local() - self._disconnect_time).total_seconds()
+        ibkr_logger.warning(
+            "IBKR reconnection still failing",
+            attempts=self._reconnect_attempt,
+            downtime_seconds=round(elapsed, 1),
+        )
+
+        if not self._gateway_restart_triggered and elapsed >= self._gateway_restart_timeout:
+            await self._restart_ib_gateway_container(elapsed)
+
+        if not self._self_restart_triggered and elapsed >= self._self_restart_timeout:
+            if not self._process_restart_enabled:
+                if not self._self_restart_suppressed_logged:
+                    ibkr_logger.error(
+                        "IBKR reconnect timeout exceeded but process restart is disabled; "
+                        "set IBKR_ENABLE_PROCESS_RESTART=true to allow automatic restarts."
+                    )
+                    self._self_restart_suppressed_logged = True
+                return
+            self._self_restart_triggered = True
+            reason = (
+                f"IBKR reconnection failed for {int(elapsed)}s after {self._reconnect_attempt} attempts"
+            )
+            ibkr_logger.critical(reason)
+            restart_program(reason=reason)
+
+    async def _restart_ib_gateway_container(self, elapsed: float) -> None:
+        self._gateway_restart_triggered = True
+        ibkr_logger.warning(
+            "Restarting IB Gateway container after prolonged disconnect",
+            downtime_seconds=round(elapsed, 1),
+        )
+
+        command: Any
+        shell = False
+
+        if self._gateway_restart_cmd:
+            command = self._gateway_restart_cmd
+            shell = True
+        else:
+            compose_file = self.connection_manager._project_root / "docker" / "docker-compose.yml"
+            if compose_file.exists():
+                command = [
+                    "docker",
+                    "compose",
+                    "-f",
+                    str(compose_file),
+                    "restart",
+                    self._gateway_service_name,
+                ]
+            else:
+                command = [
+                    "docker",
+                    "compose",
+                    "restart",
+                    self._gateway_service_name,
+                ]
+
+        success = await asyncio.to_thread(self._run_restart_command, command, shell)
+
+        if not success and not self._gateway_restart_cmd:
+            compose_file = self.connection_manager._project_root / "docker" / "docker-compose.yml"
+            fallback_cmd = ["docker-compose"]
+            if compose_file.exists():
+                fallback_cmd.extend(["-f", str(compose_file)])
+            fallback_cmd.extend(["restart", self._gateway_service_name])
+            await asyncio.to_thread(self._run_restart_command, fallback_cmd, False)
+
+        # Force a fresh session on next attempt
+        self._needs_cleanup = True
+
+    def _run_restart_command(self, command: Any, shell: bool) -> bool:
+        try:
+            result = subprocess.run(
+                command,
+                shell=shell,
+                cwd=str(self.connection_manager._project_root),
+                capture_output=True,
+                text=True,
+                timeout=180,
+            )
+        except FileNotFoundError as exc:
+            ibkr_logger.error(f"Gateway restart command not found: {exc}")
+            return False
+        except Exception as exc:
+            ibkr_logger.error(f"Gateway restart command failed: {exc}")
+            return False
+
+        if result.stdout:
+            ibkr_logger.debug(
+                "Gateway restart output",
+                output=result.stdout.strip()[:500],
+            )
+
+        if result.returncode != 0:
+            stderr = (result.stderr or "").strip()
+            ibkr_logger.error(
+                "Gateway restart command exited with non-zero status",
+                returncode=result.returncode,
+                stderr=stderr[:500],
+            )
+            return False
+
+        ibkr_logger.info("Gateway restart command completed successfully")
+        return True
     
-    def _place_order_in_thread(self, ib, symbol: str, quantity: int, action: str, 
-                              exchange: str, sec_type: str, order_type: str, price: float = None):
+    def _place_order_in_thread(
+        self,
+        ib,
+        symbol: str,
+        quantity: int,
+        action: str,
+        exchange: str,
+        sec_type: str,
+        order_type: str,
+        price: float = None,
+    ):
         """在连接管理器的事件循环中执行下单操作，避免事件循环冲突。
         使用连接管理器的 run_async_in_connection_thread 方法确保正确执行。
         """
@@ -84,6 +775,18 @@ class IBKRClient:
         ibkr_logger.info(f"_place_order_in_thread called for {symbol} in thread: {current_thread.name}")
 
         try:
+            if is_trading_disabled():
+                trade = self._simulate_trade(
+                    order_type=order_type,
+                    symbol=symbol,
+                    quantity=quantity,
+                    action=action,
+                    exchange=exchange,
+                    sec_type=sec_type,
+                    price=price,
+                )
+                return trade
+
             # 检查连接状态
             if not self.connection_manager.is_connected():
                 ibkr_logger.error("IBKR connection is not active")
@@ -99,7 +802,7 @@ class IBKRClient:
             async def execute_order_async():
                 try:
                     # 根据证券类型获取正确的合约
-                    if sec_type == 'FUT' or symbol in ['MNQ', 'NQ', 'ES', 'MES']:
+                    if sec_type == 'FUT' or symbol.upper() in INDEX_FUTURE_SYMBOLS:
                         contract = self.get_future_contract(symbol, exchange)
                     else:
                         contract = self.get_stock_contract(symbol, exchange)
@@ -139,74 +842,100 @@ class IBKRClient:
         except Exception as e:
             ibkr_logger.error(f"Failed to place {order_type.lower()} order in thread: {e}")
             return None
+
+    def _simulate_trade(
+        self,
+        order_type: str,
+        symbol: str,
+        quantity: int,
+        action: str,
+        exchange: str,
+        sec_type: str,
+        price: Optional[float] = None,
+    ) -> SimpleNamespace:
+        """Create a fake trade result when trading is disabled.
+
+        Tests rely on the returned object exposing ``order.orderId`` similarly
+        to an ``ib_insync`` ``Trade``.  We therefore mimic that minimal
+        structure using :class:`types.SimpleNamespace` instances.
+        """
+
+        order_id = next(self._simulated_order_id)
+        order = SimpleNamespace(
+            orderId=order_id,
+            action=action,
+            totalQuantity=quantity,
+            orderType=order_type,
+            lmtPrice=price,
+        )
+        status = SimpleNamespace(status="Simulated", filled=0, remaining=quantity)
+        contract = SimpleNamespace(symbol=symbol, exchange=exchange, secType=sec_type)
+        trade = SimpleNamespace(order=order, orderStatus=status, contract=contract)
+
+        display_price = price if price is not None else "MKT"
+        ibkr_logger.warning(
+            "Trading disabled; simulated {} order: {} {} {} @{} (order_id={})",
+            order_type,
+            action,
+            quantity,
+            symbol,
+            display_price,
+            order_id,
+        )
+        return trade
     
     def get_stock_contract(self, symbol: str, exchange: str = 'SMART', currency: str = 'USD') -> Stock:
         """获取股票合约"""
         return Stock(symbol, exchange, currency)
-    
+
+    def _create_future_contract(self, symbol: str, exchange: str, currency: str) -> Future:
+        """Construct a future contract while tolerating minimal stubs.
+
+        Some lightweight fallbacks (used in tests) expose ``Future`` objects
+        without accepting constructor arguments.  When that happens we create an
+        empty instance and populate the relevant attributes manually so that
+        downstream code can rely on the expected fields being present.
+        """
+
+        try:
+            return Future(symbol=symbol, exchange=exchange, currency=currency)
+        except TypeError:
+            contract = Future()
+            for attr, value in (("symbol", symbol), ("exchange", exchange), ("currency", currency)):
+                try:
+                    setattr(contract, attr, value)
+                except Exception:
+                    pass
+            if getattr(contract, "secType", None) in (None, ""):
+                try:
+                    setattr(contract, "secType", "FUT")
+                except Exception:
+                    pass
+            return contract
+
     def get_future_contract(self, symbol: str, exchange: str = 'SMART', currency: str = 'USD'):
         """获取期货合约"""
-        from datetime import datetime, timedelta
-        
-        # 为主要期货合约生成正确的expiry格式
-        if symbol in ['MNQ', 'NQ', 'ES', 'MES']:
-            # 获取当前日期
-            now = datetime.now()
-            
-            # 找到下一个季度合约月份
-            current_month = now.month
-            current_year = now.year
-            
-            # 确定下一个合约月份
-            if current_month <= 3:
-                contract_month = 3
-                contract_year = current_year
-            elif current_month <= 6:
-                contract_month = 6
-                contract_year = current_year
-            elif current_month <= 9:
-                contract_month = 9
-                contract_year = current_year
-            else:
-                contract_month = 12
-                contract_year = current_year
-            
-            # 如果当前月份已经接近合约到期（比如在合约月份的第三周后），使用下一个合约
-            if current_month == contract_month and now.day > 15:
-                if contract_month == 12:
-                    contract_month = 3
-                    contract_year += 1
-                elif contract_month == 9:
-                    contract_month = 12
-                elif contract_month == 6:
-                    contract_month = 9
-                elif contract_month == 3:
-                    contract_month = 6
-            
-            # 使用YYYYMM格式，与test.py保持一致
+
+        symbol_upper = symbol.upper()
+        if symbol_upper in INDEX_FUTURE_SYMBOLS:
+            now = now_local()
+            contract_year, contract_month = _front_quarter_contract(now)
             expiry = f"{contract_year}{contract_month:02d}"
-            
-            # 为不同的期货合约设置正确的交易所和细节
-            contract = Future(symbol=symbol, exchange='CME', currency=currency)
+
+            details = INDEX_FUTURE_DETAILS[symbol_upper]
+            exchange_to_use = details.get("exchange", exchange)
+
+            contract = self._create_future_contract(symbol_upper, exchange_to_use, currency)
             contract.lastTradeDateOrContractMonth = expiry
-            
-            # 为MNQ等微型期货设置正确的乘数和交易类别
-            if symbol == 'MNQ':
-                contract.multiplier = '2'
-                contract.tradingClass = 'MNQ'
-            elif symbol == 'MES':
-                contract.multiplier = '5'
-                contract.tradingClass = 'MES'
-            elif symbol == 'NQ':
-                contract.multiplier = '20'
-                contract.tradingClass = 'NQ'
-            elif symbol == 'ES':
-                contract.multiplier = '50'
-                contract.tradingClass = 'ES'
-            
+
+            for attr in ("multiplier", "tradingClass"):
+                value = details.get(attr)
+                if value:
+                    setattr(contract, attr, value)
+
             return contract
-        else:
-            return Future(symbol=symbol, exchange=exchange, currency=currency)
+
+        return self._create_future_contract(symbol_upper, exchange, currency)
     
     def get_contract(self, symbol: str, sec_type: str = 'STK', exchange: str = 'SMART', currency: str = 'USD'):
         """根据证券类型获取合约"""
@@ -215,16 +944,10 @@ class IBKRClient:
         else:
             return self.get_stock_contract(symbol, exchange, currency)
     
-    def get_historical_data(self, symbol: str, duration: str = '1 Y',
+    async def get_historical_data(self, symbol: str, duration: str = '1 Y',
                                 bar_size: str = '1 day', exchange: str = 'SMART') -> pd.DataFrame:
         """获取历史数据（在连接线程事件循环中执行，避免事件循环错误）"""
         try:
-            # 确保连接
-            if not self.is_connected():
-                if not self.connect():
-                    ibkr_logger.error(f"Cannot connect to IBKR for historical data: {symbol}")
-                    return pd.DataFrame()
-
             # 获取IB实例
             ib = self.ib
             if not ib or not ib.isConnected():
@@ -232,31 +955,21 @@ class IBKRClient:
                 return pd.DataFrame()
 
             # MNQ是期货合约
-            if symbol == 'MNQ':
+            if symbol.upper() in INDEX_FUTURE_SYMBOLS:
                 contract = self.get_future_contract(symbol, 'CME')
             else:
                 contract = self.get_stock_contract(symbol, exchange)
 
-            async def _fetch_async():
-                try:
-                    # 使用异步版本确认合约，确保拿到有效的 conId
-                    qualified = await ib.qualifyContractsAsync(contract)
-                    if not qualified:
-                        ibkr_logger.error(f"Failed to qualify contract for {symbol}")
-                        return None
-                    qc = qualified[0]
-                    # 使用异步版本请求历史数据
-                    return await ib.reqHistoricalDataAsync(
-                        qc, endDateTime='', durationStr=duration,
-                        barSizeSetting=bar_size, whatToShow='TRADES', useRTH=False
-                    )
-                except Exception as e:
-                    ibkr_logger.error(f"reqHistoricalDataAsync failed in connection thread: {e}")
-                    return None
-
-            # 在连接线程事件循环中执行异步操作，避免事件循环冲突
-            bars = self.connection_manager.run_async_in_connection_thread(_fetch_async())
-
+            qualified = await ib.qualifyContractsAsync(contract)
+            if not qualified:
+                ibkr_logger.error(f"Failed to qualify contract for {symbol}")
+                return None
+            qc = qualified[0]
+            # 使用异步版本请求历史数据
+            bars = await ib.reqHistoricalDataAsync(
+                contract=contract, endDateTime='', durationStr=duration,
+                barSizeSetting=bar_size, whatToShow='TRADES', useRTH=False
+            )
             if not bars:
                 ibkr_logger.warning(f"No historical data returned for {symbol}")
                 return pd.DataFrame()
@@ -302,7 +1015,7 @@ class IBKRClient:
         #             writer.writeheader()
         #         
         #         writer.writerow({
-        #             'timestamp': datetime.now().isoformat(),
+        #             'timestamp': now_local().isoformat(),
         #             'symbol': symbol,
         #             'quantity': quantity,
         #             'action': action,
@@ -351,7 +1064,7 @@ class IBKRClient:
         #     if not os.path.exists(self.order_backup_file):
         #         return []
         #     
-        #     cutoff_date = datetime.now() - timedelta(days=days)
+        #     cutoff_date = now_local() - timedelta(days=days)
         #     orders = []
         #     
         #     with open(self.order_backup_file, 'r', newline='', encoding='utf-8') as csvfile:
@@ -414,17 +1127,45 @@ class IBKRClient:
             df.to_csv(filename, index=False)
             ibkr_logger.info(f"Historical data saved to {filename} (fallback)")
     
-    def get_real_time_data(self, symbol: str, exchange: str = 'SMART'):
-        """获取实时数据 - 优化版本避免阻塞"""
+    async def get_real_time_data(self, symbol: str, exchange: str = 'SMART'):
+        """获取实时行情，支持统一数据层或回退旧实现。"""
+
+        mode = get_data_layer_mode()
+        if is_legacy_mode(mode):
+            return await self._get_real_time_data_legacy(symbol, exchange)
+
+        try:
+            result = await self._get_real_time_data_unified(symbol, exchange)
+            if result or not is_dual_mode(mode):
+                return result
+            ibkr_logger.debug(
+                "Unified real-time data empty, falling back to legacy",
+                symbol=symbol,
+                exchange=exchange,
+            )
+        except DataSourceError as exc:
+            ibkr_logger.warning(
+                "Unified real-time data unavailable: {}", exc, symbol=symbol
+            )
+        except Exception as exc:
+            ibkr_logger.exception("Unified real-time data error: {}", exc)
+
+        return await self._get_real_time_data_legacy(symbol, exchange)
+
+    async def _get_real_time_data_legacy(self, symbol: str, exchange: str = 'SMART'):
+        """获取实时数据 - 兼容旧实现"""
         import threading
         current_thread = threading.current_thread()
         ibkr_logger.debug(f"get_real_time_data called for {symbol} in thread: {current_thread.name}")
         
         try:
+            symbol_upper = symbol.upper()
+            is_index_future = symbol_upper in INDEX_FUTURE_SYMBOLS
+
             # 1. 首先检查缓存，提供快速响应
             if symbol in self.price_cache:
                 cached_time = self.price_cache_timestamp.get(symbol)
-                if cached_time and (datetime.now() - cached_time).total_seconds() < self.price_cache_ttl_seconds:
+                if cached_time and (now_local() - cached_time).total_seconds() < self.price_cache_ttl_seconds:
                     ibkr_logger.debug(f"Returning cached data for {symbol}")
                     return {
                         'symbol': symbol,
@@ -432,17 +1173,15 @@ class IBKRClient:
                         'bid': 0,
                         'ask': 0,
                         'volume': 0,
-                        'timestamp': datetime.now().isoformat(),
+                        'timestamp': to_local_time(datetime.now(NY_TZ)),
                         'is_cached': True
                     }
             
             # 2. 确保连接
             ibkr_logger.debug(f"Checking IBKR connection for {symbol}")
             if not self.is_connected():
-                ibkr_logger.warning(f"IBKR not connected, attempting to connect for {symbol}")
-                if not self.connect():
-                    ibkr_logger.error(f"Cannot connect to IBKR for real-time data: {symbol}")
-                    return None
+                ibkr_logger.warning(f"IBKR not connected; skipping real-time data request for {symbol}")
+                return None
             
             # 3. 获取IB实例
             ib = self.ib
@@ -451,9 +1190,9 @@ class IBKRClient:
                 return None
             
             # 4. 创建合约
-            if symbol == 'MNQ':
+            if is_index_future:
                 ibkr_logger.debug(f"Creating future contract for {symbol}")
-                contract = self.get_future_contract(symbol, 'CME')
+                contract = self.get_future_contract(symbol_upper, 'CME')
             else:
                 ibkr_logger.debug(f"Creating stock contract for {symbol}")
                 contract = self.get_stock_contract(symbol, exchange)
@@ -466,15 +1205,18 @@ class IBKRClient:
                     ibkr_logger.error(f"Error requesting market data for {symbol} in connection thread: {e}")
                     return None
             
-            ticker = self.connection_manager.run_in_connection_thread(_req_ticker)
+            ticker = await asyncio.to_thread(
+                self.connection_manager.run_in_connection_thread,
+                _req_ticker,
+                timeout=10.0,
+            )
             if not ticker:
                 ibkr_logger.error(f"Failed to obtain ticker for {symbol}")
                 return None
             
             # 6. 非阻塞方式检查数据，避免阻塞主线程
-            import time
-            # 对于期货合约（如MNQ），增加等待时间
-            max_wait = 3.0 if symbol == 'MNQ' else 1.0  # 减少最大等待时间
+            # 对于指数期货合约，增加等待时间
+            max_wait = 3.0 if is_index_future else 1.0  # 减少最大等待时间
             wait_interval = 0.1  # 减少检查间隔
             waited = 0.0
             result_payload = None
@@ -484,36 +1226,38 @@ class IBKRClient:
             bid = getattr(ticker, 'bid', 0) or 0
             ask = getattr(ticker, 'ask', 0) or 0
             volume = getattr(ticker, 'volume', 0) or 0
-            
+
             if last and last > 0:
                 ibkr_logger.debug(f"Retrieved real-time data for {symbol}: last={last} (immediate)")
                 self.price_cache[symbol] = last
-                self.price_cache_timestamp[symbol] = datetime.now()
+                self.price_cache_timestamp[symbol] = now_local()
+                ts = getattr(ticker, 'time', None) or datetime.now(NY_TZ)
                 result_payload = {
                     'symbol': symbol,
                     'last': self._sanitize_float(last),
                     'bid': self._sanitize_float(bid),
                     'ask': self._sanitize_float(ask),
                     'volume': self._sanitize_float(volume),
-                    'timestamp': datetime.now().isoformat()
+                    'timestamp': to_local_time(ts)
                 }
             elif bid and ask and bid > 0 and ask > 0:
                 mid = (bid + ask) / 2
                 ibkr_logger.debug(f"Retrieved bid/ask mid for {symbol}: mid={mid:.2f} (immediate)")
                 self.price_cache[symbol] = mid
-                self.price_cache_timestamp[symbol] = datetime.now()
+                self.price_cache_timestamp[symbol] = now_local()
+                ts = getattr(ticker, 'time', None) or datetime.now(NY_TZ)
                 result_payload = {
                     'symbol': symbol,
                     'last': self._sanitize_float(mid),
                     'bid': self._sanitize_float(bid),
                     'ask': self._sanitize_float(ask),
                     'volume': self._sanitize_float(volume),
-                    'timestamp': datetime.now().isoformat()
+                    'timestamp': to_local_time(ts)
                 }
             else:
                 # 如果立即没有数据，进行短暂的非阻塞等待
                 while waited < max_wait and not result_payload:
-                    time.sleep(wait_interval)
+                    await asyncio.sleep(wait_interval)
                     waited += wait_interval
                     last = getattr(ticker, 'last', 0) or 0
                     bid = getattr(ticker, 'bid', 0) or 0
@@ -523,29 +1267,31 @@ class IBKRClient:
                     if last and last > 0:
                         ibkr_logger.debug(f"Retrieved real-time data for {symbol}: last={last} (waited {waited:.1f}s)")
                         self.price_cache[symbol] = last
-                        self.price_cache_timestamp[symbol] = datetime.now()
+                        self.price_cache_timestamp[symbol] = now_local()
+                        ts = getattr(ticker, 'time', None) or datetime.now(NY_TZ)
                         result_payload = {
                             'symbol': symbol,
                             'last': self._sanitize_float(last),
                             'bid': self._sanitize_float(bid),
                             'ask': self._sanitize_float(ask),
                             'volume': self._sanitize_float(volume),
-                            'timestamp': datetime.now().isoformat()
+                            'timestamp': to_local_time(ts)
                         }
                         break
-                    
+
                     if bid and ask and bid > 0 and ask > 0:
                         mid = (bid + ask) / 2
                         ibkr_logger.debug(f"Retrieved bid/ask mid for {symbol}: mid={mid:.2f} (waited {waited:.1f}s)")
                         self.price_cache[symbol] = mid
-                        self.price_cache_timestamp[symbol] = datetime.now()
+                        self.price_cache_timestamp[symbol] = now_local()
+                        ts = getattr(ticker, 'time', None) or datetime.now(NY_TZ)
                         result_payload = {
                             'symbol': symbol,
                             'last': self._sanitize_float(mid),
                             'bid': self._sanitize_float(bid),
                             'ask': self._sanitize_float(ask),
                             'volume': self._sanitize_float(volume),
-                            'timestamp': datetime.now().isoformat()
+                            'timestamp': to_local_time(ts)
                         }
                         break
             
@@ -555,7 +1301,11 @@ class IBKRClient:
                     ib.cancelMktData(contract)
                 except Exception as e:
                     ibkr_logger.warning(f"Failed to cancel market data for {symbol}: {e}")
-            self.connection_manager.run_in_connection_thread(_cancel_mkt_data)
+            await asyncio.to_thread(
+                self.connection_manager.run_in_connection_thread,
+                _cancel_mkt_data,
+                timeout=5.0,
+            )
             
             if result_payload:
                 return result_payload
@@ -571,7 +1321,7 @@ class IBKRClient:
                     'bid': 0,
                     'ask': 0,
                     'volume': 0,
-                    'timestamp': datetime.now().isoformat(),
+                    'timestamp': datetime.now(NY_TZ),
                     'is_cached': True
                 }
             
@@ -589,13 +1339,123 @@ class IBKRClient:
                     'bid': 0,
                     'ask': 0,
                     'volume': 0,
-                    'timestamp': datetime.now().isoformat(),
+                    'timestamp': to_local_time(datetime.now(NY_TZ)),
                     'is_cached': True,
                     'error': str(e)
                 }
             return None
 
-    def place_market_order(self, symbol: str, quantity: int,
+    async def _get_real_time_data_unified(self, symbol: str, exchange: str = 'SMART') -> Optional[Dict[str, Any]]:
+        manager = self._ensure_data_layer_manager()
+        if manager is None:
+            return None
+
+        symbol_key = (symbol or '').strip().upper()
+        if not symbol_key:
+            return None
+
+        options: Dict[str, Any] = {"exchange": exchange}
+        if symbol_key in INDEX_FUTURE_SYMBOLS:
+            options["sec_type"] = "FUT"
+
+        request = DataSubscriptionRequest(
+            channel="market.tick",
+            symbol=symbol_key,
+            options=options,
+        )
+
+        token = self._market_data_tokens.get(symbol_key)
+        if token is None:
+            token = await manager.subscribe(request)
+            self._market_data_tokens[symbol_key] = token
+
+        snapshot = await manager.snapshot(request)
+        if not snapshot:
+            await asyncio.sleep(0.1)
+            snapshot = await manager.snapshot(request)
+            if not snapshot:
+                return None
+
+        ts_ns = snapshot.get("ts_ns")
+        timestamp_iso: Optional[str]
+        if ts_ns is not None:
+            try:
+                ts_int = int(ts_ns)
+            except (TypeError, ValueError):
+                ts_int = None
+            if ts_int is not None:
+                ts_dt = datetime.fromtimestamp(ts_int / 1_000_000_000, tz=timezone.utc)
+                timestamp_iso = to_local_time(ts_dt)
+            else:
+                timestamp_iso = to_local_time(datetime.now(NY_TZ))
+        else:
+            timestamp_iso = to_local_time(datetime.now(NY_TZ))
+
+        result = {
+            'symbol': symbol,
+            'last': self._sanitize_float(snapshot.get('last')),
+            'bid': self._sanitize_float(snapshot.get('bid')),
+            'ask': self._sanitize_float(snapshot.get('ask')),
+            'volume': self._sanitize_float(snapshot.get('volume')),
+            'timestamp': timestamp_iso,
+            'market_state': snapshot.get('market_state'),
+            'source': 'unified',
+        }
+        if ts_ns is not None:
+            try:
+                result['ts_ns'] = int(ts_ns)
+            except (TypeError, ValueError):
+                pass
+
+        self.price_cache[symbol] = result['last']
+        self.price_cache_timestamp[symbol] = now_local()
+        return result
+
+    def _ensure_data_layer_manager(self):
+        if self._data_layer_manager is None:
+            try:
+                self._data_layer_manager = get_data_source_manager()
+            except Exception as exc:  # pragma: no cover - defensive guard
+                ibkr_logger.warning("Failed to initialise data source manager: {}", exc)
+                return None
+        return self._data_layer_manager
+
+    async def _release_market_data_subscriptions(self) -> None:
+        if not self._market_data_tokens:
+            return
+        manager = self._data_layer_manager
+        tokens = list(self._market_data_tokens.items())
+        self._market_data_tokens.clear()
+        if not manager:
+            return
+        for symbol_key, token in tokens:
+            try:
+                await manager.unsubscribe(token)
+            except Exception as exc:  # pragma: no cover - defensive guard
+                ibkr_logger.debug(
+                    "Failed to unsubscribe market data token for {}: {}",
+                    symbol_key,
+                    exc,
+                )
+
+    def _schedule_market_data_cleanup(self) -> None:
+        if not self._market_data_tokens:
+            return
+
+        async def _cleanup():
+            await self._release_market_data_subscriptions()
+
+        try:
+            asyncio.run(_cleanup())
+        except RuntimeError:
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                return
+            if loop.is_running():
+                loop.create_task(_cleanup())
+
+    async def place_market_order(self, symbol: str, quantity: int,
                            action: str = 'BUY', exchange: str = 'SMART', sec_type: str = 'STK') -> Optional[Order]:
         """下市价单"""
         # 下单前备份订单信息
@@ -661,14 +1521,14 @@ class IBKRClient:
                 try:
                     await ib.reqOpenOrdersAsync()
                     await ib.reqAllOpenOrdersAsync()
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(0.2)
                     ibkr_logger.debug("Requested order refresh from IBKR (async)")
                     return True
                 except Exception as e:
                     ibkr_logger.warning(f"Failed to refresh orders: {e}")
                     return False
 
-            result = self.connection_manager.run_async_in_connection_thread(_refresh())
+            result = self.connection_manager.run_async_in_connection_thread(_refresh(), timeout=1.5)
             if result is not None:
                 return bool(result)
             else:
@@ -678,7 +1538,7 @@ class IBKRClient:
                     ib.reqOpenOrders()
                     ib.reqAllOpenOrders()
                     import time
-                    time.sleep(0.5)
+                    time.sleep(0.2)
                     ibkr_logger.debug("Requested order refresh from IBKR (sync fallback)")
                     return True
                 except Exception as e:
@@ -692,6 +1552,13 @@ class IBKRClient:
         """取消指定订单"""
         # 规范化 order_id，内部与 IBKR 比较使用 int，外部广播/日志统一使用字符串
         order_id_str = str(order_id)
+        if is_trading_disabled():
+            ibkr_logger.warning(
+                "Trading disabled; simulated cancellation acknowledged for order {}",
+                order_id_str,
+            )
+            return True, "Cancelled (simulated)"
+
         try:
             order_id_int = int(order_id_str)
         except Exception:
@@ -700,9 +1567,8 @@ class IBKRClient:
         try:
             # 确保连接
             if not self.is_connected():
-                if not self.connect():
-                    ibkr_logger.error(f"Cannot connect to IBKR for cancel order: {order_id}")
-                    return False, "Connection failed"
+                ibkr_logger.error(f"Cannot cancel order {order_id}: IBKR is not connected")
+                return False, "Not connected"
 
             # 刷新订单数据，使用异步API避免事件循环冲突
             try:
@@ -727,7 +1593,21 @@ class IBKRClient:
                             break
 
                     if not target_trade:
-                        ibkr_logger.warning(f"Order {order_id} not found in active trades")
+                        # 快速重查一次，避免因列表延迟导致误判
+                        try:
+                            await ib_local.reqOpenOrdersAsync()
+                            await ib_local.reqAllOpenOrdersAsync()
+                            await asyncio.sleep(0.2)
+                            trades = ib_local.trades()
+                            for trade in trades:
+                                if trade.order.orderId == order_id:
+                                    target_trade = trade
+                                    break
+                        except Exception as requery_err:
+                            ibkr_logger.debug(f"Quick requery before cancel failed: {requery_err}")
+
+                    if not target_trade:
+                        ibkr_logger.info(f"Order {order_id} not found in active trades")
                         return False, f"Order {order_id} not found or already completed"
 
                     current_status = target_trade.orderStatus.status
@@ -738,8 +1618,12 @@ class IBKRClient:
                         ibkr_logger.warning(f"Order {order_id} cannot be cancelled, status: {current_status}")
                         return False, f"Order cannot be cancelled, current status: {current_status}"
 
-                    # 如果已经是PendingCancel状态，直接等待确认；否则发送取消请求
-                    if current_status != 'PendingCancel':
+                    # 如果已经是PendingCancel状态，短暂确认后直接返回；否则发送取消请求
+                    if current_status == 'PendingCancel':
+                        await asyncio.sleep(0.5)
+                        ibkr_logger.info(f"Order {order_id} already in PendingCancel, acknowledging cancellation initiation")
+                        return True, "Order cancellation initiated (PendingCancel)"
+                    else:
                         ibkr_logger.info(f"Sending cancel request for order {order_id}")
                         try:
                             ib_local.cancelOrder(target_trade.order)
@@ -747,10 +1631,11 @@ class IBKRClient:
                             ibkr_logger.error(f"Error sending cancel request for order {order_id}: {send_err}")
                             return False, f"Error sending cancel request: {send_err}"
 
-                    # 等待取消确认，使用异步睡眠避免阻塞事件循环
-                    max_wait_time = 15.0
-                    check_interval = 0.5
+                    # 等待取消确认，使用更短超时与轮询间隔，并对 PendingCancel 早返回
+                    max_wait_time = 10.0
+                    check_interval = 0.25
                     start_time = asyncio.get_event_loop().time()
+                    pending_first_seen_elapsed = None
 
                     while True:
                         elapsed = asyncio.get_event_loop().time() - start_time
@@ -768,7 +1653,12 @@ class IBKRClient:
                                     ibkr_logger.info(f"Order {order_id} successfully cancelled, final status: {new_status}")
                                     return True, f"Order cancelled successfully, status: {new_status}"
                                 elif new_status == 'PendingCancel':
-                                    ibkr_logger.info(f"Order {order_id} still pending cancellation... (elapsed: {elapsed:.1f}s)")
+                                    if pending_first_seen_elapsed is None:
+                                        pending_first_seen_elapsed = elapsed
+                                        ibkr_logger.info(f"Order {order_id} pending cancellation...")
+                                    elif elapsed - pending_first_seen_elapsed >= 1.0:
+                                        ibkr_logger.info(f"Order {order_id} cancellation acknowledged (PendingCancel)")
+                                        return True, "Order cancellation initiated (PendingCancel)"
                                 else:
                                     if new_status != current_status:
                                         ibkr_logger.info(f"Order {order_id} status changed from {current_status} to {new_status}")
@@ -800,7 +1690,7 @@ class IBKRClient:
                     ibkr_logger.error(f"Error during cancellation operation for order {order_id}: {inner_e}")
                     return False, f"Error during cancellation: {inner_e}"
 
-            result = self.connection_manager.run_async_in_connection_thread(_cancel_op(), timeout=20)
+            result = self.connection_manager.run_async_in_connection_thread(_cancel_op(), timeout=16)
             if result is not None:
                 return result
             else:
@@ -935,9 +1825,8 @@ class IBKRClient:
         try:
             # 确保连接
             if not self.is_connected():
-                if not self.connect():
-                    ibkr_logger.error(f"Cannot connect to IBKR for cancel all orders")
-                    return 0
+                ibkr_logger.error("Cannot cancel orders: IBKR is not connected")
+                return 0
 
             # 刷新订单，使用异步API避免事件循环冲突
             try:
@@ -947,7 +1836,10 @@ class IBKRClient:
                 # 继续执行取消操作，不因刷新失败而中断
 
             # 尝试使用连接管理器在正确的线程中执行操作
-            result = self.connection_manager.run_in_connection_thread(_cancel_orders_operation)
+            result = self.connection_manager.run_in_connection_thread(
+                _cancel_orders_operation,
+                timeout=15.0,
+            )
             
             if result is not None:
                 return result
@@ -965,9 +1857,8 @@ class IBKRClient:
         try:
             # 确保连接
             if not self.is_connected():
-                if not self.connect():
-                    ibkr_logger.error(f"Cannot connect to IBKR for get orders")
-                    return []
+                ibkr_logger.error("Cannot retrieve orders: IBKR is not connected")
+                return []
             
             ib = self.ib
             if not ib or not ib.isConnected():
@@ -1077,7 +1968,7 @@ class IBKRClient:
                             # Set executed_at if order is filled and not already set
                             if current_status == "Filled" and auto_order.executed_at is None:
                                 from datetime import datetime
-                                auto_order.executed_at = datetime.now()
+                                auto_order.executed_at = now_local()
                                 
                             
                                 # strategy execution tracking removed; orders table records fills
@@ -1110,7 +2001,7 @@ class IBKRClient:
                                 from datetime import datetime
                                 executed_at = None
                                 if current_status == "Filled" and existing_order.executed_at is None:
-                                    executed_at = datetime.now()
+                                    executed_at = now_local()
                                 
                                 # 从Trade对象的fills中提取commission和realizedPNL
                                 commission = None
@@ -1237,7 +2128,7 @@ class IBKRClient:
                                     from datetime import datetime
                                     executed_at = None
                                     if current_status == "Filled":
-                                        executed_at = datetime.now()
+                                        executed_at = now_local()
                                     
                                     # 从Trade对象的fills中提取commission和realizedPNL
                                     commission = None
@@ -1315,62 +2206,93 @@ class IBKRClient:
         try:
             # 确保连接
             if not self.is_connected():
-                if not self.connect():
-                    ibkr_logger.error(f"Cannot connect to IBKR for get account info")
-                    return {}
-            
+                ibkr_logger.error("Cannot retrieve account info: IBKR is not connected")
+                return self._return_cached_account_info()
+
             # 获取IB实例
             ib = self.ib
             if not ib or not ib.isConnected():
                 ibkr_logger.error(f"IBKR connection lost for get account info")
-                return {}
-            
+                return self._return_cached_account_info()
+
             # Use synchronous methods in async context
             account_values = ib.accountValues()
-            
-            info = {
-                'account_id': None,
-                'account_type': 'Paper' if connection_manager.config.paper_trading else 'Live',
-                'total_cash': 0,
-                'available_funds': 0,
-                'buying_power': 0,
-                'net_liquidation': 0,
-                'unrealized_pnl': 0,
-                'realized_pnl': 0
-            }
+
+            # Start from the last cached snapshot when available so that we don't
+            # accidentally wipe fields to zero if IBKR returns a partial update.
+            info = self._return_cached_account_info() or {}
+            info = dict(info)  # ensure we don't mutate the cached reference
+
+            # Guarantee all expected keys exist even when we start from a cached
+            # snapshot created by an earlier version of the code.
+            info.setdefault('account_id', None)
+            info['account_type'] = (
+                'Paper' if connection_manager.config.paper_trading else 'Live'
+            )
+            info.setdefault('total_cash', 0.0)
+            info.setdefault('available_funds', 0.0)
+            info.setdefault('buying_power', 0.0)
+            info.setdefault('net_liquidation', 0.0)
+            info.setdefault('unrealized_pnl', 0.0)
+            info.setdefault('realized_pnl', 0.0)
             
             # Get account ID from account values
+            def _parse_float(val: Any) -> float:
+                try:
+                    return float(val)
+                except (TypeError, ValueError):
+                    return 0.0
+
             for item in account_values:
-                if item.tag == 'AccountCode':
+                try:
+                    currency = (item.currency or '').upper()
+                except AttributeError:
+                    currency = ''
+
+                # Account id may be stored either in AccountCode value or the account field itself
+                if item.tag == 'AccountCode' and item.value:
                     info['account_id'] = item.value
-                elif item.tag == 'TotalCashValue' and item.currency == 'USD':
-                    info['total_cash'] = float(item.value)
-                elif item.tag == 'AvailableFunds' and item.currency == 'USD':
-                    info['available_funds'] = float(item.value)
-                elif item.tag == 'BuyingPower' and item.currency == 'USD':
-                    info['buying_power'] = float(item.value)
-                elif item.tag == 'NetLiquidation' and item.currency == 'USD':
-                    info['net_liquidation'] = float(item.value)
-                elif item.tag == 'UnrealizedPnL' and item.currency == 'USD':
-                    info['unrealized_pnl'] = float(item.value)
-                elif item.tag == 'RealizedPnL' and item.currency == 'USD':
-                    info['realized_pnl'] = float(item.value)
-            
+                elif not info['account_id'] and getattr(item, 'account', None):
+                    info['account_id'] = item.account
+
+                # IBKR may report base currency values using either USD or BASE depending on
+                # account configuration, so accept both to avoid zeroing out valid data.
+                currency_ok = currency in ('USD', 'BASE', '')
+
+                if item.tag == 'TotalCashValue' and currency_ok:
+                    info['total_cash'] = _parse_float(item.value)
+                elif item.tag == 'AvailableFunds' and currency_ok:
+                    info['available_funds'] = _parse_float(item.value)
+                elif item.tag == 'BuyingPower' and currency_ok:
+                    info['buying_power'] = _parse_float(item.value)
+                elif item.tag == 'NetLiquidation' and currency_ok:
+                    info['net_liquidation'] = _parse_float(item.value)
+                elif item.tag == 'UnrealizedPnL' and currency_ok:
+                    info['unrealized_pnl'] = _parse_float(item.value)
+                elif item.tag == 'RealizedPnL' and currency_ok:
+                    info['realized_pnl'] = _parse_float(item.value)
+
+            # Persist snapshot for downstream consumers (risk manager, summaries)
+            try:
+                self._cached_account_info = dict(info)
+                self._cached_account_info_timestamp = now_local()
+            except Exception:
+                pass
+
             return info
         except Exception as e:
             ibkr_logger.error(f"Failed to get account info: {e}")
-            return {}
+            return self._return_cached_account_info()
     
-    def get_account_summary(self) -> List[Dict]:
+    async def get_account_summary(self) -> List[Dict]:
         """兼容方法：返回与 ib.accountSummary() 类似的结构，用于资金充足性校验等逻辑。
         返回格式：[{'tag': str, 'value': Any, 'currency': str|None, 'account': str|None}, ...]
         """
         try:
             # 确保连接
             if not self.is_connected():
-                if not self.connect():
-                    ibkr_logger.error("Cannot connect to IBKR for get_account_summary")
-                    return []
+                ibkr_logger.error("Cannot retrieve account summary: IBKR is not connected")
+                return []
 
             ib = self.ib
             if not ib or not ib.isConnected():
@@ -1402,9 +2324,8 @@ class IBKRClient:
         try:
             # 确保连接
             if not self.is_connected():
-                if not self.connect():
-                    ibkr_logger.error(f"Cannot connect to IBKR for get positions")
-                    return []
+                ibkr_logger.error("Cannot retrieve positions: IBKR is not connected")
+                return []
             
             # 获取IB实例
             ib = self.ib
@@ -1412,32 +2333,91 @@ class IBKRClient:
                 ibkr_logger.error(f"IBKR connection lost for get positions")
                 return []
             
-            # Use portfolio() to get current market data snapshot
-            portfolio_items = ib.portfolio()
+            # Use portfolio() to get current market data snapshot without blocking the event loop
+            def _portfolio_snapshot():
+                return ib.portfolio()
+
+            portfolio_items = await asyncio.to_thread(
+                self.connection_manager.run_in_connection_thread,
+                _portfolio_snapshot,
+                timeout=10.0,
+            )
+            if portfolio_items is None:
+                portfolio_items = []
 
             # 当发生短暂断线/同步延迟时，IB可能返回空的portfolio快照。
             # 为避免前端仓位瞬时清空，这里使用短期缓存回退。
             if not portfolio_items:
-                if getattr(self, 'positions_cache', None) and getattr(self, 'positions_cache_timestamp', None) and (datetime.now() - self.positions_cache_timestamp) < timedelta(seconds=self.positions_cache_ttl_seconds):
+                if getattr(self, 'positions_cache', None) and getattr(self, 'positions_cache_timestamp', None) and (now_local() - self.positions_cache_timestamp) < timedelta(seconds=self.positions_cache_ttl_seconds):
                     ibkr_logger.warning("IB portfolio() returned empty; using recent positions cache to avoid flicker")
                     return self.positions_cache.copy()
                 else:
                     ibkr_logger.warning("IB portfolio() returned empty and no valid cache; returning empty list")
                     return []
             position_list = []
-            
+
+            realtime_tasks: Dict[str, asyncio.Task] = {}
+            realtime_results: Dict[str, Optional[Dict[str, Any]]] = {}
+            if not fast:
+                fetch_semaphore = asyncio.Semaphore(5)
+
+                async def _prefetch(symbol: str):
+                    async with fetch_semaphore:
+                        return await self.get_real_time_data(symbol)
+
+                for item in portfolio_items:
+                    if not getattr(item, 'position', 0):
+                        continue
+                    sym = getattr(getattr(item, 'contract', None), 'symbol', None)
+                    if not sym or sym in realtime_tasks:
+                        continue
+                    cache_ts = self.price_cache_timestamp.get(sym)
+                    cached_price = self.price_cache.get(sym)
+                    if cached_price and cache_ts and (now_local() - cache_ts) < timedelta(seconds=self.price_cache_ttl_seconds):
+                        continue
+                    realtime_tasks[sym] = asyncio.create_task(_prefetch(sym))
+
             for item in portfolio_items:
                 # Filter out zero positions to avoid stale data
                 if item.position == 0:
                     continue
-                
+
                 sym = item.contract.symbol
                 current_price = None
                 price_source = None
+
+                # 合约乘数用于期货/期权的名义价值和PnL计算
+                contract_multiplier = 1.0
+                raw_multiplier = getattr(item.contract, "multiplier", None)
+                if raw_multiplier is not None:
+                    try:
+                        contract_multiplier = float(raw_multiplier) or 1.0
+                    except (TypeError, ValueError):
+                        contract_multiplier = 1.0
+
+                # 额外的乘数映射，确保常见期货合约的乘数正确
+                multiplier_overrides = {
+                    "MNQ": 2.0,   # Micro E-mini Nasdaq-100
+                    "NQ": 20.0,   # E-mini Nasdaq-100
+                    "MES": 5.0,
+                    "ES": 50.0,
+                    "MYM": 0.5,
+                    "YM": 5.0,
+                    "M2K": 5.0,
+                    "RTY": 50.0,
+                    "MCL": 100.0,
+                    "CL": 1000.0,
+                    "MGC": 10.0,
+                    "GC": 100.0,
+                }
+                if sym in multiplier_overrides:
+                    contract_multiplier = multiplier_overrides[sym]
+                if not math.isfinite(contract_multiplier) or contract_multiplier <= 0:
+                    contract_multiplier = 1.0
                 
                 # 1) 首先检查缓存是否有效
                 ts = self.price_cache_timestamp.get(sym)
-                if ts and datetime.now() - ts < timedelta(seconds=self.price_cache_ttl_seconds):
+                if ts and now_local() - ts < timedelta(seconds=self.price_cache_ttl_seconds):
                     cached_price = self.price_cache.get(sym)
                     if cached_price and cached_price > 0:
                         current_price = cached_price
@@ -1446,23 +2426,35 @@ class IBKRClient:
                 
                 # 2) 如果缓存无效，尝试获取实时价格（仅在非快速模式下且不在ThreadPoolExecutor中）
                 if current_price is None and not fast:
-                    try:
-                        # 检查是否在ThreadPoolExecutor中运行
-                        current_thread = threading.current_thread()
-                        is_in_thread_pool = isinstance(current_thread, threading.Thread) and 'ThreadPoolExecutor' in current_thread.name
-                        
-                        # 只在主线程或非ThreadPoolExecutor线程中获取实时价格
-                        if not is_in_thread_pool:
-                            data = self.get_real_time_data(sym)
-                            if data and data.get('last'):
-                                current_price = data['last']
-                                price_source = "realtime"
+                    if sym in realtime_results:
+                        data = realtime_results[sym]
+                    else:
+                        task = realtime_tasks.get(sym)
+                        if task:
+                            try:
+                                data = await asyncio.wait_for(task, timeout=4.0)
+                            except asyncio.TimeoutError:
+                                task.cancel()
+                                ibkr_logger.warning(f"Realtime price request for {sym} timed out")
+                                data = None
+                            except asyncio.CancelledError:
+                                ibkr_logger.debug(f"Realtime price task for {sym} cancelled")
+                                raise
+                            except Exception as e:
+                                ibkr_logger.debug(f"Realtime price fetch error for {sym}: {e}")
+                                data = None
+                            else:
+                                realtime_results[sym] = data
+                            finally:
+                                realtime_tasks.pop(sym, None)
                         else:
-                            # 在ThreadPoolExecutor中，完全跳过实时价格获取以避免阻塞
-                            ibkr_logger.debug(f"Skipping real-time fetch for {sym} in ThreadPoolExecutor to avoid blocking")
-                    except Exception as e:
-                        ibkr_logger.debug(f"Realtime price fetch error for {sym}: {e}")
-                
+                            data = None
+                        if sym not in realtime_results:
+                            realtime_results[sym] = data
+                    if data and data.get('last'):
+                        current_price = data['last']
+                        price_source = "realtime"
+
                 # 3) 如果实时获取失败或为快速模式，尝试使用 marketPrice
                 if current_price is None:
                     if item.marketPrice and item.marketPrice == item.marketPrice and item.marketPrice > 0:
@@ -1484,38 +2476,43 @@ class IBKRClient:
                 ibkr_logger.debug(f"Portfolio data for {sym}: marketPrice={item.marketPrice}, averageCost={item.averageCost}, position={item.position}")
                 ibkr_logger.debug(f"Price for {sym}: {current_price} (source: {price_source})")
                 
-                # Adjust average cost for futures by contract multiplier to get entry price
-                avg_cost_adjusted = item.averageCost
-                futures_multipliers = {
-                    'MNQ': 2,   # Micro E-mini Nasdaq-100
-                    'NQ': 20,   # E-mini Nasdaq-100
-                }
-                if sym in futures_multipliers and item.averageCost:
-                    avg_cost_adjusted = item.averageCost / futures_multipliers[sym]
-                    ibkr_logger.debug(f"Futures multiplier adjustment for {sym}: {item.averageCost} / {futures_multipliers[sym]} = {avg_cost_adjusted}")
-                else:
-                    ibkr_logger.debug(f"No futures multiplier adjustment for {sym}, using original averageCost: {avg_cost_adjusted}")
+                position_qty = float(item.position or 0)
 
-                market_value = item.position * current_price
-                
-                # 计算未实现盈亏，区分多头和空头持仓
-                unrealized_pnl = 0
-                if hasattr(item, 'unrealizedPNL'):
-                    # 如果IBKR直接提供了未实现盈亏，优先使用
-                    unrealized_pnl = item.unrealizedPNL
+                # IBKR 对期货返回的 averageCost 已经乘以乘数，因此除以乘数得到每份合约的成本价
+                avg_cost_raw = float(item.averageCost or 0.0)
+                if contract_multiplier != 0:
+                    avg_cost_adjusted = avg_cost_raw / contract_multiplier
                 else:
-                    # 否则根据持仓方向计算
-                    if item.position > 0:  # 多头
-                        # 多头盈亏 = (当前价格 - 成本价) * 持仓数量
-                        unrealized_pnl = (current_price - avg_cost_adjusted) * item.position
-                    else:  # 空头
-                        # 空头盈亏 = (成本价 - 当前价格) * 持仓数量的绝对值
-                        unrealized_pnl = (avg_cost_adjusted - current_price) * abs(item.position)
-                
-                # 计算未实现盈亏百分比
-                unrealized_pnl_percent = 0
-                if item.position * avg_cost_adjusted != 0:
-                    unrealized_pnl_percent = (unrealized_pnl / abs(item.position * avg_cost_adjusted)) * 100
+                    avg_cost_adjusted = avg_cost_raw
+
+                if not math.isfinite(avg_cost_adjusted):
+                    avg_cost_adjusted = 0.0
+
+                market_value = position_qty * (current_price or 0) * contract_multiplier
+
+                # 计算未实现盈亏，统一按照乘数处理（避免依赖可能不准确的IB字段）
+                current_price_value = current_price or 0.0
+                unrealized_pnl = (current_price_value - avg_cost_adjusted) * position_qty * contract_multiplier
+
+                # 如果我们缺少价格，尝试回退到 IBKR 提供的未实现盈亏
+                ib_unrealized = getattr(item, 'unrealizedPNL', None)
+                try:
+                    ib_unrealized_val = float(ib_unrealized)
+                except (TypeError, ValueError):
+                    ib_unrealized_val = None
+
+                if (current_price_value == 0 or not math.isfinite(unrealized_pnl)) and ib_unrealized_val is not None:
+                    unrealized_pnl = ib_unrealized_val
+
+                if not math.isfinite(unrealized_pnl):
+                    unrealized_pnl = 0.0
+
+                # 计算未实现盈亏百分比（以持仓名义价值为基准）
+                position_notional = abs(position_qty * avg_cost_adjusted * contract_multiplier)
+                if position_notional:
+                    unrealized_pnl_percent = (unrealized_pnl / position_notional) * 100
+                else:
+                    unrealized_pnl_percent = 0.0
                 
                 position_info = {
                     'symbol': sym,
@@ -1524,6 +2521,7 @@ class IBKRClient:
                     'market_price': item.marketPrice if item.marketPrice == item.marketPrice else 0,
                     'current_price': current_price,
                     'market_value': market_value,
+                    'contract_multiplier': contract_multiplier,
                     'unrealized_pnl': unrealized_pnl,
                     'unrealized_pnl_percent': unrealized_pnl_percent,
                     'price_source': price_source,
@@ -1533,12 +2531,210 @@ class IBKRClient:
             # 成功获取非空持仓后，刷新短期缓存
             if position_list:
                 self.positions_cache = position_list.copy()
-                self.positions_cache_timestamp = datetime.now()
+                self.positions_cache_timestamp = now_local()
             
             return position_list
         except Exception as e:
             ibkr_logger.error(f"Failed to get positions: {e}")
             return []
+
+    async def _handle_order_error(self, req_id, error_code, error_string):
+        """处理订单错误，更新订单状态为失败"""
+        try:
+            from .order_manager import get_order_manager, OrderStatus
+            
+            # 记录错误信息
+            connection_logger.error(f"Order error - ReqId: {req_id}, Code: {error_code}, Message: {error_string}")
+            
+            # 从IBKRClient获取reqId到订单ID的映射
+            order_id = self.req_id_to_order_id.get(req_id)
+            if order_id:
+                # 更新订单状态为失败
+                order_manager = get_order_manager()
+                await asyncio.to_thread(
+                    order_manager.update_order_status,
+                    order_id=order_id,
+                    status=OrderStatus.REJECTED.value,
+                    notes=f"IBKR Error {error_code}: {error_string}"
+                )
+                connection_logger.info(f"Updated order {order_id} status to REJECTED due to error {error_code}")
+                
+                # 清理映射
+                del self.req_id_to_order_id[req_id]
+            else:
+                connection_logger.warning(f"No order mapping found for reqId {req_id}")
+            
+        except Exception as e:
+            connection_logger.error(f"Failed to handle order error: {e}")
+    
+    async def _handle_order_filled(self, trade):
+        """处理订单成交事件"""
+        try:
+            order_id = str(trade.order.orderId)
+            connection_logger.info(f"Handling filled order: {order_id}")
+            
+            # 获取佣金和PnL信息
+            total_commission = 0
+            total_pnl = 0
+            
+            for fill in trade.fills:
+                if hasattr(fill, 'commissionReport') and fill.commissionReport:
+                    total_commission += fill.commissionReport.commission
+                    if hasattr(fill.commissionReport, 'realizedPNL'):
+                        total_pnl += fill.commissionReport.realizedPNL or 0
+            
+            connection_logger.info(f"Order {order_id} commission: {total_commission}, pnl: {total_pnl}")
+            
+            # 更新数据库中的订单信息
+            await self._update_order_commission_pnl(order_id, total_commission, total_pnl)
+            
+        except Exception as e:
+            connection_logger.error(f"Error handling filled order: {e}")
+    
+    async def _update_order_commission_pnl(self, order_id, commission, pnl):
+        """更新订单的佣金和PnL到数据库并同步内存对象"""
+        try:
+            from .database import get_db_manager
+            
+            db = get_db_manager()
+            oid = str(order_id)
+            await db.update_order_commission_pnl(oid, commission, pnl)
+            connection_logger.info(f"Updated order {oid} commission={commission}, pnl={pnl} in database")
+
+            # 同步内存中的订单（如果存在）
+            try:
+                from .order_manager import get_order_manager
+                om = get_order_manager()
+                oid = str(order_id)
+                order = om.orders.get(oid)
+                if order:
+                    prev_comm, prev_pnl = order.commission, order.pnl
+                    if commission is not None:
+                        order.commission = commission
+                    if pnl is not None:
+                        order.pnl = pnl
+                    connection_logger.debug(
+                        f"Synchronized in-memory order {oid} commission: {prev_comm} -> {order.commission}, pnl: {prev_pnl} -> {order.pnl}"
+                    )
+                    try:
+                        if getattr(order, "status", "").lower() == "filled":
+                            from .utils.strategy_cache import (
+                                record_filled_order as cache_record_filled_order,
+                            )
+                            from .utils.account_pnl_cache import (
+                                record_account_fill as cache_record_account_fill,
+                            )
+
+                            await cache_record_filled_order(order)
+                            await cache_record_account_fill(order)
+                    except Exception as cache_err:
+                        connection_logger.debug(
+                            f"Strategy cache update skipped for order {oid}: {cache_err}"
+                        )
+                else:
+                    connection_logger.debug(f"In-memory order {oid} not found for commission/pnl sync")
+            except Exception as sync_err:
+                connection_logger.debug(f"Failed to sync in-memory order commission/pnl: {sync_err}")
+            
+            # 将最新的佣金和PnL更新通过 WebSocket 广播给前端，触发订单列表刷新
+            try:
+                from .websocket_manager import websocket_manager
+                message = {
+                    "type": "order_update",
+                    "order_id": oid,
+                    "commission": commission,
+                    "pnl": pnl,
+                }
+                # 如果拿到了内存中的订单对象，补充更多字段（与 order_filled 事件保持一致的结构）
+                if 'order' in locals() and order:
+                    message.update({
+                        "symbol": getattr(order, 'symbol', None),
+                        "action": getattr(order, 'action', None),
+                        "quantity": getattr(order, 'quantity', None),
+                        "fill_price": getattr(order, 'fill_price', None),
+                        "order_type": getattr(order, 'order_type', None),
+                        "executed_at": order.executed_at.isoformat() if getattr(order, 'executed_at', None) else None,
+                    })
+                await websocket_manager.broadcast(message)
+                connection_logger.info(f"Broadcasted order_update for order {oid} (commission={commission}, pnl={pnl})")
+            except Exception as ws_err:
+                connection_logger.warning(f"Failed to broadcast order_update for order {oid}: {ws_err}")
+            
+        except Exception as e:
+            connection_logger.error(f"Error updating order commission/pnl in database: {e}")
+    
+    async def backfill_commissions(self, days: int = 7) -> int:
+        """Backfill commission and PnL for recent executions by requesting executions from IBKR.
+        This will not override existing non-null commission/pnl in DB thanks to COALESCE guards.
+        Returns the number of update attempts made.
+        """
+        try:
+            if not self.ib or not self.ib.isConnected():
+                connection_logger.error("Cannot backfill commissions: IB not connected")
+                return 0
+
+            async def _backfill_op():
+                try:
+                    ib_local = self.ib
+                    # Compute start time for the execution filter (local time, format YYYYMMDD-HH:MM:SS)
+                    start_dt = now_local() - timedelta(days=max(1, int(days)))
+                    # IB API expects a hyphen between date and time, e.g. 20250131-13:45:00
+                    start_str = start_dt.strftime('%Y%m%d-%H:%M:%S')
+
+                    # Request executions; this will also trigger commissionReport events
+                    filt = ExecutionFilter(time=start_str)
+                    connection_logger.info(f"Requesting executions since {start_str} for backfilling commissions/PnL")
+                    try:
+                        await ib_local.reqExecutionsAsync(filt)
+                    except Exception as e:
+                        connection_logger.warning(f"reqExecutionsAsync failed: {e}; trying sync fallback")
+                        try:
+                            ib_local.reqExecutions(filt)
+                        except Exception as e2:
+                            connection_logger.error(f"Sync reqExecutions failed: {e2}")
+                            return 0
+
+                    # Allow some time for commission reports to arrive and pair with executions
+                    await asyncio.sleep(1.5)
+
+                    fills = ib_local.fills()
+                    if not fills:
+                        connection_logger.info("No fills returned from IBKR for the specified window")
+                        return 0
+
+                    update_count = 0
+                    for fill in fills:
+                        try:
+                            # Prefer commissionReport attached to fill
+                            cr = getattr(fill, 'commissionReport', None)
+                            exec_obj = getattr(fill, 'execution', None)
+                            if cr and exec_obj and hasattr(exec_obj, 'orderId'):
+                                order_id = str(exec_obj.orderId)
+                                commission = cr.commission
+                                pnl = getattr(cr, 'realizedPNL', None)
+                                connection_logger.debug(
+                                    f"Backfill commission report for order {order_id}: commission={commission}, pnl={pnl}"
+                                )
+                                # Use the same updater which syncs DB and in-memory order
+                                await self._update_order_commission_pnl(order_id, commission, pnl)
+                                update_count += 1
+                        except Exception as inner_e:
+                            connection_logger.warning(f"Failed to process a fill during backfill: {inner_e}")
+
+                    connection_logger.info(f"Backfill completed. Updates attempted: {update_count}")
+                    return update_count
+                except Exception as e:
+                    connection_logger.error(f"Backfill operation failed: {e}")
+                    return 0
+
+            result = self.run_async_in_connection_thread(_backfill_op())
+            try:
+                return int(result or 0)
+            except Exception:
+                return 0
+        except Exception as e:
+            connection_logger.error(f"Backfill commissions wrapper error: {e}")
+            return 0
 
 if __name__ == "__main__":
     """主函数，用于调试下单方法"""

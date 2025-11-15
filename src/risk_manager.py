@@ -5,7 +5,7 @@ import json
 import math
 from typing import Dict, List, Optional, Tuple, Any
 from datetime import datetime, timedelta
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from queue import Queue
 
@@ -16,27 +16,12 @@ from loguru import logger
 risk_logger = logger.bind(module="risk_manager", request_id="-")
 from dotenv import load_dotenv
 
-from .ibkr_client import IBKRClient
 from .notification_manager import NotificationManager
-from .database import DatabaseManager, get_db_manager
-from .database import AutoOrder as DatabaseAutoOrder
+from .database import DatabaseManager, Order, get_db_manager
 from .database import RiskRule as DatabaseRiskRule
+from .utils import ensure_local_timezone, now_local, parse_local_datetime, to_local_iso
 
 load_dotenv()
-
-@dataclass
-class AutoOrder:
-    order_id: str
-    symbol: str
-    action: str
-    quantity: int
-    order_type: str
-    price: Optional[float]
-    status: str
-    created_at: datetime
-    executed_at: Optional[datetime] = None
-    rule_id: Optional[str] = None
-    order_source: str = "auto"  # "auto" or "manual"
 
 class OrderType(Enum):
     STOP_LOSS = "stop_loss"
@@ -52,10 +37,26 @@ class RiskRule:
     enabled: bool = True
     max_time_span: Optional[int] = None  # 以分钟为单位的最大持仓时间
     created_at: datetime = None
-    
+    auto_trailing: bool = False
+    atr_params: Dict[str, Any] = field(default_factory=dict)
+    rule_type: str = "fixed"
+
     def __post_init__(self):
-        if self.created_at is None:
-            self.created_at = datetime.now()
+        self.created_at = ensure_local_timezone(self.created_at) or now_local()
+        if not isinstance(self.atr_params, dict):
+            self.atr_params = dict(self.atr_params or {})
+        rule_type = (self.rule_type or "fixed").lower()
+        if rule_type not in {"fixed", "trailing"}:
+            rule_type = "fixed"
+        # 兼容旧数据：当 auto_trailing 为 True 时强制设定为 trailing
+        if self.auto_trailing and rule_type != "trailing":
+            rule_type = "trailing"
+        self.rule_type = rule_type
+        if self.rule_type == "trailing":
+            if not self.auto_trailing:
+                self.auto_trailing = True
+        elif self.auto_trailing:
+            self.auto_trailing = False
 
 @dataclass
 class OrderRequest:
@@ -65,10 +66,9 @@ class OrderRequest:
     price: Optional[float] = None
     reason: str = ""
     timestamp: datetime = None
-    
+
     def __post_init__(self):
-        if self.timestamp is None:
-            self.timestamp = datetime.now()
+        self.timestamp = ensure_local_timezone(self.timestamp) or now_local()
 
 @dataclass
 class PositionSizingResult:
@@ -85,26 +85,42 @@ class PositionSizingResult:
     explanation: str = ""
 
 class RiskManager:
-    def __init__(self, ibkr_client: IBKRClient, notification_manager: NotificationManager):
-        self.ibkr_client = ibkr_client
+    def __init__(self, notification_manager: NotificationManager):
         self.notification_manager = notification_manager
         self.db_manager = get_db_manager()
         
         # 内存中的缓存，从数据库加载
         self.risk_rules: Dict[str, RiskRule] = {}
-        self.auto_orders: Dict[str, AutoOrder] = {}
+        self.auto_orders: Dict[str, Order] = {}
         
         # 订单队列
         self.order_queue = Queue()
-        
+
         # 调度器
-        self.scheduler = AsyncIOScheduler()
+        self.scheduler: Optional[AsyncIOScheduler] = None
+
+        # 监控任务串行化锁，避免并发运行导致的调度器告警
+        self._monitor_lock: asyncio.Lock = asyncio.Lock()
 
         # 组件依赖
         self.order_manager = None
+        self.ibkr_client = None
+        self._ibkr_client_warning_logged = False
+        self.atr_service = None
 
         # 监控状态
         self.monitoring_active = False
+
+        # 是否启用基于ATR的trail SL/TP逻辑
+        trailing_flag = os.getenv("ENABLE_TRAILING_SL_TP", "true").strip().lower()
+        self.trailing_sl_tp_enabled = trailing_flag not in {"0", "false", "off", "no"}
+        if not self.trailing_sl_tp_enabled:
+            risk_logger.warning(
+                "ATR trailing SL/TP disabled via configuration; falling back to fixed price rules"
+            )
+        
+        # 记录已警告的订单状态倒退，避免重复警告
+        self.warned_order_downgrades = set()
         
         # 数据目录
         self.data_dir = "data"
@@ -116,8 +132,22 @@ class RiskManager:
         
         # 价格阈值与杠杆配置
         self.price_threshold = float(os.getenv('PRICE_THRESHOLD', 0.02))  # 从环境变量读取，默认2%金额阈值
-        self.leverage_mnq = int(os.getenv('LEVERAGE_MNQ', 20))  # MNQ杠杆倍数，从环境变量读取
-        
+
+        index_lev_default = int(os.getenv('LEVERAGE_INDEX_DEFAULT', 20))
+        micro_lev_default = int(os.getenv('LEVERAGE_INDEX_MICRO_DEFAULT', index_lev_default))
+        self.leverage_map: Dict[str, float] = {
+            'ES': float(os.getenv('LEVERAGE_ES', index_lev_default)),
+            'MES': float(os.getenv('LEVERAGE_MES', micro_lev_default)),
+            'NQ': float(os.getenv('LEVERAGE_NQ', index_lev_default)),
+            'MNQ': float(os.getenv('LEVERAGE_MNQ', micro_lev_default)),
+            'YM': float(os.getenv('LEVERAGE_YM', index_lev_default)),
+            'MYM': float(os.getenv('LEVERAGE_MYM', micro_lev_default)),
+            'RTY': float(os.getenv('LEVERAGE_RTY', index_lev_default)),
+            'M2K': float(os.getenv('LEVERAGE_M2K', micro_lev_default)),
+            'VX': float(os.getenv('LEVERAGE_VX', 10)),
+        }
+        self.leverage_mnq = float(self.leverage_map.get('MNQ', micro_lev_default))
+
         # 动态仓位管理与断路器配置
         self.risk_per_trade_r = float(os.getenv('RISK_PER_TRADE_R', 0.005))
         self.rv_ref_value = float(os.getenv('RV_REF_VALUE', 1.0))
@@ -136,6 +166,11 @@ class RiskManager:
             'MES': 5.0,
             'NQ': 20.0,
             'ES': 50.0,
+            'YM': 5.0,
+            'MYM': 0.5,
+            'RTY': 50.0,
+            'M2K': 5.0,
+            'VX': 1000.0,
         }
 
         # 回撤分级缩放
@@ -151,7 +186,7 @@ class RiskManager:
         self.equity_last: float = 0.0
         self.equity_peak: float = 0.0
         self.sod_equity: float = 0.0
-        self.today_date = datetime.now().date()
+        self.today_date = now_local().date()
         self.daily_loss_currency: float = 0.0
         self.daily_loss_R: float = 0.0
         self.loss_streak: int = 0
@@ -164,12 +199,97 @@ class RiskManager:
         
         # 待处理的限价订单状态
         self.pending_orders: Dict[str, Dict[str, bool]] = {}
-        
+
         # 警告历史记录
         self.alert_history: Dict[str, Dict[str, datetime]] = {}
-        
+
+        # 仓位限制配置
+        self.position_limit_default: Optional[float] = None
+        self.position_limit_per_symbol: Dict[str, float] = {}
+
         # 从数据库加载现有数据
+        self._load_risk_config_from_db()
         self._load_from_database()
+        self._load_position_limits_from_db()
+
+    def _resolve_rule_type(
+        self, rule_type: Optional[str], auto_trailing: Optional[bool]
+    ) -> Tuple[str, bool]:
+        """Normalise rule type and derive the trailing flag respecting runtime config."""
+
+        candidate = (rule_type or "").strip().lower()
+        if candidate in {"fixed", "trailing"}:
+            resolved_type = candidate
+        else:
+            resolved_type = "trailing" if auto_trailing else "fixed"
+
+        resolved_auto = resolved_type == "trailing"
+
+        if not self.trailing_sl_tp_enabled and resolved_auto:
+            resolved_type = "fixed"
+            resolved_auto = False
+
+        return resolved_type, resolved_auto
+
+    def _sync_rule_trailing_state(self, rule: RiskRule) -> None:
+        """Ensure auto_trailing flag and ATR subscriptions reflect the rule type."""
+
+        resolved_type, resolved_auto = self._resolve_rule_type(rule.rule_type, rule.auto_trailing)
+        rule.rule_type = resolved_type
+        rule.auto_trailing = resolved_auto
+
+        service = getattr(self, "atr_service", None)
+        if not service:
+            return
+
+        try:
+            if rule.rule_type == "trailing" and rule.enabled:
+                service.ensure_subscription(rule.symbol, rule)
+            else:
+                service.disable_symbol(rule.symbol)
+        except Exception as atr_err:
+            risk_logger.warning(
+                f"Failed to synchronise ATR subscription for {rule.symbol}: {atr_err}"
+            )
+
+    def _get_ibkr_client(self, ensure_ready: bool = False):
+        """Safely resolve the shared IBKR client instance.
+
+        Returns the globally shared client if available, otherwise falls back to
+        a locally injected instance (e.g. set via the connection route). When a
+        client becomes available after previously missing, the warning flag is
+        reset so that future disconnects can be surfaced again.
+        """
+
+        client = getattr(self, "ibkr_client", None)
+        core_module = None
+        try:
+            import core as core_module  # type: ignore
+        except Exception:
+            core_module = None
+
+        if core_module is not None:
+            core_client = getattr(core_module, "ibkr_client", None)
+            if core_client is not None:
+                if client is None:
+                    self.ibkr_client = core_client
+                if self._ibkr_client_warning_logged:
+                    self._ibkr_client_warning_logged = False
+                return core_client
+
+        if client is not None:
+            if core_module is not None:
+                try:
+                    core_module.ibkr_client = client
+                except Exception:
+                    pass
+            if self._ibkr_client_warning_logged:
+                self._ibkr_client_warning_logged = False
+            return client
+
+        if ensure_ready:
+            raise RuntimeError("IBKR client is not initialized")
+        return None
 
     def _load_from_database(self):
         """从数据库加载风险规则和订单记录到内存缓存"""
@@ -184,12 +304,103 @@ class RiskManager:
                     max_loss_percent=rule_db.max_loss_percent,
                     enabled=getattr(rule_db, 'enabled', True),  # 从数据库读取enabled
                     max_time_span=getattr(rule_db, 'max_time_span', None),
-                    created_at=datetime.fromisoformat(rule_db.timestamp) if rule_db.timestamp else datetime.now()
+                    created_at=parse_local_datetime(rule_db.timestamp) if rule_db.timestamp else now_local(),
+                    auto_trailing=getattr(rule_db, 'auto_trailing', False),
+                    atr_params=getattr(rule_db, 'atr_params', {}),
+                    rule_type=getattr(
+                        rule_db,
+                        'rule_type',
+                        'trailing' if getattr(rule_db, 'auto_trailing', False) else 'fixed'
+                    ),
                 )
+                self._sync_rule_trailing_state(rule)
                 self.risk_rules[rule.symbol] = rule
-            
+
         except Exception as e:
             risk_logger.error(f"Error loading data from database: {e}")
+
+    def _create_order(
+        self,
+        *,
+        order_id: str,
+        symbol: str,
+        action: str,
+        quantity: int,
+        order_type: str,
+        price: Optional[float],
+        status: str,
+        rule_id: Optional[str],
+        order_source: str,
+        created_at: Optional[datetime] = None,
+        executed_at: Optional[datetime] = None,
+        exchange: Optional[str] = None,
+        sec_type: Optional[str] = None,
+    ) -> Order:
+        """构造统一的订单对象并补齐必需字段"""
+
+        created_dt = ensure_local_timezone(created_at) if created_at else None
+        if created_dt is None:
+            created_dt = now_local()
+
+        executed_dt: Optional[datetime]
+        if isinstance(executed_at, datetime):
+            executed_dt = ensure_local_timezone(executed_at)
+        else:
+            executed_dt = None
+
+        order = Order(
+            order_id=order_id,
+            symbol=symbol,
+            quantity=quantity,
+            action=action,
+            order_type=order_type,
+            price=price,
+            timestamp=to_local_iso(created_dt) or now_local().isoformat(),
+            exchange=exchange or "SMART",
+            sec_type=sec_type or "STK",
+            status=status,
+            executed_at=executed_dt,
+            rule_id=rule_id,
+            order_source=order_source,
+        )
+
+        order.created_at = created_dt
+        order.executed_at = executed_dt
+        return order
+
+    def _normalise_order(self, order: Order) -> Order:
+        """确保订单对象具备本地与数据库所需的字段格式"""
+
+        created_attr = getattr(order, "created_at", None)
+        if isinstance(created_attr, datetime):
+            created_dt = ensure_local_timezone(created_attr)
+        elif isinstance(created_attr, str):
+            created_dt = parse_local_datetime(created_attr)
+        else:
+            created_dt = None
+
+        if created_dt is None:
+            created_dt = parse_local_datetime(getattr(order, "timestamp", None))
+        if created_dt is None:
+            created_dt = now_local()
+
+        executed_attr = getattr(order, "executed_at", None)
+        if isinstance(executed_attr, datetime):
+            executed_dt = ensure_local_timezone(executed_attr)
+        elif isinstance(executed_attr, str):
+            executed_dt = parse_local_datetime(executed_attr)
+        else:
+            executed_dt = None
+
+        order.created_at = created_dt
+        order.executed_at = executed_dt
+        order.timestamp = getattr(order, "timestamp", None) or to_local_iso(created_dt) or now_local().isoformat()
+        order.status = getattr(order, "status", None) or "Submitted"
+        order.order_source = getattr(order, "order_source", None) or "auto"
+        order.exchange = getattr(order, "exchange", None) or "SMART"
+        order.sec_type = getattr(order, "sec_type", None) or "STK"
+
+        return order
 
     # 新增：从数据库加载风控运行时配置
     def _load_risk_config_from_db(self) -> None:
@@ -232,23 +443,85 @@ class RiskManager:
             self.cb_daily_r = float(cfg.get('cb_daily_r', self.cb_daily_r))
             self.cb_streak = int(cfg.get('cb_streak', self.cb_streak))
             self.price_threshold = float(cfg.get('price_threshold', self.price_threshold))
-            self.leverage_mnq = int(cfg.get('leverage_mnq', self.leverage_mnq))
+
+            leverage_cfg = self._normalize_upper_float_map(cfg.get('leverage_map'))
+            if leverage_cfg:
+                self.leverage_map.update(leverage_cfg)
+
+            if 'leverage_mnq' in cfg:
+                try:
+                    self.leverage_map['MNQ'] = float(cfg.get('leverage_mnq'))
+                except Exception:
+                    pass
+            self.leverage_mnq = float(self.leverage_map.get('MNQ', self.leverage_mnq))
 
             # 点值映射
-            pv_map = cfg.get('point_value_map')
-            if isinstance(pv_map, dict):
-                cleaned: Dict[str, float] = {}
-                for k, v in pv_map.items():
-                    try:
-                        cleaned[(k or '').upper()] = float(v)
-                    except Exception:
-                        continue
-                if cleaned:
-                    self.point_value_map.update(cleaned)
+            pv_map = self._normalize_upper_float_map(cfg.get('point_value_map'))
+            if pv_map:
+                self.point_value_map.update(pv_map)
 
             risk_logger.info("Loaded risk runtime config from database")
         except Exception as e:
             risk_logger.warning(f"Failed to load risk_config: {e}")
+
+    def _load_position_limits_from_db(self) -> None:
+        """Load position limits (S rules) from configuration storage."""
+
+        default_limit: Optional[float] = None
+        per_symbol: Dict[str, float] = {}
+        try:
+            config = self.db_manager.get_config("s_rules", {}) or {}
+        except Exception as exc:  # pragma: no cover - defensive guard
+            risk_logger.warning(f"Failed to load s_rules config: {exc}")
+            config = {}
+
+        raw_limits = config.get("s2_max_positions")
+        if isinstance(raw_limits, dict):
+            for key, value in raw_limits.items():
+                try:
+                    numeric = abs(float(value))
+                except (TypeError, ValueError):
+                    continue
+                if str(key).lower() == "default":
+                    default_limit = numeric
+                else:
+                    per_symbol[str(key).upper()] = numeric
+        elif raw_limits is not None:
+            try:
+                default_limit = abs(float(raw_limits))
+            except (TypeError, ValueError):
+                default_limit = None
+
+        self.position_limit_default = default_limit
+        self.position_limit_per_symbol = per_symbol
+
+    def refresh_position_limits(self) -> None:
+        """Reload position limit configuration from persistent storage."""
+
+        self._load_position_limits_from_db()
+
+    def _normalize_upper_float_map(self, data: Optional[Dict[str, Any]]) -> Dict[str, float]:
+        """Convert a mapping to uppercase string keys with float values."""
+
+        if not data:
+            return {}
+        normalized: Dict[str, float] = {}
+        for key, value in data.items():
+            try:
+                normalized[str(key).upper()] = float(value)
+            except Exception:
+                continue
+        return normalized
+
+    def get_position_limit(self, symbol: str) -> Optional[float]:
+        """Return the maximum absolute position allowed for the symbol."""
+
+        if not symbol:
+            return self.position_limit_default
+        limit = self.position_limit_per_symbol.get(symbol.upper())
+        if limit is not None:
+            return limit
+        return self.position_limit_default
 
     # 新增：对外获取风控配置
     def get_config(self) -> Dict[str, Any]:
@@ -268,9 +541,10 @@ class RiskManager:
                 'contract_rounding': self.contract_rounding,
                 'price_threshold': self.price_threshold,
                 'leverage_mnq': self.leverage_mnq,
+                'leverage_map': self._normalize_upper_float_map(self.leverage_map),
                 'cb_daily_r': self.cb_daily_r,
                 'cb_streak': self.cb_streak,
-                'point_value_map': self.point_value_map,
+                'point_value_map': self._normalize_upper_float_map(self.point_value_map),
             }
         except Exception as e:
             risk_logger.error(f"get_config error: {e}")
@@ -324,25 +598,30 @@ class RiskManager:
             self.cb_daily_r = as_float('cb_daily_r', self.cb_daily_r)
             self.cb_streak = as_int('cb_streak', self.cb_streak)
             self.price_threshold = as_float('price_threshold', self.price_threshold)
-            self.leverage_mnq = as_int('leverage_mnq', self.leverage_mnq)
+
+            if 'leverage_mnq' in updates:
+                self.leverage_map['MNQ'] = as_float('leverage_mnq', self.leverage_map.get('MNQ'))
+
+            lev_updates = self._normalize_upper_float_map(updates.get('leverage_map'))
+            if lev_updates:
+                self.leverage_map.update(lev_updates)
+
+            self.leverage_mnq = float(self.leverage_map.get('MNQ', self.leverage_mnq))
 
             # 点值映射合并
-            if isinstance(updates.get('point_value_map'), dict):
-                pv_new: Dict[str, float] = {}
-                for k, v in updates['point_value_map'].items():
-                    try:
-                        pv_new[(k or '').upper()] = float(v)
-                    except Exception:
-                        continue
-                if pv_new:
-                    self.point_value_map.update(pv_new)
+            pv_new = self._normalize_upper_float_map(updates.get('point_value_map'))
+            if pv_new:
+                self.point_value_map.update(pv_new)
 
             # 持久化到数据库（使用 config 表，strategy_settings 键下的 risk_config 命名空间）
             settings = self.db_manager.load_strategy_config() or {}
             settings['risk_config'] = self.get_config()
             self.db_manager.save_strategy_config(settings)
 
-            return self.get_config()
+            config = self.get_config()
+            if 'leverage_map' not in config:
+                config['leverage_map'] = self._normalize_upper_float_map(self.leverage_map)
+            return config
         except Exception as e:
             risk_logger.error(f"update_config error: {e}")
             return self.get_config()
@@ -350,31 +629,33 @@ class RiskManager:
     def start(self):
         """启动风险管理器"""
         try:
-            # 检查是否有运行的事件循环
+            # 必须在已有运行事件循环中启动
             try:
                 loop = asyncio.get_running_loop()
-                # 如果有运行的事件循环，直接启动调度器
-                self._start_scheduler()
             except RuntimeError:
-                # 没有运行的事件循环，创建一个新的事件循环来启动调度器
-                try:
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    self._start_scheduler()
-                except Exception as e:
-                    risk_logger.warning(f"无法启动异步调度器: {e}，将使用简化模式")
-                    self.monitoring_active = True
-                    risk_logger.info("Risk manager started in simplified mode")
-                    return
-            
+                risk_logger.error("RiskManager.start() 需要在正在运行的事件循环中调用，未启动调度器")
+                return
+
+            # 确保调度器与当前事件循环绑定
+            if self.scheduler is None or not getattr(self.scheduler, 'running', False):
+                self.scheduler = AsyncIOScheduler(event_loop=loop)
+                risk_logger.debug(f"AsyncIOScheduler 绑定事件循环: {loop}")
+                self._start_scheduler()
+            else:
+                risk_logger.info("Risk manager scheduler 已经在运行")
+
             self.monitoring_active = True
             risk_logger.info("Risk monitoring started successfully")
-            
         except Exception as e:
             risk_logger.error(f"Error starting risk manager: {e}")
     
     def _start_scheduler(self):
         """启动调度器和添加任务"""
+        # 若尚未创建，则绑定到当前事件循环
+        if self.scheduler is None:
+            loop = asyncio.get_running_loop()
+            self.scheduler = AsyncIOScheduler(event_loop=loop)
+            risk_logger.debug(f"为_start_scheduler创建AsyncIOScheduler并绑定事件循环: {loop}")
         # 启动调度器
         if not self.scheduler.running:
             self.scheduler.start()
@@ -382,7 +663,7 @@ class RiskManager:
         
         # 添加监控任务
         self.scheduler.add_job(
-            self._monitor_positions,
+            self._monitor_positions_tick,
             'interval',
             seconds=5,  # 从15秒改为5秒，大幅提高检查频率
             id='position_monitor',
@@ -433,18 +714,29 @@ class RiskManager:
         """停止风险管理器"""
         try:
             self.monitoring_active = False
-            if self.scheduler.running:
-                self.scheduler.shutdown()
+            if self.scheduler:
+                try:
+                    if self.scheduler.running:
+                        self.scheduler.remove_all_jobs()
+                        self.scheduler.shutdown(wait=False)
+                finally:
+                    self.scheduler = None
             risk_logger.info("Risk manager stopped")
         except Exception as e:
             risk_logger.error(f"Error stopping risk manager: {e}")
 
     def add_risk_rule(self, symbol: str, stop_loss_price: Optional[float] = None,
                       take_profit_price: Optional[float] = None, max_loss_percent: Optional[float] = None,
-                      max_time_span: Optional[int] = None):
+                      max_time_span: Optional[int] = None, auto_trailing: bool = False,
+                      atr_params: Optional[Dict[str, Any]] = None, rule_type: str = "fixed"):
         """添加风险规则"""
         try:
-            risk_logger.info(f"add_risk_rule called: symbol={symbol}, SL={stop_loss_price}, TP={take_profit_price}, max_loss%={max_loss_percent}, max_time_span={max_time_span}")
+            risk_logger.info(
+                f"add_risk_rule called: symbol={symbol}, SL={stop_loss_price}, TP={take_profit_price}, max_loss%={max_loss_percent}, max_time_span={max_time_span}, auto_trailing={auto_trailing}, rule_type={rule_type}"
+            )
+            normalised_rule_type, auto_trailing_flag = self._resolve_rule_type(
+                rule_type, auto_trailing
+            )
             rule = RiskRule(
                 symbol=symbol,
                 stop_loss_price=stop_loss_price,
@@ -452,9 +744,12 @@ class RiskManager:
                 max_loss_percent=max_loss_percent,
                 enabled=True,
                 max_time_span=max_time_span,
-                created_at=datetime.now()
+                created_at=now_local(),
+                auto_trailing=auto_trailing_flag,
+                atr_params=atr_params or {},
+                rule_type=normalised_rule_type,
             )
-            
+
             # 转换为数据库层的 RiskRule 并保存到数据库
             db_rule = DatabaseRiskRule(
                 symbol=rule.symbol,
@@ -463,14 +758,18 @@ class RiskManager:
                 max_loss_percent=rule.max_loss_percent,
                 enabled=rule.enabled,
                 max_time_span=rule.max_time_span,
-                timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
+                timestamp=to_local_iso(rule.created_at) or now_local().isoformat(),
+                auto_trailing=rule.auto_trailing,
+                atr_params=rule.atr_params,
+                rule_type=rule.rule_type,
             )
             self.db_manager.save_risk_rule(db_rule)
             risk_logger.debug(f"Risk rule persisted: {db_rule}")
-            
+
             # 更新内存缓存
             self.risk_rules[symbol] = rule
-            
+            self._sync_rule_trailing_state(rule)
+
             risk_logger.info(f"Risk rule added for {symbol}")
             return True
         except Exception as e:
@@ -483,9 +782,21 @@ class RiskManager:
             risk_logger.info(f"remove_risk_rule called: symbol={symbol}")
             # 从数据库删除
             self.db_manager.delete_risk_rule(symbol)
-            
+
             # 从内存删除
             if symbol in self.risk_rules:
+                rule = self.risk_rules[symbol]
+                resolved_type, _ = self._resolve_rule_type(rule.rule_type, rule.auto_trailing)
+                if (
+                    resolved_type == "trailing"
+                    and getattr(self, 'atr_service', None)
+                ):
+                    try:
+                        self.atr_service.disable_symbol(symbol)
+                    except Exception as atr_err:
+                        risk_logger.warning(
+                            f"Failed to disable ATR subscription for {symbol}: {atr_err}"
+                        )
                 del self.risk_rules[symbol]
                 risk_logger.info(f"Risk rule removed for {symbol}")
                 return True
@@ -497,11 +808,16 @@ class RiskManager:
             return False
 
     def update_risk_rule(self, symbol: str, stop_loss_price: float = None,
-                         take_profit_price: float = None, enabled: bool = True,
-                         max_time_span: Optional[int] = None) -> bool:
+                         take_profit_price: float = None, enabled: Optional[bool] = None,
+                         max_time_span: Optional[int] = None,
+                         auto_trailing: Optional[bool] = None,
+                         atr_params: Optional[Dict[str, Any]] = None,
+                         rule_type: Optional[str] = None) -> bool:
         """更新风险规则"""
         try:
-            risk_logger.info(f"update_risk_rule called: symbol={symbol}, SL={stop_loss_price}, TP={take_profit_price}, enabled={enabled}, max_time_span={max_time_span}")
+            risk_logger.info(
+                f"update_risk_rule called: symbol={symbol}, SL={stop_loss_price}, TP={take_profit_price}, enabled={enabled}, max_time_span={max_time_span}, auto_trailing={auto_trailing}, rule_type={rule_type}"
+            )
             if symbol in self.risk_rules:
                 rule = self.risk_rules[symbol]
                 if stop_loss_price is not None:
@@ -510,12 +826,32 @@ class RiskManager:
                 if take_profit_price is not None:
                     risk_logger.debug(f"Updating TP for {symbol}: {rule.take_profit_price} -> {take_profit_price}")
                     rule.take_profit_price = take_profit_price
-                if rule.enabled != enabled:
+                if enabled is not None and rule.enabled != enabled:
                     risk_logger.debug(f"Updating enabled for {symbol}: {rule.enabled} -> {enabled}")
-                rule.enabled = enabled
+                    rule.enabled = enabled
                 if max_time_span is not None:
                     rule.max_time_span = max_time_span
-                
+                if rule_type is not None:
+                    resolved_type, resolved_auto = self._resolve_rule_type(
+                        rule_type, auto_trailing
+                    )
+                    rule.rule_type = resolved_type
+                    rule.auto_trailing = resolved_auto
+                elif auto_trailing is not None:
+                    resolved_type, resolved_auto = self._resolve_rule_type(
+                        "trailing" if auto_trailing else "fixed", auto_trailing
+                    )
+                    rule.rule_type = resolved_type
+                    rule.auto_trailing = resolved_auto
+                else:
+                    resolved_type, resolved_auto = self._resolve_rule_type(
+                        rule.rule_type, rule.auto_trailing
+                    )
+                    rule.rule_type = resolved_type
+                    rule.auto_trailing = resolved_auto
+                if atr_params is not None:
+                    rule.atr_params = dict(atr_params)
+
                 # 转换为数据库层的 RiskRule 并保存到数据库
                 db_rule = DatabaseRiskRule(
                     symbol=rule.symbol,
@@ -524,11 +860,16 @@ class RiskManager:
                     max_loss_percent=rule.max_loss_percent,
                     enabled=rule.enabled,
                     max_time_span=rule.max_time_span,
-                    timestamp=rule.created_at.isoformat()
+                    timestamp=to_local_iso(rule.created_at),
+                    auto_trailing=rule.auto_trailing,
+                    atr_params=rule.atr_params,
+                    rule_type=rule.rule_type,
                 )
                 self.db_manager.save_risk_rule(db_rule)
                 risk_logger.debug(f"Risk rule persisted after update: {db_rule}")
-                
+
+                self._sync_rule_trailing_state(rule)
+
                 risk_logger.info(f"Risk rule updated for {symbol}")
                 return True
             else:
@@ -542,24 +883,30 @@ class RiskManager:
         """获取所有风险规则"""
         return self.risk_rules.copy()
 
+    async def _monitor_positions_tick(self):
+        """调度器入口，确保持仓监控任务串行执行"""
+        if self._monitor_lock.locked():
+            risk_logger.debug("Previous position monitoring cycle still running, skipping this tick")
+            return
+
+        async with self._monitor_lock:
+            await self._monitor_positions()
+
     async def _monitor_positions(self):
         """监控持仓风险"""
         try:
-            if not self.ibkr_client or not getattr(self.ibkr_client, 'connected', False):
-                risk_logger.warning("IBKR client not ready, skipping position monitoring")
-                return
-            
             risk_logger.info("=== Starting position monitoring cycle ===")
-            
+
+            client = self._get_ibkr_client()
+            if client is None:
+                if not self._ibkr_client_warning_logged:
+                    risk_logger.warning("IBKR client not ready, skipping position monitoring cycle")
+                    self._ibkr_client_warning_logged = True
+                return
+
             # 设置fast=False确保获取最新实时价格，而不是使用缓存
-            # get_positions 是异步方法，直接await调用
-            # get_account_info 是同步阻塞方法，使用 asyncio.to_thread 在后台线程执行
-            positions = await self.ibkr_client.get_positions(fast=False)
-            try:
-                account_info = await asyncio.to_thread(self.ibkr_client.get_account_info)
-            except Exception as e:
-                risk_logger.warning(f"Failed to get account info: {e}")
-                account_info = {}
+            positions = await client.get_positions(fast=False)
+            account_info = await client.get_account_info()
             
             risk_logger.info(f"Found {len(positions)} positions to monitor")
             risk_logger.info(f"Active risk rules: {len([r for r in self.risk_rules.values() if r.enabled])}")
@@ -570,7 +917,19 @@ class RiskManager:
                 risk_logger.info(f"Checking position: {symbol} @ ${current_price:.2f}, qty: {position['position']}")
                 
                 await self._check_position_risk(position, account_info)
-                await self._check_stop_loss_take_profit(position)
+                await self._check_stop_loss_take_profit(position, client)
+
+                rule = self.risk_rules.get(symbol)
+                if (
+                    rule
+                    and rule.enabled
+                    and rule.rule_type == "trailing"
+                    and getattr(self, 'atr_service', None)
+                ):
+                    try:
+                        await self.atr_service.refresh_for_symbol(symbol, position, rule)
+                    except Exception as atr_err:
+                        risk_logger.warning(f"ATR trailing update failed for {symbol}: {atr_err}")
             
             # 检查是否有持仓为0但风险规则仍激活的资产，如果有则反激活风险规则
             position_symbols = {pos['symbol'] for pos in positions if pos['position'] != 0}
@@ -586,9 +945,13 @@ class RiskManager:
                         max_loss_percent=rule.max_loss_percent,
                         enabled=rule.enabled,
                         max_time_span=rule.max_time_span,
-                        timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
+                        timestamp=to_local_iso(rule.created_at) or now_local().isoformat(),
+                        auto_trailing=rule.auto_trailing,
+                        atr_params=rule.atr_params,
+                        rule_type=rule.rule_type,
                     )
                     self.db_manager.save_risk_rule(db_rule)
+                    self._sync_rule_trailing_state(rule)
                     risk_logger.info(f"Risk rule for {symbol} has been deactivated due to zero position")
             
             risk_logger.info("=== Position monitoring cycle completed ===")
@@ -605,7 +968,7 @@ class RiskManager:
         if position['unrealized_pnl'] >= 0:
             return
         
-        current_time = datetime.now()
+        current_time = now_local()
         
         # Check first threshold (notification)
         if loss_percent >= self.loss_threshold_1:
@@ -654,14 +1017,19 @@ class RiskManager:
                     
                     risk_logger.warning(f"Auto close triggered for {symbol} due to {loss_percent*100:.2f}% loss")
     
-    async def _check_stop_loss_take_profit(self, position: Dict):
+    async def _check_stop_loss_take_profit(self, position: Dict, ibkr_client=None):
         """检查止损止盈"""
         symbol = position['symbol']
+
+        client = ibkr_client or self._get_ibkr_client()
+        if client is None:
+            risk_logger.debug(f"IBKR client unavailable, skipping stop loss/take profit check for {symbol}")
+            return
         
         # 获取最新实时价格，而不是使用position中的价格
         try:
             # 尝试在后台线程获取最新实时价格，避免阻塞事件循环
-            real_time_data = await asyncio.to_thread(self.ibkr_client.get_real_time_data, symbol)
+            real_time_data = await client.get_real_time_data(symbol)
             price = None
             if real_time_data:
                 # get_real_time_data 返回的键为 'last'
@@ -698,9 +1066,13 @@ class RiskManager:
                 max_loss_percent=rule.max_loss_percent,
                 enabled=rule.enabled,
                 max_time_span=rule.max_time_span,
-                timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
+                timestamp=to_local_iso(rule.created_at) or now_local().isoformat(),
+                auto_trailing=rule.auto_trailing,
+                atr_params=rule.atr_params,
+                rule_type=rule.rule_type,
             )
             self.db_manager.save_risk_rule(db_rule)
+            self._sync_rule_trailing_state(rule)
             return
         
         risk_logger.info(f"Checking risk rule for {symbol}: SL=${rule.stop_loss_price}, TP=${rule.take_profit_price}")
@@ -711,7 +1083,10 @@ class RiskManager:
         
         # 以金额阈值为基础，按杠杆换算成价格差阈值
         amount_threshold = self.price_threshold
-        threshold_price = amount_threshold * self.leverage_mnq if symbol == 'MNQ' else amount_threshold
+        leverage = self.get_leverage(symbol)
+        if leverage <= 0:
+            leverage = 1.0
+        threshold_price = amount_threshold * leverage
         
         # 检查是否已有任何limit order pending，如果有则跳过
         if self.pending_orders[symbol]["stop_loss"] or self.pending_orders[symbol]["take_profit"]:
@@ -742,7 +1117,7 @@ class RiskManager:
                 try:
                     action = 'SELL' if position_qty > 0 else 'BUY'
                     # 直接调用下单方法，避免嵌套的事件循环调用
-                    trade = self.ibkr_client.place_market_order(
+                    trade = await client.place_market_order(
                         symbol=symbol,
                         quantity=abs(position_qty),
                         action=action
@@ -753,7 +1128,7 @@ class RiskManager:
                         order_placed = True
                         
                         # 保存订单记录到auto_orders内存和数据库
-                        auto_order = AutoOrder(
+                        auto_order = self._create_order(
                             order_id=str(trade.order.orderId),
                             symbol=symbol,
                             action=action,
@@ -761,10 +1136,8 @@ class RiskManager:
                             order_type="MKT",
                             price=current_price,  # 使用当前市价
                             status="Submitted",
-                            created_at=datetime.now(),
-                            executed_at=None,
                             rule_id=symbol,
-                            order_source="tp"
+                            order_source="tp",
                         )
                         self.auto_orders[str(trade.order.orderId)] = auto_order
                         # 保存到数据库，保证持久化
@@ -791,9 +1164,13 @@ class RiskManager:
                             max_loss_percent=rule.max_loss_percent,
                             enabled=rule.enabled,
                             max_time_span=rule.max_time_span,
-                            timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
+                            timestamp=to_local_iso(rule.created_at) or now_local().isoformat(),
+                            auto_trailing=rule.auto_trailing,
+                            atr_params=rule.atr_params,
+                            rule_type=rule.rule_type,
                         )
                         self.db_manager.save_risk_rule(db_rule)
+                        self._sync_rule_trailing_state(rule)
                         risk_logger.info(f"Take profit rule disabled after market order for {symbol}")
                         return
                     else:
@@ -807,9 +1184,13 @@ class RiskManager:
                             max_loss_percent=rule.max_loss_percent,
                             enabled=rule.enabled,
                             max_time_span=rule.max_time_span,
-                            timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
+                            timestamp=to_local_iso(rule.created_at) or now_local().isoformat(),
+                            auto_trailing=rule.auto_trailing,
+                            atr_params=rule.atr_params,
+                            rule_type=rule.rule_type,
                         )
                         self.db_manager.save_risk_rule(db_rule)
+                        self._sync_rule_trailing_state(rule)
                         risk_logger.info(f"Take profit rule disabled due to order failure for {symbol}")
                 except Exception as e:
                     risk_logger.error(f"Failed to place take profit market order for {symbol}: {e}")
@@ -822,9 +1203,13 @@ class RiskManager:
                         max_loss_percent=rule.max_loss_percent,
                         enabled=rule.enabled,
                         max_time_span=rule.max_time_span,
-                        timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
+                        timestamp=to_local_iso(rule.created_at) or now_local().isoformat(),
+                        auto_trailing=rule.auto_trailing,
+                        atr_params=rule.atr_params,
+                        rule_type=rule.rule_type,
                     )
                     self.db_manager.save_risk_rule(db_rule)
+                    self._sync_rule_trailing_state(rule)
                     risk_logger.info(f"Take profit rule disabled due to exception for {symbol}")
             
             # If price has reached take profit, execute market order
@@ -860,9 +1245,13 @@ class RiskManager:
                     max_loss_percent=rule.max_loss_percent,
                     enabled=rule.enabled,
                     max_time_span=rule.max_time_span,
-                    timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
+                    timestamp=to_local_iso(rule.created_at) or now_local().isoformat(),
+                    auto_trailing=rule.auto_trailing,
+                    atr_params=rule.atr_params,
+                    rule_type=rule.rule_type,
                 )
                 self.db_manager.save_risk_rule(db_rule)
+                self._sync_rule_trailing_state(rule)
                 risk_logger.info(f"Take profit order queued for {symbol} at ${current_price:.2f}, rule disabled")
                 return  # 当触发止盈市价单时立即返回，不再检查止损
 
@@ -886,7 +1275,7 @@ class RiskManager:
                 try:
                     action = 'SELL' if position_qty > 0 else 'BUY'
                     # 直接调用下单方法，避免嵌套的事件循环调用
-                    trade = self.ibkr_client.place_market_order(
+                    trade = await client.place_market_order(
                         symbol=symbol,
                         quantity=abs(position_qty),
                         action=action
@@ -909,7 +1298,7 @@ class RiskManager:
                         order_placed = True
                         
                         # 保存订单记录到auto_orders内存和数据库
-                        auto_order = AutoOrder(
+                        auto_order = self._create_order(
                             order_id=str(trade.order.orderId),
                             symbol=symbol,
                             action=action,
@@ -917,16 +1306,51 @@ class RiskManager:
                             order_type="MKT",
                             price=current_price,  # 使用当前市价
                             status="Submitted",
-                            created_at=datetime.now(),
-                            executed_at=None,
                             rule_id=symbol,
-                            order_source="sl"
+                            order_source="sl",
                         )
                         self.auto_orders[str(trade.order.orderId)] = auto_order
                         self.save_auto_order_to_db(auto_order)
-                        
+
+                        # 同步到订单管理器，保持前端订单列表与数据库一致
+                        if self.order_manager:
+                            try:
+                                from .order_manager import Order, OrderStatus
+
+                                order_obj = Order(
+                                    order_id=str(trade.order.orderId),
+                                    symbol=symbol,
+                                    action=action,
+                                    quantity=abs(position_qty),
+                                    order_type="MARKET",
+                                    price=current_price,
+                                    status=OrderStatus.SUBMITTED.value,
+                                    order_source="sl",
+                                    notes=f"Stop loss triggered at ${current_price:.2f}"
+                                )
+
+                                synced_order = self.order_manager.add_order(order_obj)
+                                executed_at = now_local()
+                                self.order_manager.update_order_status(
+                                    order_id=str(trade.order.orderId),
+                                    status=OrderStatus.FILLED.value,
+                                    fill_price=current_price,
+                                    executed_at=executed_at
+                                )
+
+                                auto_order.status = "Filled"
+                                auto_order.executed_at = executed_at
+                                self.update_order_status(str(trade.order.orderId), "Filled")
+                                risk_logger.info(f"Stop loss order synced to OrderManager: {synced_order.order_id}")
+                            except Exception as om_err:
+                                risk_logger.warning(
+                                    f"Failed to sync stop-loss order {trade.order.orderId} to OrderManager: {om_err}"
+                                )
+                        else:
+                            risk_logger.warning("OrderManager not available, skip syncing stop-loss order")
+
                         risk_logger.info(f"✅ Market order placed for stop loss: {symbol} at market price ${current_price:.2f}")
-                        
+
                         # 禁用规则并更新数据库
                         rule.enabled = False
                         db_rule = DatabaseRiskRule(
@@ -936,22 +1360,15 @@ class RiskManager:
                             max_loss_percent=rule.max_loss_percent,
                             enabled=rule.enabled,
                             max_time_span=rule.max_time_span,
-                            timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
+                            timestamp=to_local_iso(rule.created_at) or now_local().isoformat(),
+                            auto_trailing=rule.auto_trailing,
+                            atr_params=rule.atr_params,
+                            rule_type=rule.rule_type,
                         )
                         self.db_manager.save_risk_rule(db_rule)
+                        self._sync_rule_trailing_state(rule)
                         risk_logger.warning(f"🔒 Stop loss rule disabled for {symbol} after triggering at ${current_price:.2f}")
-                        
-                        # Send unified notification and return to avoid duplicate processing
-                        try:
-                            await self.notification_manager.send_stop_loss_notification(
-                                symbol=symbol,
-                                position=position_qty,
-                                trigger_price=current_price,
-                                order_type="loss",
-                                order_id=trade.order.orderId
-                            )
-                        except Exception as e:
-                            risk_logger.error(f"Failed to send stop-loss notification: {e}")
+
                         return
                     else:
                         risk_logger.warning(f"Failed to place stop loss market order for {symbol}")
@@ -964,9 +1381,13 @@ class RiskManager:
                             max_loss_percent=rule.max_loss_percent,
                             enabled=rule.enabled,
                             max_time_span=rule.max_time_span,
-                            timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
+                            timestamp=to_local_iso(rule.created_at) or now_local().isoformat(),
+                            auto_trailing=rule.auto_trailing,
+                            atr_params=rule.atr_params,
+                            rule_type=rule.rule_type,
                         )
                         self.db_manager.save_risk_rule(db_rule)
+                        self._sync_rule_trailing_state(rule)
                         risk_logger.info(f"Stop loss rule disabled due to order failure for {symbol}")
                 except Exception as e:
                     risk_logger.error(f"Failed to place stop loss market order for {symbol}: {e}")
@@ -979,9 +1400,13 @@ class RiskManager:
                         max_loss_percent=rule.max_loss_percent,
                         enabled=rule.enabled,
                         max_time_span=rule.max_time_span,
-                        timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
+                        timestamp=to_local_iso(rule.created_at) or now_local().isoformat(),
+                        auto_trailing=rule.auto_trailing,
+                        atr_params=rule.atr_params,
+                        rule_type=rule.rule_type,
                     )
                     self.db_manager.save_risk_rule(db_rule)
+                    self._sync_rule_trailing_state(rule)
                     risk_logger.info(f"Stop loss rule disabled due to exception for {symbol}")
             
             # If price has reached stop loss, execute market order
@@ -1017,17 +1442,35 @@ class RiskManager:
                     max_loss_percent=rule.max_loss_percent,
                     enabled=rule.enabled,
                     max_time_span=rule.max_time_span,
-                    timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
+                    timestamp=to_local_iso(rule.created_at) or now_local().isoformat(),
+                    auto_trailing=rule.auto_trailing,
+                    atr_params=rule.atr_params,
+                    rule_type=rule.rule_type,
                 )
                 self.db_manager.save_risk_rule(db_rule)
+                self._sync_rule_trailing_state(rule)
                 risk_logger.info(f"Stop loss order queued for {symbol} at ${current_price:.2f}, rule disabled")
                 return  # 触发市价单后立即返回，不再检查止盈
     
     def _auto_sync_market_orders(self):
         """自动同步所有活跃订单状态和成交价格（包括市价单和限价单）"""
         try:
-            if not self.ibkr_client or not self.ibkr_client.is_connected():
+            client = self._get_ibkr_client()
+            if client is None:
                 return
+
+            # If the underlying IBKR connection is unavailable, skip syncs to
+            # avoid spamming errors while the auto-reconnect logic does its job.
+            if not getattr(client, "is_connected", lambda: False)():
+                return
+
+            ib_instance = getattr(client, "ib", None)
+            if ib_instance is None or not getattr(ib_instance, "isConnected", lambda: False)():
+                return
+            # 定期清理警告记录，避免内存泄漏（每100次调用清理一次）
+            if len(self.warned_order_downgrades) > 100:
+                self.warned_order_downgrades.clear()
+                risk_logger.debug("已清理订单状态倒退警告记录")
             
             # 获取订单管理器
             order_manager = getattr(self, 'order_manager', None)
@@ -1053,7 +1496,7 @@ class RiskManager:
                     trade = None
                     
                     # 查找对应的trade
-                    for t in self.ibkr_client.ib.trades():
+                    for t in ib_instance.trades():
                         if t.order.orderId == order_id_int:
                             trade = t
                             break
@@ -1064,20 +1507,46 @@ class RiskManager:
                         if current_status == "Inactive":
                             current_status = "Rejected"
                         
+                        # 检查状态是否需要更新，避免重复更新和状态倒退
                         if current_status != order.status:
-                            # 更新订单状态
-                            fill_price = None
-                            if current_status == "Filled" and trade.orderStatus.avgFillPrice:
-                                fill_price = float(trade.orderStatus.avgFillPrice)
+                            # 定义状态转换的优先级（数字越大优先级越高）
+                            status_priority = {
+                                "PendingSubmit": 1,
+                                "PreSubmitted": 2,
+                                "Submitted": 3,
+                                "Filled": 4,
+                                "Cancelled": 4,
+                                "Rejected": 4
+                            }
                             
-                            order_manager.update_order_status(
-                                order.order_id,
-                                current_status,
-                                fill_price=fill_price,
-                                executed_at=datetime.now() if current_status == "Filled" else None
-                            )
-                            synced_count += 1
-                            risk_logger.debug(f"Order {order.order_id} status updated: {order.status} -> {current_status}")
+                            current_priority = status_priority.get(current_status, 0)
+                            order_priority = status_priority.get(order.status, 0)
+                            
+                            # 只允许状态向前推进，不允许倒退
+                            if current_priority >= order_priority:
+                                # 更新订单状态
+                                fill_price = None
+                                if current_status == "Filled" and trade.orderStatus.avgFillPrice:
+                                    fill_price = float(trade.orderStatus.avgFillPrice)
+                                
+                                order_manager.update_order_status(
+                                    order.order_id,
+                                    current_status,
+                                    fill_price=fill_price,
+                                    executed_at=now_local() if current_status == "Filled" else None
+                                )
+                                synced_count += 1
+                                risk_logger.debug(f"Order {order.order_id} status updated: {order.status} -> {current_status}")
+                            else:
+                                # 避免重复警告同一个订单的状态倒退
+                                warning_key = f"{order.order_id}_{order.status}_{current_status}"
+                                if warning_key not in self.warned_order_downgrades:
+                                    self.warned_order_downgrades.add(warning_key)
+                                    risk_logger.warning(f"拒绝订单状态倒退: Order {order.order_id} 当前状态={order.status} (优先级{order_priority}), IBKR状态={current_status} (优先级{current_priority})")
+                                    
+                                    # 可选：直接从订单管理器中删除这个有问题的订单
+                                    # order_manager.remove_order(order.order_id)
+                                    # risk_logger.info(f"已删除状态异常的订单: {order.order_id}")
                 
                 if synced_count > 0:
                     risk_logger.debug(f"Auto-synced {synced_count} active orders")
@@ -1114,16 +1583,12 @@ class RiskManager:
         risk_logger.info(f"开始执行订单: {order_request.order_type.value} for {order_request.symbol}, quantity: {order_request.quantity}")
         
         try:
-            # 检查连接状态
-            if not self.ibkr_client or not getattr(self.ibkr_client, 'connected', False):
-                risk_logger.error(f"Cannot execute order for {order_request.symbol}: IBKR client not ready")
-                return
-            
-            risk_logger.debug(f"IBKR连接状态正常，开始获取持仓信息 for {order_request.symbol}")
-            
             # Determine order action
-            # get_positions 为同步阻塞方法，放到后台线程执行
-            positions = await asyncio.to_thread(self.ibkr_client.get_positions)
+            client = self._get_ibkr_client()
+            if client is None:
+                risk_logger.warning(f"IBKR client not ready, skipping order execution for {order_request.symbol}")
+                return
+            positions = await client.get_positions(fast=False)
             risk_logger.debug(f"获取到 {len(positions)} 个持仓")
             
             position = next((p for p in positions if p['symbol'] == order_request.symbol), None)
@@ -1154,13 +1619,10 @@ class RiskManager:
                 asyncio.set_event_loop(loop)
             
             try:
-                trade = await loop.run_in_executor(
-                    None,
-                    lambda: self.ibkr_client.place_market_order(
-                        symbol=order_request.symbol,
-                        quantity=order_request.quantity,
-                        action=action
-                    )
+                trade = await client.place_market_order(
+                    symbol=order_request.symbol,
+                    quantity=order_request.quantity,
+                    action=action
                 )
                 risk_logger.info(f"下单操作完成，trade结果: {trade is not None}")
             except Exception as executor_error:
@@ -1182,7 +1644,7 @@ class RiskManager:
                 else:
                     order_source = "strategy"
                 
-                auto_order = AutoOrder(
+                auto_order = self._create_order(
                     order_id=str(order_id),
                     symbol=order_request.symbol,
                     action=action,
@@ -1190,10 +1652,8 @@ class RiskManager:
                     order_type="MKT",
                     price=position['current_price'],
                     status="Submitted",
-                    created_at=datetime.now(),
-                    executed_at=None,
                     rule_id=order_request.symbol,  # Use symbol as rule identifier
-                    order_source=order_source
+                    order_source=order_source,
                 )
                 
                 self.auto_orders[str(order_id)] = auto_order
@@ -1210,7 +1670,7 @@ class RiskManager:
                         order_type="MARKET",
                         price=position['current_price'],
                         status=OrderStatus.SUBMITTED.value,
-                        created_at=datetime.now(),
+                        created_at=now_local(),
                         order_source=order_source,
                         notes=order_request.reason
                     )
@@ -1221,7 +1681,7 @@ class RiskManager:
                     # 市价单通常会立即成交，所以我们可以直接更新状态
                     if order.order_type == "MARKET":
                         from datetime import datetime
-                        executed_at = datetime.now()
+                        executed_at = now_local()
                         self.order_manager.update_order_status(
                             order_id=str(order_id),
                             status=OrderStatus.FILLED.value,
@@ -1237,16 +1697,9 @@ class RiskManager:
 
                         # 触发一次佣金/PNL回填（使用executor避免阻塞事件循环）
                         try:
-                            cm = getattr(self.ibkr_client, "connection_manager", None)
-                            if cm is not None:
-                                risk_logger.info("触发commission/PNL回填以避免市价单本地成交后缺失")
-                                updated = await loop.run_in_executor(
-                                    None,
-                                    lambda: cm.backfill_commissions()
-                                )
-                                risk_logger.info(f"commission/PNL回填完成，尝试更新次数: {updated}")
-                            else:
-                                risk_logger.warning("未找到connection_manager，跳过commission/PNL回填")
+                            risk_logger.info("触发commission/PNL回填以避免市价单本地成交后缺失")
+                            updated = await client.backfill_commissions()
+                            risk_logger.info(f"commission/PNL回填完成，尝试更新次数: {updated}")
                         except Exception as bf_err:
                             risk_logger.warning(f"commission/PNL回填失败: {bf_err}")
                 else:
@@ -1286,17 +1739,18 @@ class RiskManager:
     async def _send_daily_summary(self):
         """发送每日摘要"""
         try:
-            if not self.ibkr_client or not getattr(self.ibkr_client, 'connected', False):
+            client = self._get_ibkr_client()
+            if client is None:
+                risk_logger.debug('IBKR client not ready, skip daily summary')
                 return
-            
-            account_info = await self.ibkr_client.get_account_info()
-            positions = await self.ibkr_client.get_positions()
-            
+            account_info = await client.get_account_info()
+            positions = await client.get_positions(Fast=True)
+
             await self.notification_manager.send_daily_summary_notification(account_info, positions)
-            
+
         except Exception as e:
             risk_logger.error(f"Error sending daily summary: {e}")
-    
+
     def get_order_queue_size(self) -> int:
         """获取订单队列大小"""
         return self.order_queue.qsize()
@@ -1310,33 +1764,18 @@ class RiskManager:
                 break
         risk_logger.info("Order queue cleared")
     
-    def save_auto_order_to_db(self, order: AutoOrder):
+    def save_auto_order_to_db(self, order: Order):
         """保存单个订单到数据库并更新内存缓存"""
         try:
-            # 创建数据库的AutoOrder实例，映射字段
-            db_order = DatabaseAutoOrder(
-                order_id=order.order_id,
-                symbol=order.symbol,
-                quantity=order.quantity,
-                action=order.action,
-                order_type=order.order_type,
-                price=order.price,
-                timestamp=order.created_at.isoformat() if order.created_at else datetime.now().isoformat(),
-                exchange=getattr(order, 'exchange', 'SMART'),
-                sec_type=getattr(order, 'sec_type', 'STK'),
-                status=order.status if hasattr(order, 'status') else 'pending',
-                executed_at=order.executed_at.isoformat() if getattr(order, 'executed_at', None) else None,
-                rule_id=getattr(order, 'rule_id', None),
-                order_source=getattr(order, 'order_source', 'auto')
-            )
-            
+            normalised = self._normalise_order(order)
+
             # 保存到数据库
-            self.db_manager.save_order(db_order)
-            
+            self.db_manager.save_order(normalised)
+
             # 更新内存缓存
-            self.auto_orders[order.order_id] = order
-            
-            risk_logger.info(f"Order {order.order_id} saved to database")
+            self.auto_orders[normalised.order_id] = normalised
+
+            risk_logger.info(f"Order {normalised.order_id} saved to database")
         except Exception as e:
             risk_logger.error(f"Error saving order to database: {e}")
     
@@ -1352,16 +1791,20 @@ class RiskManager:
                 'order_type': order.order_type,
                 'price': order.price,
                 'status': order.status,
-                'created_at': order.created_at.isoformat() if order.created_at else None,
-                'executed_at': order.executed_at.isoformat() if order.executed_at else None,
+                'created_at': to_local_iso(order.created_at),
+                'executed_at': to_local_iso(order.executed_at),
                 'rule_id': order.rule_id,
                 'order_source': order.order_source
             })
         return orders
 
-    def set_dependencies(self, order_manager=None):
+    def set_dependencies(self, order_manager=None, atr_service=None):
         """注入外部依赖"""
         self.order_manager = order_manager
+        if atr_service is not None:
+            self.atr_service = atr_service
+            for rule in self.risk_rules.values():
+                self._sync_rule_trailing_state(rule)
 
     def remove_order_record(self, order_id: str):
         """从记录中删除订单"""
@@ -1397,7 +1840,7 @@ class RiskManager:
                 order = self.auto_orders[order_id]
                 order.status = new_status
                 if new_status in ['Filled', 'Cancelled']:
-                    order.executed_at = datetime.now()
+                    order.executed_at = now_local()
                 
                 # 如果订单是由风险规则自动生成且已成交，则禁用对应的风险规则并持久化
                 if new_status == 'Filled' and getattr(order, 'order_source', None) == 'auto' and getattr(order, 'rule_id', None):
@@ -1413,16 +1856,20 @@ class RiskManager:
                                 max_loss_percent=rule.max_loss_percent,
                                 enabled=rule.enabled,
                                 max_time_span=rule.max_time_span,
-                                timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
+                                timestamp=to_local_iso(rule.created_at) or now_local().isoformat(),
+                                auto_trailing=rule.auto_trailing,
+                                atr_params=rule.atr_params,
+                                rule_type=rule.rule_type,
                             )
                             self.db_manager.save_risk_rule(db_rule)
+                            self._sync_rule_trailing_state(rule)
                             risk_logger.info(f"Risk rule for {symbol} disabled due to filled order {order_id}")
                         except Exception as db_rule_err:
                             risk_logger.warning(f"Failed to persist disabled rule for {symbol}: {db_rule_err}")
                 
                 # 同步到数据库：同时持久化状态、均价（若有）、执行时间
                 try:
-                    executed_str = order.executed_at.isoformat() if order.executed_at else None
+                    executed_str = to_local_iso(order.executed_at)
                     self.db_manager.update_order(order_id, status=new_status, price=order.price, executed_at=executed_str)
                     risk_logger.info(f"Order {order_id} status persisted to DB: {new_status}, price={order.price}, executed_at={executed_str}")
                 except Exception as db_err:
@@ -1442,9 +1889,18 @@ class RiskManager:
         risk_logger.warning("save_risk_rules_to_csv is deprecated, data is now stored in database")
         try:
             with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
-                fieldnames = ['symbol', 'stop_loss_price', 'take_profit_price', 'max_loss_percent', 'enabled', 'created_at']
+                fieldnames = [
+                    'symbol',
+                    'stop_loss_price',
+                    'take_profit_price',
+                    'max_loss_percent',
+                    'enabled',
+                    'created_at',
+                    'rule_type',
+                    'auto_trailing',
+                ]
                 writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-                
+
                 writer.writeheader()
                 for symbol, rule in self.risk_rules.items():
                     writer.writerow({
@@ -1453,7 +1909,9 @@ class RiskManager:
                         'take_profit_price': rule.take_profit_price,
                         'max_loss_percent': rule.max_loss_percent,
                         'enabled': rule.enabled,
-                        'created_at': rule.created_at.isoformat() if rule.created_at else None
+                        'created_at': to_local_iso(rule.created_at),
+                        'rule_type': rule.rule_type,
+                        'auto_trailing': rule.auto_trailing,
                     })
             risk_logger.info(f"Risk rules saved to {filename}")
         except Exception as e:
@@ -1469,24 +1927,37 @@ class RiskManager:
             
             with open(filename, 'r', newline='', encoding='utf-8') as csvfile:
                 reader = csv.DictReader(csvfile)
-                
+
                 for row in reader:
                     symbol = row['symbol']
                     stop_loss_price = float(row['stop_loss_price']) if row['stop_loss_price'] else None
                     take_profit_price = float(row['take_profit_price']) if row['take_profit_price'] else None
                     max_loss_percent = float(row['max_loss_percent']) if row['max_loss_percent'] else None
                     enabled = row['enabled'].lower() == 'true' if row['enabled'] else True
-                    created_at = datetime.fromisoformat(row['created_at']) if row['created_at'] else datetime.now()
-                    
-                    self.risk_rules[symbol] = RiskRule(
+                    created_at = parse_local_datetime(row['created_at']) if row['created_at'] else now_local()
+                    csv_rule_type = row.get('rule_type') if 'rule_type' in row else None
+                    csv_auto_trailing = row.get('auto_trailing') if 'auto_trailing' in row else None
+                    auto_trailing_flag = None
+                    if csv_auto_trailing is not None:
+                        auto_trailing_flag = str(csv_auto_trailing).strip().lower() in {'true', '1', 'yes'}
+                    resolved_type, resolved_auto = self._resolve_rule_type(
+                        csv_rule_type, auto_trailing_flag
+                    )
+
+                    rule = RiskRule(
                         symbol=symbol,
                         stop_loss_price=stop_loss_price,
                         take_profit_price=take_profit_price,
                         max_loss_percent=max_loss_percent,
                         enabled=enabled,
-                        created_at=created_at
+                        created_at=created_at,
+                        auto_trailing=resolved_auto,
+                        atr_params={},
+                        rule_type=resolved_type,
                     )
-            
+                    self._sync_rule_trailing_state(rule)
+                    self.risk_rules[symbol] = rule
+
             risk_logger.info(f"Risk rules loaded from {filename}, total: {len(self.risk_rules)}")
         except Exception as e:
             risk_logger.error(f"Error loading risk rules from CSV: {e}")
@@ -1509,8 +1980,8 @@ class RiskManager:
                         'order_type': order.order_type,
                         'price': order.price,
                         'status': order.status,
-                        'created_at': order.created_at.isoformat() if order.created_at else None,
-                        'executed_at': order.executed_at.isoformat() if order.executed_at else None,
+                        'created_at': to_local_iso(order.created_at),
+                        'executed_at': to_local_iso(order.executed_at),
                         'rule_id': order.rule_id,
                         'order_source': order.order_source
                     })
@@ -1530,21 +2001,21 @@ class RiskManager:
                 reader = csv.DictReader(csvfile)
                 
                 for row in reader:
-                    created_at = datetime.fromisoformat(row['created_at']) if row['created_at'] else None
-                    executed_at = datetime.fromisoformat(row['executed_at']) if row['executed_at'] else None
+                    created_at = parse_local_datetime(row['created_at']) if row['created_at'] else None
+                    executed_at = parse_local_datetime(row['executed_at']) if row['executed_at'] else None
                     
-                    auto_order = AutoOrder(
+                    auto_order = self._create_order(
                         order_id=row['order_id'],
                         symbol=row['symbol'],
                         action=row['action'],
                         quantity=int(row['quantity']) if row['quantity'] else 0,
                         order_type=row['order_type'],
                         price=float(row['price']) if row['price'] else 0.0,
-                        status=row['status'],
+                        status=row['status'] or "Submitted",
                         created_at=created_at,
                         executed_at=executed_at,
-                        rule_id=row['rule_id'],
-                        order_source=row['order_source']
+                        rule_id=row.get('rule_id') or None,
+                        order_source=row.get('order_source') or 'auto',
                     )
                     
                     self.auto_orders[row['order_id']] = auto_order
@@ -1556,7 +2027,7 @@ class RiskManager:
     def update_equity_state(self, account_info: Dict) -> None:
         """更新权益状态"""
         try:
-            today = datetime.now().date()
+            today = now_local().date()
             net_liq = float(account_info.get('net_liquidation', 0.0) or 0.0)
             realized_pnl = float(account_info.get('realized_pnl', 0.0) or 0.0)
 
@@ -1647,6 +2118,21 @@ class RiskManager:
         except Exception:
             return 1.0
 
+    def get_leverage(self, symbol: str) -> float:
+        """Return the configured leverage multiplier for a symbol, falling back to root matches."""
+        sym = (symbol or '').upper()
+        if not sym:
+            return 1.0
+        try:
+            if sym in self.leverage_map:
+                return float(self.leverage_map[sym])
+            for key in sorted(self.leverage_map.keys(), key=len, reverse=True):
+                if sym.startswith(key):
+                    return float(self.leverage_map[key])
+        except Exception:
+            pass
+        return 1.0
+
     def _estimate_rv(self, symbol: str) -> Tuple[Optional[float], Optional[float], str]:
         """基于历史日线自动估算当前RV与参考RV。
         返回: (rv_current, rv_ref_by_method, info)
@@ -1661,12 +2147,12 @@ class RiskManager:
             raise TimeoutError("Historical data request timed out")
         
         try:
-            # 检查是否有缓存的历史数据，避免阻塞调用
-            if hasattr(self.ibkr_client, '_cached_historical_data') and symbol in self.ibkr_client._cached_historical_data:
-                df = self.ibkr_client._cached_historical_data[symbol]
+            client = self._get_ibkr_client()
+            cache = getattr(client, '_cached_historical_data', {}) if client else {}
+            if cache and symbol in cache:
+                df = cache[symbol]
                 elapsed = 0.0
             else:
-                # 如果没有缓存，跳过RV估算避免阻塞
                 risk_logger.warning(f"[RV] No cached historical data for {symbol}, skipping RV estimation")
                 return None, None, f"rv:auto=no_cache({symbol})"
             
@@ -1708,7 +2194,7 @@ class RiskManager:
             risk_logger.error(f"_estimate_rv error: {e}")
             return None, None, "rv:auto=error"
 
-    def position_sizing(self,
+    async def position_sizing(self,
                         symbol: str,
                         stop_distance: float,
                         rv_current: Optional[float] = None,
@@ -1716,17 +2202,9 @@ class RiskManager:
                         execution_metrics: Optional[Dict[str, float]] = None,
                         rv_ref: Optional[float] = None) -> PositionSizingResult:
         account_info = {}
-        try:
-            # 使用缓存的账户信息避免阻塞调用
-            if hasattr(self.ibkr_client, '_cached_account_info'):
-                account_info = self.ibkr_client._cached_account_info or {}
-            # 如果没有可用缓存，则使用默认净值
-            if not account_info or not account_info.get('net_liquidation'):
-                account_info = {'net_liquidation': 100000.0}
-                risk_logger.warning(f"[PS] No cached account info, using default net_liquidation")
-        except Exception as e:
-            risk_logger.error(f"[PS] get_account_info error: {e}")
-            account_info = {'net_liquidation': 100000.0}
+        client = self._get_ibkr_client(ensure_ready=True)
+        positions = await client.get_positions(fast=True)
+        account_info = await client.get_account_info()
         self.update_equity_state(account_info)
         risk_logger.info(f"[PS] After update_equity_state: equity_last={self.equity_last}, account_info={account_info}")
 
@@ -1791,8 +2269,9 @@ class RiskManager:
     def check_circuit_breaker_before_new_order(self) -> Tuple[bool, str]:
         try:
             info = {}
-            if hasattr(self.ibkr_client, '_cached_account_info'):
-                info = self.ibkr_client._cached_account_info or {}
+            client = self._get_ibkr_client()
+            if client and hasattr(client, '_cached_account_info'):
+                info = client._cached_account_info or {}
             self.update_equity_state(info)
         except Exception as e:
             risk_logger.error(f"[CB] get_account_info error: {e}")
@@ -1813,16 +2292,57 @@ class RiskManager:
                 self.clear_order_queue()
             except Exception:
                 pass
-            risk_logger.warning(f"[CB] Circuit breaker TRIGGERED: {self.circuit_reason}")
+            context_parts = [
+                f"触发原因: {self.circuit_reason}",
+                f"当日亏损(R): {self.daily_loss_R:.2f}",
+                f"连败次数: {self.loss_streak}",
+                f"风险队列长度: {self.order_queue.qsize()}",
+            ]
+            queue_context = None
+            strategy_context = None
+            try:
+                import core as core_module  # type: ignore
+
+                queue_mgr = getattr(core_module, "queue_manager", None)
+                if queue_mgr:
+                    status = queue_mgr.get_queue_status()
+                    queue_context = (
+                        f"策略队列 - 挂起: {status.get('pending_count', 0)}, "
+                        f"处理中: {status.get('processing_count', 0)}, 失败: {status.get('failed_count', 0)}"
+                    )
+                strategy_mgr = getattr(core_module, "strategy_manager", None)
+                if strategy_mgr:
+                    names = getattr(strategy_mgr, "get_enabled_strategy_names", lambda: [])()
+                    if names:
+                        strategy_context = f"启用策略: {len(names)} ({', '.join(names)})"
+                    else:
+                        strategy_context = "启用策略: 0"
+            except Exception as exc:  # pragma: no cover - defensive guard
+                risk_logger.debug(f"[CB] Failed to build notification context: {exc}")
+
+            if queue_context:
+                context_parts.append(queue_context)
+            if strategy_context:
+                context_parts.append(strategy_context)
+
+            formatted_context = "\n".join(context_parts)
+            risk_logger.warning(
+                "[CB] Circuit breaker TRIGGERED",
+                reason=self.circuit_reason,
+                loss_R=self.daily_loss_R,
+                loss_streak=self.loss_streak,
+            )
             try:
                 if self.notification_manager:
-                    asyncio.create_task(self.notification_manager.send_risk_notification(
-                        symbol="ALL",
-                        message=f"断路器触发: {self.circuit_reason}",
-                        risk_type="circuit_breaker"
-                    ))
-            except Exception:
-                pass
+                    asyncio.create_task(
+                        self.notification_manager.send_risk_notification(
+                            symbol="ALL",
+                            message=formatted_context,
+                            risk_type="circuit_breaker"
+                        )
+                    )
+            except Exception as exc:  # pragma: no cover - defensive guard
+                risk_logger.warning(f"[CB] Failed to send circuit breaker notification: {exc}")
             return False, self.circuit_reason
 
         return True, "ok"

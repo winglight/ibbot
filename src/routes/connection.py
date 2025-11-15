@@ -4,7 +4,15 @@ from fastapi import APIRouter, HTTPException, Depends
 from loguru import logger
 
 import core
-from core import connection_manager, risk_manager, strategy_manager, queue_manager, websocket_manager, order_manager
+from core import (
+    connection_manager,
+    risk_manager,
+    strategy_manager,
+    queue_manager,
+    websocket_manager,
+    order_manager,
+    notification_manager,
+)
 from src.connection_manager import ConnectionConfig
 from .auth import get_current_user
 
@@ -27,13 +35,20 @@ async def get_connection_config():
 @router.post("/api/connect")
 async def connect_ibkr(config: ConnectionConfig, user: Optional[str] = Depends(get_current_user)):
     try:
-        connection_manager.update_config(config)
         loop = asyncio.get_event_loop()
         try:
             await asyncio.wait_for(
                 loop.run_in_executor(None, lambda: connection_manager.disconnect()),
                 timeout=15.0,
             )
+        except asyncio.TimeoutError:
+            logger.error("Disconnection operation timed out before reconnect")
+            raise HTTPException(status_code=408, detail="Disconnect request timed out")
+
+        # 更新连接配置在断开之后，确保新参数生效
+        connection_manager.update_config(config)
+
+        try:
             success = await asyncio.wait_for(
                 loop.run_in_executor(None, lambda: connection_manager.connect()),
                 timeout=30.0,
@@ -41,6 +56,16 @@ async def connect_ibkr(config: ConnectionConfig, user: Optional[str] = Depends(g
         except asyncio.TimeoutError:
             logger.error("Connection operation timed out")
             raise HTTPException(status_code=408, detail="Connection operation timed out")
+        except Exception as exc:
+            logger.warning("Connection attempt failed", error=str(exc))
+            detail = None
+            try:
+                detail = connection_manager.get_last_connect_error()
+            except Exception:
+                detail = None
+            if not detail:
+                detail = str(exc) or "Failed to connect to IBKR"
+            raise HTTPException(status_code=400, detail=detail)
 
         if success:
             if core.ibkr_client is None:
@@ -58,12 +83,11 @@ async def connect_ibkr(config: ConnectionConfig, user: Optional[str] = Depends(g
                 logger.warning(f"RiskManager ibkr_client update warning: {re_err}")
             try:
                 queue_manager.set_dependencies(
-                    ibkr_client=ibkr_client_local,
                     risk_manager=risk_manager,
                     strategy_manager=strategy_manager,
-                    connection_manager=connection_manager,
                     websocket_manager=websocket_manager,
                     order_manager=order_manager,
+                    notification_manager=notification_manager,
                 )
             except Exception as dep_err:
                 logger.warning(f"QueueManager set_dependencies warning: {dep_err}")
@@ -82,7 +106,7 @@ async def connect_ibkr(config: ConnectionConfig, user: Optional[str] = Depends(g
 
             # 广播账户信息快照，供前端取消HTTP轮询
             try:
-                info = await asyncio.wait_for(ibkr_client_local.get_account_info(), timeout=8.0)
+                info = await ibkr_client_local.get_account_info()
                 await websocket_manager.broadcast({
                     "type": "account_update",
                     "account_info": info
@@ -140,7 +164,53 @@ async def disconnect_ibkr(user: Optional[str] = Depends(get_current_user)):
 
 @router.get("/api/connection_status")
 async def get_connection_status(user: Optional[str] = Depends(get_current_user)):
-    return {
-        "connected": connection_manager.is_connected(),
-        "account_type": "Paper" if connection_manager.config.paper_trading else "Live",
-    }
+    """Return the current IBKR connection status with a guarded timeout.
+
+    In production we have observed rare cases where the low level IB client can
+    block when checking the connection state (for example when the background
+    connection thread is stuck).  Previously this would cause the whole HTTP
+    request to hang until the frontend aborted it after several seconds,
+    resulting in a timeout error.  To keep the API responsive we perform the
+    status check in a worker thread and cap the wait time; if the check cannot
+    finish in time we fall back to the last known state instead of hanging the
+    request.
+    """
+
+    try:
+        try:
+            # Guard against rare blocking behaviour inside the IB client by
+            # executing the check in a worker thread with a small timeout.
+            is_connected = await asyncio.wait_for(
+                asyncio.to_thread(connection_manager.is_connected),
+                timeout=1.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Connection status check timed out; using cached state")
+            is_connected = getattr(connection_manager, "connected", False)
+        except Exception as exc:
+            logger.warning(f"Connection status check failed: {exc}")
+            is_connected = getattr(connection_manager, "connected", False)
+
+        account_type = "Paper"
+        try:
+            if not connection_manager.config.paper_trading:
+                account_type = "Live"
+        except Exception as exc:
+            logger.debug(f"Failed to resolve account type: {exc}")
+
+        response = {
+            "connected": bool(is_connected),
+            "account_type": account_type,
+        }
+
+        try:
+            last_error = connection_manager.get_last_connect_error()
+            if last_error:
+                response["last_error"] = last_error
+        except Exception:
+            pass
+
+        return response
+    except Exception as e:
+        logger.error(f"Failed to get connection status: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get connection status")

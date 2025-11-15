@@ -6,6 +6,8 @@ from typing import Optional, Dict
 from fastapi import APIRouter, HTTPException, Depends
 from loguru import logger
 
+from src.utils import now_local
+
 from .auth import get_current_user
 
 router = APIRouter()
@@ -33,7 +35,7 @@ async def get_logs(
                 content = content[-10000:]
 
         # Filter by date range
-        now = datetime.now()
+        now = now_local()
         if range == "today":
             date_str = now.strftime("%Y-%m-%d")
             content = [line for line in content if line.startswith(f"| {date_str}")]
@@ -68,8 +70,22 @@ async def get_logs(
                 return None
             content = [line for line in content if extract_level(line) in allowed]
 
-        if module != "all":
-            content = [line for line in content if f"| {module} |" in line]
+        if module and module != "all":
+            targets = {m.strip() for m in module.split(',') if m.strip()}
+
+            def extract_module(line: str) -> Optional[str]:
+                try:
+                    parts = line.split('|')
+                    if len(parts) >= 4:
+                        return parts[3].strip()
+                except Exception:
+                    return None
+                return None
+
+            if targets:
+                content = [
+                    line for line in content if extract_module(line) in targets
+                ]
 
         if request_id:
             content = [line for line in content if request_id in line]
@@ -99,7 +115,7 @@ async def get_log_modules(
                 content = content[-10000:]
 
         # Filter by date range
-        now = datetime.now()
+        now = now_local()
         if range == "today":
             date_str = now.strftime("%Y-%m-%d")
             content = [line for line in content if line.startswith(f"| {date_str}")]
@@ -150,7 +166,7 @@ async def get_log_stats(
         with open(log_file, "r") as f:
             lines = f.readlines()
 
-        now = datetime.now()
+        now = now_local()
         if range == "today":
             date_str = now.strftime("%Y-%m-%d")
             lines = [line for line in lines if line.startswith(f"| {date_str}")]

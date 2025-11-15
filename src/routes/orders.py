@@ -1,7 +1,7 @@
 import asyncio
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from typing import Optional
+from typing import Optional, Dict, Tuple, Any
 
 from fastapi import APIRouter, HTTPException, Depends
 from loguru import logger
@@ -15,21 +15,32 @@ from core import (
 )
 from .auth import get_current_user
 from src.models import OrderRequest
+from src.utils import ensure_local_timezone, now_local, parse_local_datetime, to_local_iso
 
 router = APIRouter()
 
 NY_TZ = ZoneInfo("America/New_York")
+
+
+def _require_ib_client():
+    """Return the active IBKR client or raise a consistent not-connected error."""
+    ib_client = getattr(core, "ibkr_client", None)
+    if ib_client is None:
+        raise HTTPException(status_code=400, detail="Not connected to IBKR")
+    return ib_client
 
 @router.post("/api/place_order")
 async def place_order(order: OrderRequest, user: Optional[str] = Depends(get_current_user)):
     """下单"""
     if not connection_manager.is_connected():
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
-    
+
+    ib_client = _require_ib_client()
+
     try:
         # 直接调用下单方法，避免嵌套的事件循环调用
         if order.order_type.upper() == "MARKET":
-            trade = core.ibkr_client.place_market_order(
+            trade = await ib_client.place_market_order(
                 symbol=order.symbol,
                 quantity=order.quantity,
                 action=order.action,
@@ -39,7 +50,7 @@ async def place_order(order: OrderRequest, user: Optional[str] = Depends(get_cur
         elif order.order_type.upper() == "LIMIT":
             if not order.price:
                 raise HTTPException(status_code=400, detail="Price required for limit order")
-            trade = core.ibkr_client.place_limit_order(
+            trade = ib_client.place_limit_order(
                 symbol=order.symbol,
                 quantity=order.quantity,
                 price=order.price,
@@ -91,12 +102,27 @@ async def place_order(order: OrderRequest, user: Optional[str] = Depends(get_cur
             except Exception as rec_err:
                 logger.warning(f"Failed to record order in OrderManager: {rec_err}")
             
+            # 失效订单缓存，避免3秒缓存导致新订单不可见
+            try:
+                global orders_cache, orders_cache_timestamp
+                orders_cache = {}
+                orders_cache_timestamp = {}
+            except Exception:
+                pass
+
             await websocket_manager.broadcast({  # 替换 manager
                 "type": "order_placed",
                 "order_id": trade.order.orderId,
                 "symbol": order.symbol,
                 "action": order.action,
                 "quantity": order.quantity
+            })
+
+            # 触发前端订单列表的通用刷新逻辑
+            await websocket_manager.broadcast({
+                "type": "order_update",
+                "reason": "order_placed",
+                "symbol": order.symbol
             })
             
             return {
@@ -115,7 +141,9 @@ async def cancel_order(order_id: int, user: Optional[str] = Depends(get_current_
     """取消订单"""
     if not connection_manager.is_connected():
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
-    
+
+    ib_client = _require_ib_client()
+
     try:
         # Run in executor to avoid blocking event loop with timeout
         loop = asyncio.get_event_loop()
@@ -123,14 +151,14 @@ async def cancel_order(order_id: int, user: Optional[str] = Depends(get_current_
             success, message = await asyncio.wait_for(
                 loop.run_in_executor(
                     None,
-                    lambda: core.ibkr_client.cancel_order(order_id)
+                    lambda: ib_client.cancel_order(order_id)
                 ),
-                timeout=20.0  # 20-second timeout for order cancellation
+                timeout=35.0  # 35-second timeout for order cancellation
             )
         except asyncio.TimeoutError:
             logger.error(f"Order cancellation timed out for order {order_id}")
             return {"success": False, "error": "Order cancellation timed out"}
-        
+
         if success:
             # 更新 OrderManager 本地状态
             try:
@@ -142,17 +170,19 @@ async def cancel_order(order_id: int, user: Optional[str] = Depends(get_current_
                     logger.warning("OrderManager is not initialized; local order state not updated")
             except Exception as rec_err:
                 logger.warning(f"Failed to update OrderManager on cancel: {rec_err}")
-            
+
             await websocket_manager.broadcast({  # 替换 manager
                 "type": "order_cancelled",
                 "order_id": order_id
             })
-            
+
             return {"success": True, "message": message}
         else:
             # 订单未找到或状态不可取消
             raise HTTPException(status_code=404, detail=message)
-            
+
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Order cancellation error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -162,21 +192,23 @@ async def cancel_order_post(request: dict, user: Optional[str] = Depends(get_cur
     """取消订单 (POST方法)"""
     if not connection_manager.is_connected():
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
-    
+
+    ib_client = _require_ib_client()
+
     try:
         order_id = request.get('order_id')
         if not order_id:
             raise HTTPException(status_code=400, detail="order_id is required")
-            
+
         # Run in executor to avoid blocking event loop
         loop = asyncio.get_event_loop()
         try:
             success, message = await asyncio.wait_for(
                 loop.run_in_executor(
                     None,
-                    lambda: core.ibkr_client.cancel_order(int(order_id))
+                    lambda: ib_client.cancel_order(int(order_id))
                 ),
-                timeout=20.0  # 20-second timeout for order cancellation
+                timeout=35.0  # 35-second timeout for order cancellation
             )
         except asyncio.TimeoutError:
             logger.error(f"Order cancellation timed out for order {order_id}")
@@ -216,10 +248,19 @@ async def close_position(request: dict, user: Optional[str] = Depends(get_curren
     
     if not connection_manager.is_connected():
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
-    
+
+    ib_client = _require_ib_client()
+
     try:
-        # 获取当前持仓
-        positions = await core.ibkr_client.get_positions()
+        # 获取当前持仓。使用 fast 模式并设置超时，避免逐个订阅行情导致接口阻塞。
+        try:
+            positions = await asyncio.wait_for(
+                ib_client.get_positions(fast=True),
+                timeout=12.0,
+            )
+        except asyncio.TimeoutError:
+            logger.error("Timed out while fetching positions for close_position")
+            raise HTTPException(status_code=504, detail="Fetching positions timed out")
         target_position = None
         
         for pos in positions:
@@ -239,7 +280,7 @@ async def close_position(request: dict, user: Optional[str] = Depends(get_curren
         quantity = abs(int(position_qty))
         
         # 执行平仓市价单
-        trade = core.ibkr_client.place_market_order(
+        trade = await ib_client.place_market_order(
             symbol=symbol,
             quantity=quantity,
             action=action,
@@ -463,25 +504,29 @@ async def _validate_g3_position_limits(order: OrderRequest) -> dict:
     
     try:
         if connection_manager.is_connected():
-            # 获取当前持仓
-            positions = await core.ibkr_client.get_positions()
-            current_position = 0
-            
-            for pos in positions:
-                if pos.get('symbol') == order.symbol:
-                    current_position = float(pos.get('position', 0))
-                    break
-            
-            # 计算订单执行后的持仓
-            if order.action.upper() == "BUY":
-                new_position = current_position + order.quantity
+            ib_client = getattr(core, "ibkr_client", None)
+            if ib_client is None:
+                errors.append("Not connected to IBKR")
             else:
-                new_position = current_position - order.quantity
-            
-            # 检查持仓限制（示例：单个股票持仓不超过 10,000 股）
-            if abs(new_position) > 10000:
-                errors.append(f"Position limit exceeded: new position would be {new_position} shares (limit: 10,000)")
-        
+                # 获取当前持仓
+                positions = await ib_client.get_positions()
+                current_position = 0
+
+                for pos in positions:
+                    if pos.get('symbol') == order.symbol:
+                        current_position = float(pos.get('position', 0))
+                        break
+
+                # 计算订单执行后的持仓
+                if order.action.upper() == "BUY":
+                    new_position = current_position + order.quantity
+                else:
+                    new_position = current_position - order.quantity
+
+                # 检查持仓限制（示例：单个股票持仓不超过 10,000 股）
+                if abs(new_position) > 10000:
+                    errors.append(f"Position limit exceeded: new position would be {new_position} shares (limit: 10,000)")
+
     except Exception as e:
         errors.append(f"Position limit check failed: {str(e)}")
     
@@ -498,24 +543,28 @@ async def _validate_g2_capital_adequacy(order: OrderRequest) -> dict:
     
     try:
         if connection_manager.is_connected():
-            # 获取账户信息
-            account_info = core.ibkr_client.get_account_summary()
-            
-            if account_info:
-                # 检查可用资金
-                available_funds = 0
-                for item in account_info:
-                    if item.get('tag') == 'AvailableFunds':
-                        available_funds = float(item.get('value', 0))
-                        break
-                
-                # 计算订单所需资金
-                if order.action.upper() == "BUY" and order.price and order.quantity:
-                    required_funds = order.price * order.quantity
-                    
-                    if required_funds > available_funds:
-                        errors.append(f"Insufficient funds: required ${required_funds:,.2f}, available ${available_funds:,.2f}")
-        
+            ib_client = getattr(core, "ibkr_client", None)
+            if ib_client is None:
+                errors.append("Not connected to IBKR")
+            else:
+                # 获取账户信息
+                account_info = await ib_client.get_account_summary()
+
+                if account_info:
+                    # 检查可用资金
+                    available_funds = 0
+                    for item in account_info:
+                        if item.get('tag') == 'AvailableFunds':
+                            available_funds = float(item.get('value', 0))
+                            break
+
+                    # 计算订单所需资金
+                    if order.action.upper() == "BUY" and order.price and order.quantity:
+                        required_funds = order.price * order.quantity
+
+                        if required_funds > available_funds:
+                            errors.append(f"Insufficient funds: required ${required_funds:,.2f}, available ${available_funds:,.2f}")
+
     except Exception as e:
         errors.append(f"Capital adequacy check failed: {str(e)}")
     
@@ -558,10 +607,12 @@ async def reverse_position(request: dict, user: Optional[str] = Depends(get_curr
     
     if not connection_manager.is_connected():
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
-    
+
+    ib_client = _require_ib_client()
+
     try:
         # 获取当前持仓
-        positions = await core.ibkr_client.get_positions()
+        positions = await ib_client.get_positions()
         target_position = None
         
         for pos in positions:
@@ -590,14 +641,17 @@ async def reverse_position(request: dict, user: Optional[str] = Depends(get_curr
                         
                         # 更新数据库中的风险规则状态
                         from src.database import DatabaseRiskRule
-                        from datetime import datetime
                         db_rule = DatabaseRiskRule(
                             symbol=rule.symbol,
                             stop_loss_price=rule.stop_loss_price,
                             take_profit_price=rule.take_profit_price,
                             max_loss_percent=rule.max_loss_percent,
                             enabled=rule.enabled,
-                            timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
+                            max_time_span=rule.max_time_span,
+                            timestamp=to_local_iso(rule.created_at) or now_local().isoformat(),
+                            auto_trailing=rule.auto_trailing,
+                            atr_params=rule.atr_params,
+                            rule_type=rule.rule_type,
                         )
                         risk_manager.db_manager.save_risk_rule(db_rule)
                         
@@ -613,7 +667,7 @@ async def reverse_position(request: dict, user: Optional[str] = Depends(get_curr
             logger.warning(f"反向下单前停用风险规则失败: {e}")
         
         # 执行反向市价单
-        trade = core.ibkr_client.place_market_order(
+        trade = await ib_client.place_market_order(
             symbol=symbol,
             quantity=quantity,
             action=action,
@@ -674,10 +728,12 @@ async def cancel_all_orders(user: Optional[str] = Depends(get_current_user)):
     """取消所有订单"""
     if not connection_manager.is_connected():
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
-    
+
+    ib_client = _require_ib_client()
+
     try:
         # 直接调用取消所有订单方法，避免嵌套的事件循环调用
-        cancelled_count = core.ibkr_client.cancel_all_orders()
+        cancelled_count = ib_client.cancel_all_orders()
         
         await websocket_manager.broadcast({  # 替换 manager
             "type": "all_orders_cancelled",
@@ -695,42 +751,74 @@ async def cancel_all_orders(user: Optional[str] = Depends(get_current_user)):
         raise HTTPException(status_code=500, detail=str(e))
 
 # 订单缓存，避免频繁查询数据库
-orders_cache = []
-orders_cache_timestamp = None
+orders_cache: Dict[Tuple[int, int, Optional[str]], Dict[str, Any]] = {}
+orders_cache_timestamp: Dict[Tuple[int, int, Optional[str]], datetime] = {}
 ORDERS_CACHE_TTL = 3  # 缓存有效期（秒）
 
 @router.get("/api/orders")
-async def get_orders(user: Optional[str] = Depends(get_current_user), limit: int = 100, use_cache: bool = True):
+async def get_orders(user: Optional[str] = Depends(get_current_user), limit: int = 100, use_cache: bool = True,
+                     start_date: Optional[str] = None, page: int = 1):
     """获取订单列表（从数据库读取，包含历史订单）
-    - limit: 限制返回的订单数量，默认100条，提高性能
-    - use_cache: 是否使用API级别缓存（默认 True）。启用时，短时间内的重复请求将直接返回缓存结果，无需重新查询数据库。
+    - limit: 每页返回的订单数量，默认100条
+    - use_cache: 是否使用API级别缓存（默认 True）
+    - start_date: 起始时间（ISO字符串）
+    - page: 页码，从1开始
     """
     global orders_cache, orders_cache_timestamp
-    
+
     try:
         if 'order_manager' not in globals() or not order_manager:
             raise HTTPException(status_code=500, detail="Order manager not initialized")
-        
-        # 检查缓存是否有效
-        current_time = datetime.now()
-        if use_cache and orders_cache and orders_cache_timestamp:
-            cache_age = (current_time - orders_cache_timestamp).total_seconds()
-            if cache_age < ORDERS_CACHE_TTL:
-                logger.debug(f"Using orders cache, age: {cache_age:.1f}s")
-                return {"success": True, "orders": orders_cache, "from_cache": True}
-        
-        # 从 OrderManager 获取所有订单数据（已按创建时间降序排列），限制数量提高性能
-        # 使用异步执行避免阻塞事件循环
+
+        start_dt = None
+        if start_date:
+            try:
+                start_dt = parse_local_datetime(start_date)
+            except Exception as e:
+                logger.warning(f"Invalid start_date '{start_date}': {e}")
+                start_dt = None
+
+        current_time = now_local()
+        if limit <= 0:
+            limit = 100
+        page = max(1, page)
+        offset = (page - 1) * limit if limit else 0
+        cache_key = (limit, page, start_dt.isoformat() if start_dt else None)
+
+        if use_cache and not start_dt:
+            cached_payload = orders_cache.get(cache_key)
+            cached_timestamp = orders_cache_timestamp.get(cache_key)
+            if cached_payload and cached_timestamp:
+                cache_age = (current_time - cached_timestamp).total_seconds()
+                if cache_age < ORDERS_CACHE_TTL:
+                    logger.debug(f"Using orders cache, age: {cache_age:.1f}s")
+                    response = dict(cached_payload)
+                    response["from_cache"] = True
+                    return response
+
         loop = asyncio.get_event_loop()
         try:
-            orders = await asyncio.wait_for(
-                loop.run_in_executor(None, lambda: order_manager.get_orders(limit=limit)),
-                timeout=5.0  # 5秒超时
+            result = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None,
+                    lambda: order_manager.get_orders(
+                        limit=limit,
+                        start_date=start_dt,
+                        offset=offset,
+                        return_total=True,
+                    )
+                ),
+                timeout=5.0
             )
-            
-            # 转换字段名以匹配前端期望
+
+            if isinstance(result, tuple):
+                orders_list, total_count = result
+            else:
+                orders_list = result
+                total_count = len(orders_list)
+
             converted_orders = []
-            for o in orders:
+            for o in orders_list:
                 raw_type = (o.order_type or '').upper()
                 if raw_type in ('MARKET', 'MKT'):
                     order_type = 'MKT'
@@ -738,15 +826,14 @@ async def get_orders(user: Optional[str] = Depends(get_current_user), limit: int
                     order_type = 'LMT'
                 else:
                     order_type = raw_type or 'MKT'
-                
+
                 price_val = 0.0
                 try:
                     if o.price is not None:
                         price_val = float(o.price)
                 except Exception:
                     price_val = 0.0
-                
-                # 计算触发类型：仅对机器人订单（auto）有效
+
                 trigger_type = None
                 try:
                     if getattr(o, 'order_source', 'manual') == 'auto':
@@ -758,7 +845,7 @@ async def get_orders(user: Optional[str] = Depends(get_current_user), limit: int
                             trigger_type = 'risk_rule'
                 except Exception:
                     trigger_type = None
-                
+
                 converted_order = {
                     'order_id': o.order_id,
                     'symbol': o.symbol,
@@ -770,37 +857,69 @@ async def get_orders(user: Optional[str] = Depends(get_current_user), limit: int
                     'status': o.status,
                     'filled': o.quantity if o.status == 'Filled' else 0,
                     'remaining': 0 if o.status == 'Filled' else o.quantity,
-                    'submit_time': (o.created_at.isoformat() if getattr(o, 'created_at', None) else None),
+                    'submit_time': to_local_iso(getattr(o, 'created_at', None)),
+                    'created_at': to_local_iso(getattr(o, 'created_at', None)),
                     'order_source': getattr(o, 'order_source', 'manual'),
+                    'strategy_name': getattr(o, 'strategy_name', None),
                     'trigger_type': trigger_type,
-                    'commission': getattr(o, 'commission', None),  # 新增：佣金
-                    'pnl': getattr(o, 'pnl', None)  # 新增：盈亏
+                    'commission': getattr(o, 'commission', None),
+                    'pnl': getattr(o, 'pnl', None)
                 }
                 converted_orders.append(converted_order)
-            
-            # 更新缓存
-            orders_cache = converted_orders
-            orders_cache_timestamp = current_time
-            
-            return {"success": True, "orders": converted_orders, "from_cache": False}
-            
+
+            total_pages = max(1, (total_count + limit - 1) // limit) if limit else 1
+            meta = {
+                "limit": limit,
+                "page_size": limit,
+                "page": page,
+                "total": total_count,
+                "total_pages": total_pages,
+                "has_prev": page > 1,
+                "has_next": page < total_pages,
+                "start_date": start_date,
+                "generated_at": to_local_iso(now_local()),
+                "source": "rest_api",
+            }
+
+            response_payload = {"success": True, "orders": converted_orders, "meta": meta, "from_cache": False}
+
+            if use_cache and not start_dt:
+                orders_cache[cache_key] = response_payload
+                orders_cache_timestamp[cache_key] = current_time
+
+            return response_payload
+
         except asyncio.TimeoutError:
-            # 如果超时但有缓存，返回缓存数据
-            if orders_cache:
-                logger.warning("Orders request timed out, returning cached data")
-                return {"success": True, "orders": orders_cache, "from_cache": True, "cache_warning": "Request timed out, showing cached data"}
-            else:
-                logger.warning("Orders request timed out and no cache available")
-                return {"success": False, "error": "Orders request timed out"}
-        
+            cached_payload = orders_cache.get(cache_key)
+            cache_time = orders_cache_timestamp.get(cache_key)
+            if cached_payload and cache_time:
+                cache_age = (current_time - cache_time).total_seconds()
+                logger.warning(
+                    f"Orders request timed out, returning cached data (age: {cache_age:.1f}s)"
+                    if cache_age is not None else
+                    "Orders request timed out, returning cached data"
+                )
+                response = dict(cached_payload)
+                response["from_cache"] = True
+                response["cache_warning"] = "Request timed out, showing cached data"
+                return response
+
+            logger.warning("Orders request timed out and no cache available")
+            return {"success": False, "error": "Orders request timed out"}
+
     except HTTPException:
         raise
     except Exception as e:
-        # 如果出错但有缓存，返回缓存数据
-        if orders_cache and orders_cache_timestamp:
-            logger.error(f"Get orders error: {e}, returning cached data")
-            return {"success": True, "orders": orders_cache, "from_cache": True, "cache_warning": "Error occurred, showing cached data"}
-        
+        cached_payload = orders_cache.get(cache_key)
+        cache_time = orders_cache_timestamp.get(cache_key)
+        if cached_payload and cache_time:
+            cache_age = (current_time - cache_time).total_seconds()
+            logger.error(f"Get orders error: {e}, returning cached data (age: {cache_age:.1f}s)")
+            response = dict(cached_payload)
+            response["from_cache"] = True
+            response["cache_warning"] = "Error occurred, showing cached data"
+            return response
+
         logger.error(f"Get orders error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -854,13 +973,13 @@ async def get_order_detail(order_id: str, user: Optional[str] = Depends(get_curr
             'status': o.status,
             'filled': o.quantity if o.status == 'Filled' else 0,
             'remaining': 0 if o.status == 'Filled' else o.quantity,
-            'submit_time': (o.created_at.isoformat() if getattr(o, 'created_at', None) else None),
+            'submit_time': to_local_iso(getattr(o, 'created_at', None)),
             'order_source': getattr(o, 'order_source', 'manual'),
             'trigger_type': trigger_type,
             # 详情字段
             'price': price_val if price_val > 0 else None,
-            'executed_at': (o.executed_at.isoformat() if getattr(o, 'executed_at', None) else None),
-            'updated_at': (o.updated_at.isoformat() if getattr(o, 'updated_at', None) else None),
+            'executed_at': to_local_iso(getattr(o, 'executed_at', None)),
+            'updated_at': to_local_iso(getattr(o, 'updated_at', None)),
             'strategy_name': getattr(o, 'strategy_name', None),
             'rule_id': getattr(o, 'rule_id', None),
             'parent_order_id': getattr(o, 'parent_order_id', None),
@@ -883,7 +1002,9 @@ async def sync_orders(user: Optional[str] = Depends(get_current_user)):
     """手动同步订单状态和价格字段从IB"""
     if not connection_manager.is_connected():
         raise HTTPException(status_code=400, detail="Not connected to IBKR")
-    
+
+    ib_client = _require_ib_client()
+
     try:
         if 'order_manager' not in globals() or not order_manager:
             raise HTTPException(status_code=500, detail="Order manager not initialized")
@@ -893,7 +1014,7 @@ async def sync_orders(user: Optional[str] = Depends(get_current_user)):
         await asyncio.wait_for(
             loop.run_in_executor(
                 None,
-                lambda: core.ibkr_client.get_orders(risk_manager, strategy_manager, order_manager)
+                lambda: ib_client.get_orders(risk_manager, getattr(core, 'strategy_manager', None), order_manager)
             ),
             timeout=10.0
         )
@@ -905,4 +1026,42 @@ async def sync_orders(user: Optional[str] = Depends(get_current_user)):
         raise HTTPException(status_code=408, detail="Order sync request timed out")
     except Exception as e:
         logger.error(f"Sync orders error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/api/orders/{order_id}/sync")
+async def sync_single_order(order_id: str, user: Optional[str] = Depends(get_current_user)):
+    """手动同步指定订单的状态，然后返回该订单的最新详情"""
+    if not connection_manager.is_connected():
+        raise HTTPException(status_code=400, detail="Not connected to IBKR")
+
+    ib_client = _require_ib_client()
+
+    try:
+        if 'order_manager' not in globals() or not order_manager:
+            raise HTTPException(status_code=500, detail="Order manager not initialized")
+
+        # 检查订单是否存在
+        if not order_manager.get_order(str(order_id)):
+            raise HTTPException(status_code=404, detail="Order not found")
+
+        # 同步订单（IB接口暂不支持单个订单刷新，这里触发整体刷新）
+        loop = asyncio.get_event_loop()
+        await asyncio.wait_for(
+            loop.run_in_executor(
+                None,
+                lambda: ib_client.get_orders(risk_manager, getattr(core, 'strategy_manager', None), order_manager)
+            ),
+            timeout=10.0
+        )
+
+        # 返回最新订单详情（复用现有的详情接口）
+        return await get_order_detail(order_id, user)
+
+    except asyncio.TimeoutError:
+        logger.warning("Order sync request timed out")
+        raise HTTPException(status_code=408, detail="Order sync request timed out")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Sync single order error: {e}")
         raise HTTPException(status_code=500, detail=str(e))

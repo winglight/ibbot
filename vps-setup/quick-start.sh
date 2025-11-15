@@ -11,7 +11,7 @@ echo "======================================"
 
 # 检查SSH连接
 echo "📡 检查VPS连接..."
-if ssh -o ConnectTimeout=5 vps-ibbot 'echo "VPS连接正常"' 2>/dev/null; then
+if ssh -o BatchMode=yes -o ConnectTimeout=5 vps-ibbot 'echo "VPS连接正常"'; then
     echo "✅ VPS连接正常"
 else
     echo "❌ VPS连接失败，请检查:"
@@ -49,7 +49,7 @@ echo "✅ 已切换到VPS Docker上下文"
 
 # 检查本地端口占用和清理SSH隧道
 echo "🔌 检查本地端口..."
-PORTS=(7800 5900 4001 4002)
+PORTS=(7800 5900 4001 4002 8001 8000 8086 6379)
 
 # 先清理可能残留的SSH隧道进程
 echo "🧹 清理残留的SSH隧道进程..."
@@ -66,13 +66,24 @@ for port in "${PORTS[@]}"; do
 done
 sleep 2
 
+BUSY_PORTS=()
 for port in "${PORTS[@]}"; do
     if lsof -i :$port >/dev/null 2>&1; then
         echo "⚠️  端口 $port 已被占用，尝试释放..."
         lsof -ti :$port | xargs kill -9 2>/dev/null || true
         sleep 1
+        if lsof -i :$port >/dev/null 2>&1; then
+            BUSY_PORTS+=("$port")
+        fi
     fi
 done
+
+if [ ${#BUSY_PORTS[@]} -ne 0 ]; then
+    echo "❌ 以下端口仍被占用，无法建立端口转发: ${BUSY_PORTS[*]}"
+    echo "👉 请手动关闭相关程序或调整脚本中的端口配置后重试"
+    exit 1
+fi
+
 echo "✅ 端口检查完成"
 
 # 启动端口转发
@@ -101,6 +112,10 @@ if command -v autossh &> /dev/null; then
         -L 5900:127.0.0.1:5900 \
         -L 4001:127.0.0.1:4001 \
         -L 4002:127.0.0.1:4002 \
+        -L 8001:127.0.0.1:8001 \
+        -L 8000:127.0.0.1:8000 \
+        -L 8086:127.0.0.1:8086 \
+        -L 6379:127.0.0.1:6379 \
         vps-ibbot
 else
     echo "⚠️  autossh未安装，使用普通SSH转发"
@@ -114,5 +129,9 @@ else
         -L 5900:127.0.0.1:5900 \
         -L 4001:127.0.0.1:4001 \
         -L 4002:127.0.0.1:4002 \
+        -L 8001:127.0.0.1:8001 \
+        -L 8000:127.0.0.1:8000 \
+        -L 8086:127.0.0.1:8086 \
+        -L 6379:127.0.0.1:6379 \
         vps-ibbot
 fi

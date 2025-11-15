@@ -1,27 +1,147 @@
 import asyncio
-import json
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 from loguru import logger
 
+from .utils import now_local
+
 from .telegram_notifier import TelegramNotifier
 from .websocket_manager import WebSocketManager
 from .database import DatabaseManager
+
+EVENT_TOKEN_TO_LABEL = {
+    'order_filled': 'Order Filled',
+    'position_opened': 'Position Opened',
+    'position_closed': 'Position Closed',
+    'risk_rule': 'Risk Rule',
+    'risk_triggered': 'Risk Rule',
+    'risk_rule_deactivated': 'Risk Rule Deactivated',
+    'risk_circuit_breaker': 'Risk Circuit Breaker',
+    'strategy_risk': 'Strategy Risk',
+    'take_profit': 'Take Profit Triggered',
+    'stop_loss': 'Stop Loss Triggered',
+    'strategy_started': 'Strategy Started',
+    'strategy_stopped': 'Strategy Stopped',
+    'queue_status': 'Queue Status',
+    'queue_warning': 'Queue Warning',
+    'dom_level_3': 'DOM Level 3',
+    'dom_level_4': 'DOM Level 4',
+    'trading_reminder': 'Trading Reminder',
+    'general': 'General',
+    'test': 'Test',
+}
+
+EVENT_LABEL_TO_TOKEN = {
+    label.lower(): token for token, label in EVENT_TOKEN_TO_LABEL.items()
+}
+EVENT_LABEL_TO_TOKEN['risk rule triggered'] = 'risk_rule'
+EVENT_LABEL_TO_TOKEN['stop loss triggered'] = 'stop_loss'
+EVENT_LABEL_TO_TOKEN['take profit triggered'] = 'take_profit'
+
+DEFAULT_EVENT_TOKENS: List[str] = [
+    'order_filled',
+    'position_opened',
+    'position_closed',
+    'risk_rule',
+    'risk_circuit_breaker',
+    'risk_rule_deactivated',
+    'strategy_risk',
+    'take_profit',
+    'stop_loss',
+    'strategy_started',
+    'strategy_stopped',
+    'queue_status',
+    'queue_warning',
+    'dom_level_3',
+    'dom_level_4',
+    'trading_reminder',
+    'general',
+    'test',
+]
 
 # 为通知管理器绑定日志记录器
 notification_logger = logger.bind(module="notification_manager", request_id="-")
 
 class NotificationManager:
     """统一的通知管理器，负责所有通知的发送和保存"""
-    
-    def __init__(self, telegram_notifier: Optional[TelegramNotifier] = None, 
+
+    def __init__(self, telegram_notifier: Optional[TelegramNotifier] = None,
                  websocket_manager: Optional[WebSocketManager] = None,
                  db_manager: Optional[DatabaseManager] = None):
         self.telegram_notifier = telegram_notifier
         self.websocket_manager = websocket_manager
         self.db_manager = db_manager
         notification_logger.info("NotificationManager initialized")
-    
+
+    # ------------------------------------------------------------------
+    def _normalize_event_token(self, event_type: Optional[str]) -> str:
+        token = (event_type or '').strip()
+        if not token:
+            return 'general'
+
+        lowered = token.lower()
+        if lowered in EVENT_TOKEN_TO_LABEL:
+            return lowered
+
+        if lowered in EVENT_LABEL_TO_TOKEN:
+            return EVENT_LABEL_TO_TOKEN[lowered]
+
+        alias_map = {
+            'order_update': 'order_filled',
+            'auto_close': 'risk_rule',
+            'dom_strategy': 'dom_level_3',
+            'daily_summary': 'general',
+            'connection_connected': 'general',
+            'connection_disconnected': 'general',
+            'connection_problem': 'general',
+            'queue_started': 'queue_status',
+            'queue_stopped': 'queue_status',
+            'queue_state': 'queue_status',
+        }
+        if lowered in alias_map:
+            return alias_map[lowered]
+
+        if lowered.startswith('risk_'):
+            if lowered == 'risk_rule_deactivated':
+                return 'risk_rule_deactivated'
+            if lowered == 'risk_circuit_breaker':
+                return 'risk_circuit_breaker'
+            return 'risk_rule'
+
+        if lowered.startswith('take_profit'):
+            return 'take_profit'
+
+        if lowered.startswith('stop_loss'):
+            return 'stop_loss'
+
+        if lowered.startswith('strategy_started'):
+            return 'strategy_started'
+
+        if lowered.startswith('strategy_stopped'):
+            return 'strategy_stopped'
+
+        if lowered.startswith('queue_warning'):
+            return 'queue_warning'
+        if lowered.startswith('queue_'):
+            return 'queue_status'
+
+        return 'general'
+
+    # ------------------------------------------------------------------
+    def _normalize_event_list(self, events: Optional[List[Any]]) -> List[str]:
+        if not isinstance(events, list) or not events:
+            return DEFAULT_EVENT_TOKENS.copy()
+
+        normalized: List[str] = []
+        for event in events:
+            token = self._normalize_event_token(event)
+            if token not in normalized:
+                normalized.append(token)
+
+        if not normalized:
+            return DEFAULT_EVENT_TOKENS.copy()
+        return normalized
+
     def set_dependencies(self, telegram_notifier: Optional[TelegramNotifier] = None,
                         websocket_manager: Optional[WebSocketManager] = None,
                         db_manager: Optional[DatabaseManager] = None):
@@ -35,51 +155,69 @@ class NotificationManager:
 
     def _load_settings(self) -> Dict[str, Any]:
         """加载通知配置（若未配置则返回默认），默认值需与后端保持一致。"""
-        default_events = [
-            'Order Filled',
-            'Position Opened',
-            'Position Closed',
-            'Risk Rule Triggered',
-            'Strategy Started',
-            'Strategy Stopped'
-        ]
         default_settings = {
             "chrome": {
                 "enabled": True,
                 "config": {},
-                "events": default_events
+                "events": DEFAULT_EVENT_TOKENS.copy(),
             },
             "telegram": {
                 "enabled": False,
                 "config": {
                     "bot_token": "",
-                    "chat_id": ""
+                    "chat_id": "",
                 },
-                "events": default_events
+                "events": DEFAULT_EVENT_TOKENS.copy(),
             },
             "trading_reminder": {
                 "enabled": False,
                 "start_trading_time": "09:30",
                 "end_trading_time": "16:00",
                 "browser_notification_enabled": True,
-                "telegram_reminder_enabled": False
+                "telegram_reminder_enabled": False,
             },
             "email_enabled": False,
-            "email_address": ""
+            "email_address": "",
         }
+
+        settings: Dict[str, Any] = default_settings
         try:
             if self.db_manager:
                 loaded = self.db_manager.load_notification_config()
                 if isinstance(loaded, dict) and loaded:
-                    return loaded
+                    settings = loaded
         except Exception as e:
             notification_logger.error(f"Load notification settings failed: {e}")
-        return default_settings
+
+        chrome_cfg = settings.get("chrome") or {}
+        chrome_cfg.setdefault("enabled", True)
+        chrome_cfg.setdefault("config", {})
+        chrome_cfg["events"] = self._normalize_event_list(chrome_cfg.get("events"))
+        settings["chrome"] = chrome_cfg
+
+        telegram_cfg = settings.get("telegram") or {}
+        telegram_cfg.setdefault("enabled", False)
+        telegram_cfg.setdefault("config", {"bot_token": "", "chat_id": ""})
+        telegram_cfg["events"] = self._normalize_event_list(telegram_cfg.get("events"))
+        settings["telegram"] = telegram_cfg
+
+        reminder_cfg = settings.get("trading_reminder") or {}
+        reminder_cfg.setdefault("enabled", False)
+        reminder_cfg.setdefault("start_trading_time", "09:30")
+        reminder_cfg.setdefault("end_trading_time", "16:00")
+        reminder_cfg.setdefault("browser_notification_enabled", True)
+        reminder_cfg.setdefault("telegram_reminder_enabled", False)
+        settings["trading_reminder"] = reminder_cfg
+
+        settings["email_enabled"] = bool(settings.get("email_enabled", False))
+        settings["email_address"] = settings.get("email_address", "") or ""
+
+        return settings
 
     async def send_notification(self, message: str, event_type: str = "general", 
                                channels: List[str] = None, **kwargs) -> Dict[str, bool]:
         """发送通知到指定渠道
-        
+
         Args:
             message: 通知消息
             event_type: 事件类型
@@ -91,19 +229,44 @@ class NotificationManager:
         """
         if channels is None:
             channels = ['telegram', 'websocket']
-        
+
         # 根据设置过滤实际发送的渠道（仅在启用时才尝试发送）
         settings = self._load_settings()
+        event_token = self._normalize_event_token(event_type)
         telegram_enabled = bool(settings.get('telegram', {}).get('enabled', False))
         chrome_enabled = bool(settings.get('chrome', {}).get('enabled', True))
 
         requested = set(channels)
         allowed: List[str] = []
-        if 'telegram' in requested and self.telegram_notifier and telegram_enabled:
+        telegram_events = settings.get('telegram', {}).get('events') or []
+        chrome_events = settings.get('chrome', {}).get('events') or []
+
+        def is_event_allowed(channel: str) -> bool:
+            if channel == 'telegram':
+                events = telegram_events
+            elif channel == 'websocket':
+                events = chrome_events
+            else:
+                return True
+            if not isinstance(events, list) or not events:
+                return True
+            return event_token in events
+
+        if (
+            'telegram' in requested
+            and self.telegram_notifier
+            and telegram_enabled
+            and is_event_allowed('telegram')
+        ):
             allowed.append('telegram')
-        if 'websocket' in requested and self.websocket_manager and chrome_enabled:
+        if (
+            'websocket' in requested
+            and self.websocket_manager
+            and chrome_enabled
+            and is_event_allowed('websocket')
+        ):
             allowed.append('websocket')
-        
+
         results: Dict[str, bool] = {}
         
         # 发送Telegram通知（仅在启用时）
@@ -145,7 +308,7 @@ class NotificationManager:
                 notification_data = {
                     "type": event_type,
                     "message": message,
-                    "timestamp": datetime.now().isoformat(),
+                    "timestamp": now_local().isoformat(),
                     **kwargs
                 }
                 await self.websocket_manager.broadcast(notification_data)
@@ -206,7 +369,7 @@ class NotificationManager:
             "quantity": quantity,
             "fill_price": price,
             "order_type": order_type,
-            "executed_at": datetime.now().isoformat()
+            "executed_at": now_local().isoformat()
         }
         
         return await self.send_notification(
@@ -240,7 +403,7 @@ class NotificationManager:
         message = f"{emoji} IBKR {title} {emoji}\n\n"
         if details:
             message += f"详情: {details}\n\n"
-        message += f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        message += f"时间: {now_local().strftime('%Y-%m-%d %H:%M:%S')}"
         
         return await self.send_notification(
             message=message,
@@ -264,9 +427,11 @@ class NotificationManager:
         message += f"订单ID: {order_id_str}\n\n"
         message += f"📈 风险管理系统执行的自动{action}订单。"
         
+        event_type = "take_profit" if order_type == "profit" else "stop_loss"
+
         return await self.send_notification(
             message=message,
-            event_type=f"stop_loss_{order_type}",
+            event_type=event_type,
             symbol=symbol,
             position=position,
             trigger_price=trigger_price,

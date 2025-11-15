@@ -96,6 +96,51 @@
     color: #dc3545 !important;
 }
 
+#monitorModal.monitor-fullscreen .modal-dialog {
+    max-width: 100%;
+    width: 100%;
+    height: 100vh;
+    margin: 0;
+    padding: 0;
+}
+
+#monitorModal.monitor-fullscreen .modal-content {
+    height: 100vh;
+    border-radius: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+#monitorModal.monitor-fullscreen .modal-body {
+    flex: 1 1 auto;
+    overflow-y: auto;
+}
+
+#monitorModal .modal-header .btn.monitor-fullscreen-active {
+    background-color: #198754 !important;
+    border-color: #198754 !important;
+    color: #ffffff !important;
+}
+
+#monitorModal .modal-header .btn.monitor-fullscreen-inactive {
+    background-color: #0d6efd !important;
+    border-color: #0d6efd !important;
+    color: #ffffff !important;
+}
+
+/* Make the add strategy modal take half of the viewport width on large screens */
+#addStrategyModal .modal-dialog {
+    width: min(50vw, 960px);
+    max-width: min(50vw, 960px);
+}
+
+@media (max-width: 992px) {
+    #addStrategyModal .modal-dialog {
+        width: calc(100vw - 2rem);
+        max-width: calc(100vw - 2rem);
+    }
+}
+
 /* 统一面板标题栏按钮样式 - 蓝底白字 */
 .card-header .btn,
 .modal-header .btn:not(.btn-close),
@@ -128,6 +173,19 @@
     box-shadow: 0 0 0 0.25rem rgba(13, 110, 253, 0.25) !important;
 }
 
+body.read-only-mode .requires-write {
+    pointer-events: none;
+    opacity: 0.6;
+}
+
+#readOnlyBanner {
+    border-left: 4px solid #f0ad4e;
+}
+
+#dailyAccountSummaryTable tbody tr td {
+    vertical-align: middle;
+}
+
 .card-header .btn:active,
 .modal-header .btn:not(.btn-close):active,
 .navbar .btn:active,
@@ -138,3 +196,291 @@
     color: white !important;
 }
 
+body.side-panel-open {
+    overflow: hidden;
+}
+
+.dom-optimizer-header,
+#domOptimizerSection .card-header {
+    color: #f8f9ff !important;
+}
+
+#domOptimizerSection .card-header {
+    background: linear-gradient(90deg, #4f46e5 0%, #7c3aed 100%);
+    border: none;
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+
+#domOptimizerSection .card-header h5,
+#domOptimizerSection .card-header h6,
+#domOptimizerSection .card-header span,
+#domOptimizerSection .card-header label,
+#domOptimizerSection .card-header small,
+#domOptimizerSection .card-header strong,
+#domOutcomeModal .modal-header h5,
+#domOutcomeModal .modal-header small {
+    color: rgba(255, 255, 255, 0.95) !important;
+}
+
+#domOptimizerSection .card-header .text-muted,
+#domOutcomeModal .modal-header .text-muted {
+    color: rgba(255, 255, 255, 0.7) !important;
+}
+
+#domOptimizerSection .card-header .btn-outline-secondary,
+#domOutcomeModal .modal-header .btn-outline-secondary {
+    color: rgba(255, 255, 255, 0.92) !important;
+    border-color: rgba(255, 255, 255, 0.5) !important;
+}
+
+#domOptimizerSection .card-header .btn-outline-secondary:hover,
+#domOutcomeModal .modal-header .btn-outline-secondary:hover {
+    color: #ffffff !important;
+    border-color: rgba(255, 255, 255, 0.65) !important;
+    background-color: rgba(255, 255, 255, 0.12) !important;
+}
+
+#domOptimizerSection .card-header .badge {
+    border: 1px solid rgba(255, 255, 255, 0.32);
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.12);
+}
+
+#domOptimizerSection [data-role="dom-outcome-badge"] {
+    cursor: pointer;
+    text-decoration: underline;
+}
+
+#domOptimizerSection .card-header .badge {
+    background: rgba(15, 23, 42, 0.22);
+    color: #f8fafc !important;
+}
+
+#domOptimizerSection .card-header .btn.btn-outline-secondary,
+#domOptimizerSection .card-header .btn.btn-sm.btn-outline-secondary {
+    color: #f8f9ff !important;
+    border-color: rgba(248, 250, 252, 0.6) !important;
+    background-color: transparent !important;
+}
+
+#domOptimizerSection .card-header .btn.btn-outline-secondary:hover,
+#domOptimizerSection .card-header .btn.btn-sm.btn-outline-secondary:hover,
+#domOptimizerSection .card-header .btn.btn-outline-secondary:focus,
+#domOptimizerSection .card-header .btn.btn-sm.btn-outline-secondary:focus {
+    color: #ffffff !important;
+    border-color: rgba(255, 255, 255, 0.85) !important;
+    background-color: rgba(255, 255, 255, 0.12) !important;
+    box-shadow: none;
+}
+
+.panel-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(15, 23, 42, 0.45);
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 0.25s ease, visibility 0.25s ease;
+    z-index: 1040;
+}
+
+.panel-overlay.active {
+    opacity: 1;
+    visibility: visible;
+}
+
+.side-panel {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    width: clamp(320px, 33.333vw, 540px);
+    background: #ffffff;
+    box-shadow: 0 20px 45px rgba(15, 23, 42, 0.18);
+    transform: translate3d(0, 0, 0);
+    transition: transform 0.3s ease;
+    z-index: 1050;
+    display: flex;
+    flex-direction: column;
+    border-radius: 0 12px 12px 0;
+    border: 1px solid rgba(15, 23, 42, 0.08);
+}
+
+.side-panel-left {
+    left: 0;
+    transform: translateX(-105%);
+}
+
+.side-panel-right {
+    right: 0;
+    transform: translateX(105%);
+    border-radius: 12px 0 0 12px;
+}
+
+.side-panel.open {
+    transform: translateX(0);
+}
+
+.side-panel-header {
+    padding: 1rem 1.25rem;
+    border-bottom: 1px solid rgba(15, 23, 42, 0.08);
+}
+
+.side-panel-body {
+    padding: 1rem 1.25rem 2rem;
+    overflow-y: auto;
+    flex: 1 1 auto;
+}
+
+.side-panel .card {
+    border: 1px solid rgba(15, 23, 42, 0.08);
+    box-shadow: none;
+}
+
+.side-panel .card-header {
+    background: #f8fafc !important;
+    color: #1e293b !important;
+    border-bottom: 1px solid rgba(15, 23, 42, 0.08);
+}
+
+.side-panel .card-header .btn,
+.side-panel .card-header .config-card-toggle {
+    background-color: transparent !important;
+    border: none !important;
+    color: inherit !important;
+    box-shadow: none !important;
+}
+
+.side-panel .card-header .btn:hover,
+.side-panel .card-header .config-card-toggle:hover,
+.side-panel .card-header .config-card-toggle:focus {
+    color: #0d6efd !important;
+}
+
+#notificationsPanel .side-panel-body {
+    display: flex;
+    flex-direction: column;
+    overflow-y: hidden;
+}
+
+#notificationsPanel .side-panel-body > .mb-3 {
+    flex: 0 0 auto;
+}
+
+#notificationsPanel .notification-history-table {
+    flex: 1 1 auto;
+    overflow-y: auto;
+    max-height: none;
+}
+
+#notificationsPanel .notification-history-table.table-responsive {
+    height: 100%;
+}
+
+#notificationsPanel .notification-history-table table {
+    margin-bottom: 0;
+}
+
+.config-card-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    padding: 0.85rem 1.1rem;
+    font-weight: 600;
+    background: transparent;
+    border: none;
+    color: inherit;
+}
+
+.config-card-toggle:focus {
+    outline: none;
+}
+
+.config-card-toggle .toggle-icon {
+    transition: transform 0.2s ease;
+}
+
+.config-card-toggle:not(.collapsed) .toggle-icon {
+    transform: rotate(180deg);
+}
+
+.configuration-cards .card {
+    border-radius: 12px;
+    overflow: hidden;
+}
+
+.configuration-cards .card + .card {
+    margin-top: 1rem;
+}
+
+.page-header {
+    background: #ffffff;
+    border-radius: 14px;
+    padding: 0.9rem 1.5rem;
+    box-shadow: 0 18px 35px rgba(15, 23, 42, 0.08);
+    border: 1px solid rgba(15, 23, 42, 0.05);
+    gap: 1rem;
+    flex-wrap: wrap;
+}
+
+.page-header .page-title {
+    font-size: 1.4rem;
+    font-weight: 600;
+    color: #0f172a;
+}
+
+.page-header .side-panel-toggle {
+    background-color: transparent !important;
+    border-color: #0d6efd !important;
+    color: #0d6efd !important;
+    box-shadow: none !important;
+}
+
+.page-header .side-panel-toggle:hover,
+.page-header .side-panel-toggle:focus {
+    background-color: #0d6efd !important;
+    color: #ffffff !important;
+}
+
+.page-header .side-panel-toggle.active {
+    background-color: #0d6efd !important;
+    color: #ffffff !important;
+    box-shadow: 0 12px 25px rgba(13, 110, 253, 0.25) !important;
+}
+
+.panel-focus-highlight {
+    animation: panelFocusPulse 1.2s ease;
+}
+
+@keyframes panelFocusPulse {
+    0% {
+        box-shadow: 0 0 0 0 rgba(13, 110, 253, 0.35);
+    }
+    70% {
+        box-shadow: 0 0 0 12px rgba(13, 110, 253, 0);
+    }
+    100% {
+        box-shadow: 0 0 0 0 rgba(13, 110, 253, 0);
+    }
+}
+
+@media (max-width: 992px) {
+    .side-panel {
+        width: min(360px, 92vw);
+    }
+}
+
+@media (max-width: 768px) {
+    .side-panel {
+        width: 100%;
+        max-width: 100%;
+        border-radius: 0;
+    }
+
+    .side-panel-left,
+    .side-panel-right {
+        border-radius: 0;
+    }
+
+    .page-header {
+        padding: 0.8rem 1rem;
+    }
+}

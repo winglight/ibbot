@@ -17,14 +17,16 @@ import json
 from pathlib import Path
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Callable, Awaitable
 from loguru import logger
 from dotenv import load_dotenv
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, field
 import uuid
 import contextvars
 import time
 import re
+import inspect
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 
 # FastAPI imports
@@ -57,7 +59,6 @@ from src.models import (
 
 # Shared application services
 from core import (
-    ibkr_client,
     telegram_notifier,
     notification_manager,
     risk_manager,
@@ -65,6 +66,8 @@ from core import (
     queue_manager,
     websocket_manager,
     order_manager,
+    account_snapshot_service,
+    get_dom_service,
 )
 
 # Authentication and routers
@@ -79,13 +82,33 @@ from src.routes.notifications import router as notifications_router
 from src.routes.queue import router as queue_router
 from src.routes.logs import router as logs_router
 from src.routes.websocket import router as websocket_router
+from src.routes.dom import router as dom_router
+from src.data_layer import get_data_source_manager
 
 
 # Global variables
 load_dotenv()
 
+
+def _get_interval_env(name: str, default: int) -> int:
+    """Read a non-negative interval (seconds) from environment variables.
+
+    Falls back to ``default`` when the value is missing or invalid and clamps
+    negative values to zero so the caller can treat ``0`` as "no throttling".
+    """
+
+    try:
+        value = int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+    return max(0, value)
+
+
 # 优化：可配置的PnL广播间隔（秒），默认5秒
-PNL_BROADCAST_INTERVAL_SEC = int(os.getenv('PNL_BROADCAST_INTERVAL_SEC', '5'))
+PNL_BROADCAST_INTERVAL_SEC = _get_interval_env('PNL_BROADCAST_INTERVAL_SEC', 5)
+# 降低账户和持仓轮询频率，防止频繁命中IB限流
+ACCOUNT_BROADCAST_INTERVAL_SEC = _get_interval_env('ACCOUNT_BROADCAST_INTERVAL_SEC', 30)
+PORTFOLIO_BROADCAST_INTERVAL_SEC = _get_interval_env('PORTFOLIO_BROADCAST_INTERVAL_SEC', 15)
 
 # Context variables for request-scoped logging
 request_id_ctx: contextvars.ContextVar[str] = contextvars.ContextVar("request_id", default="-")
@@ -93,16 +116,20 @@ module_ctx: contextvars.ContextVar[str] = contextvars.ContextVar("module", defau
 
 
 # Timezone helpers
-LOCAL_TZ = datetime.now().astimezone().tzinfo
+LOCAL_TZ = ZoneInfo("Asia/Shanghai")
 NY_TZ = ZoneInfo("America/New_York")
 
 
 
 def resolve_module(path: str) -> str:
     """Simple mapping from request path to module name."""
-    if path.startswith("/api/strategies/internal"):
-        return "internal_strategy"
+
     if path.startswith("/api/strategies"):
+        # All `/api/strategies` routes operate on internal strategies. The external
+        # webhook uses `/api/strategy`, so treat the plural form as internal to avoid
+        # logging confusion.
+        return "internal_strategy"
+    if path.startswith("/api/strategy"):
         return "external_strategy"
     if "/risk" in path:
         return "risk_rule"
@@ -114,64 +141,402 @@ def resolve_module(path: str) -> str:
         return "connection"
     return "general"
 
-# 临时创建FastAPI应用实例（稍后会用lifespan重新创建）
+@dataclass
+class ModuleHandle:
+    """Runtime handle returned by module start functions."""
+
+    name: str
+    tasks: List[asyncio.Task[Any]] = field(default_factory=list)
+    finalizers: List[Callable[[], Awaitable[None] | None]] = field(default_factory=list)
+
+
+@dataclass
+class ModuleDefinition:
+    """Declarative definition of a pluggable module."""
+
+    name: str
+    start: Callable[["ModuleRuntimeContext"], Awaitable[ModuleHandle]]
+    description: str = ""
+
+
+@dataclass
+class ModuleRuntimeContext:
+    """Context passed to module start functions."""
+
+    app: FastAPI
+    module_name: str
+    logger: Any
+    root_logger: Any
+
+
+class ModuleRegistry:
+    """Registry orchestrating module startup and shutdown."""
+
+    def __init__(self, root_logger):
+        self._root_logger = root_logger
+        self._definitions: "OrderedDict[str, ModuleDefinition]" = OrderedDict()
+        self._handles: List[ModuleHandle] = []
+
+    def register(self, definition: ModuleDefinition) -> None:
+        self._definitions[definition.name] = definition
+
+    def available_modules(self) -> List[str]:
+        return list(self._definitions.keys())
+
+    def resolve_enabled(self, raw: Optional[str]) -> List[str]:
+        if raw is None or not raw.strip():
+            return self.available_modules()
+
+        tokens = [token.strip() for token in raw.split(",") if token.strip()]
+        if not tokens:
+            return []
+
+        if any(token.upper() == "ALL" for token in tokens):
+            return self.available_modules()
+
+        unknown = [token for token in tokens if token not in self._definitions]
+        if unknown:
+            self._root_logger.warning(
+                f"Unknown modules in ENABLED_MODULES: {', '.join(unknown)}"
+            )
+
+        deduped: "OrderedDict[str, None]" = OrderedDict()
+        for token in tokens:
+            if token in self._definitions:
+                deduped.setdefault(token, None)
+        return list(deduped.keys())
+
+    async def start_modules(self, app: FastAPI, enabled: List[str]) -> None:
+        for name in enabled:
+            definition = self._definitions.get(name)
+            if definition is None:
+                continue
+
+            module_logger = self._root_logger.bind(module=name, request_id="-")
+            context = ModuleRuntimeContext(
+                app=app,
+                module_name=name,
+                logger=module_logger,
+                root_logger=self._root_logger,
+            )
+            try:
+                handle = await definition.start(context)
+            except Exception as exc:
+                module_logger.exception(f"Module {name} failed to start: {exc}")
+                handle = ModuleHandle(name=name)
+
+            if handle.name != name:
+                handle.name = name
+            self._handles.append(handle)
+
+    async def shutdown_modules(self) -> None:
+        for handle in reversed(self._handles):
+            for task in handle.tasks:
+                if not task.done():
+                    task.cancel()
+
+        for handle in reversed(self._handles):
+            for task in handle.tasks:
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                except Exception as exc:
+                    self._root_logger.warning(
+                        f"Background task shutdown warning ({handle.name}): {exc}"
+                    )
+
+        for handle in reversed(self._handles):
+            for finalizer in handle.finalizers:
+                try:
+                    result = finalizer()
+                    if inspect.isawaitable(result):
+                        await result
+                except asyncio.CancelledError:
+                    pass
+                except Exception as exc:
+                    self._root_logger.warning(
+                        f"Module shutdown warning ({handle.name}): {exc}"
+                    )
+
+        self._handles.clear()
+
+
+async def _module_auto_connect(context: ModuleRuntimeContext) -> ModuleHandle:
+    handle = ModuleHandle(name=context.module_name)
+    auto_connect = os.getenv('AUTO_CONNECT', 'False').lower() == 'true'
+
+    if not auto_connect:
+        context.logger.info("AUTO_CONNECT disabled; module idle.")
+        return handle
+
+    context.logger.info(
+        "AUTO_CONNECT enabled; scheduling IBKR connection attempt..."
+    )
+
+    async def async_auto_connect() -> None:
+        try:
+            loop = asyncio.get_event_loop()
+
+            def _connect_via_client() -> bool:
+                import core
+
+                if getattr(core, "ibkr_client", None) is None:
+                    core.ibkr_client = core.IBKRClient()
+                return core.ibkr_client.connect()
+
+            success = await loop.run_in_executor(None, _connect_via_client)
+            if not success:
+                context.logger.warning(
+                    "IBKR auto-connection failed. Continuing without connection..."
+                )
+                context.logger.info("You can connect later through the web interface.")
+            else:
+                context.logger.info("IBKR auto-connection successful!")
+                context.logger.info("IBKRClient initialized after auto-connect")
+
+        except Exception as exc:
+            context.logger.warning(f"Auto-connection failed: {exc}")
+            context.logger.info("You can connect later through the web interface.")
+
+    handle.tasks.append(
+        asyncio.create_task(async_auto_connect(), name="module-auto-connect")
+    )
+    return handle
+
+
+async def _module_data_subscriptions(context: ModuleRuntimeContext) -> ModuleHandle:
+    handle = ModuleHandle(name=context.module_name)
+
+    try:
+        get_data_source_manager()
+    except Exception as exc:
+        context.logger.warning(f"Data subscription manager initialisation warning: {exc}")
+    else:
+        context.logger.info("Data source manager initialised for subscriptions")
+
+    try:
+        dom_service = get_dom_service()
+    except Exception as exc:
+        context.logger.warning(f"DOM service unavailable for auto-start: {exc}")
+        return handle
+
+    try:
+        scheduled = dom_service.ensure_auto_start_worker()
+    except Exception as exc:
+        context.logger.warning(f"DOM auto-start scheduling warning: {exc}")
+        return handle
+
+    symbol = dom_service.auto_start_symbol
+    if scheduled:
+        if symbol:
+            context.logger.info(
+                "DOM auto-start worker scheduled for symbol {}",
+                symbol,
+            )
+        else:
+            context.logger.info("DOM auto-start worker scheduled (no default symbol configured)")
+    else:
+        if symbol:
+            context.logger.info(
+                "DOM auto-start worker already initialised for symbol {}",
+                symbol,
+            )
+        else:
+            context.logger.info("DOM auto-start disabled; no default symbol configured")
+
+    return handle
+
+async def _module_risk_manager(context: ModuleRuntimeContext) -> ModuleHandle:
+    handle = ModuleHandle(name=context.module_name)
+
+    try:
+        risk_manager.start()
+        context.logger.info("Risk manager started during application startup")
+    except Exception as exc:
+        context.logger.warning(f"Risk manager startup warning: {exc}")
+        return handle
+
+    def _shutdown_risk_manager() -> None:
+        try:
+            if getattr(risk_manager, 'scheduler', None) and risk_manager.scheduler.running:
+                risk_manager.scheduler.shutdown()
+                context.logger.info("Risk manager scheduler shutdown")
+        except Exception as exc:
+            context.logger.warning(f"Risk manager shutdown warning: {exc}")
+
+    handle.finalizers.append(_shutdown_risk_manager)
+    return handle
+
+
+async def _module_account_snapshot(context: ModuleRuntimeContext) -> ModuleHandle:
+    handle = ModuleHandle(name=context.module_name)
+
+    try:
+        account_snapshot_service.start()
+        context.logger.info("Account snapshot service started during application startup")
+    except Exception as exc:
+        context.logger.warning(
+            f"Account snapshot service startup warning: {exc}"
+        )
+        return handle
+
+    async def _stop_account_snapshot() -> None:
+        try:
+            await account_snapshot_service.stop()
+            context.logger.info("Account snapshot service stopped")
+        except Exception as exc:
+            context.logger.warning(
+                f"Account snapshot service shutdown warning: {exc}"
+            )
+
+    handle.finalizers.append(_stop_account_snapshot)
+    return handle
+
+
+async def _module_strategy_manager(context: ModuleRuntimeContext) -> ModuleHandle:
+    handle = ModuleHandle(name=context.module_name)
+
+    try:
+        strategy_manager.start()
+        context.logger.info("Strategy manager initialized during application startup")
+    except Exception as exc:
+        context.logger.warning(f"Strategy manager startup warning: {exc}")
+        return handle
+
+    async def _restore_data_push_states() -> None:
+        try:
+            await strategy_manager.restore_data_push_states()
+            context.logger.info("Strategy data push states restored after startup")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            context.logger.warning(
+                f"Deferred data push restoration failed: {exc}"
+            )
+
+    handle.tasks.append(
+        asyncio.create_task(
+            _restore_data_push_states(),
+            name="module-strategy-restore",
+        )
+    )
+
+    def _stop_strategy_manager() -> None:
+        try:
+            strategy_manager.stop()
+            context.logger.info("Strategy manager scheduler stopped")
+        except Exception as exc:
+            context.logger.warning(f"Strategy manager shutdown warning: {exc}")
+
+    handle.finalizers.append(_stop_strategy_manager)
+    return handle
+
+
+async def _module_queue_worker(context: ModuleRuntimeContext) -> ModuleHandle:
+    handle = ModuleHandle(name=context.module_name)
+    if getattr(core, "ibkr_client", None) is None:
+        try:
+            core.ibkr_client = core.IBKRClient()
+            context.logger.info("IBKRClient initialized for queue worker startup")
+        except Exception as exc:
+            context.logger.warning(f"IBKR client initialization warning: {exc}")
+            return handle
+
+    if getattr(core, "ibkr_client", None) is None:
+        context.logger.warning("Queue worker not started because IBKR client is unavailable")
+        return handle
+
+    try:
+        await queue_manager.start_worker()
+        context.logger.info("Queue worker started during application startup")
+    except Exception as exc:
+        context.logger.warning(f"Queue worker startup warning: {exc}")
+        return handle
+
+    async def _stop_queue_worker() -> None:
+        try:
+            await queue_manager.stop_worker()
+            context.logger.info("Queue worker stopped")
+        except Exception as exc:
+            context.logger.warning(f"Queue worker shutdown warning: {exc}")
+
+    handle.finalizers.append(_stop_queue_worker)
+    return handle
+
+
+def _build_module_registry(main_logger) -> ModuleRegistry:
+    registry = ModuleRegistry(main_logger)
+    registry.register(
+        ModuleDefinition(
+            name="auto_connect",
+            start=_module_auto_connect,
+            description="Attempt to connect to IBKR automatically using AUTO_CONNECT flag.",
+        )
+    )
+    registry.register(
+        ModuleDefinition(
+            name="data_subscriptions",
+            start=_module_data_subscriptions,
+            description="Initialise unified data subscriptions and DOM auto-start.",
+        )
+    )
+    registry.register(
+        ModuleDefinition(
+            name="risk_manager",
+            start=_module_risk_manager,
+            description="Start the risk manager scheduler.",
+        )
+    )
+    registry.register(
+        ModuleDefinition(
+            name="account_snapshot",
+            start=_module_account_snapshot,
+            description="Run the periodic account snapshot service.",
+        )
+    )
+    registry.register(
+        ModuleDefinition(
+            name="strategy_manager",
+            start=_module_strategy_manager,
+            description="Boot the strategy manager and restore push states.",
+        )
+    )
+    registry.register(
+        ModuleDefinition(
+            name="queue_worker",
+            start=_module_queue_worker,
+            description="Start the background queue worker for internal orders.",
+        )
+    )
+    return registry
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
-    auto_connect = os.getenv('AUTO_CONNECT', 'False').lower() == 'true'
     main_logger = get_module_logger("main")
-    
-    if auto_connect:
-        main_logger.info("Auto-connect enabled, will attempt to connect to IBKR asynchronously...")
-        
-        async def async_auto_connect():
-            try:
-                # Run connection in executor to avoid blocking
-                loop = asyncio.get_event_loop()
-                success = await loop.run_in_executor(None, connection_manager.connect)
-                if not success:
-                    main_logger.warning("IBKR auto-connection failed. Continuing without connection...")
-                    main_logger.info("You can connect later through the web interface.")
-                else:
-                    main_logger.info("IBKR auto-connection successful!")
-                    if core.ibkr_client is None:
-                        core.ibkr_client = core.IBKRClient()
-                        main_logger.info("IBKRClient initialized after auto-connect")
+    registry = _build_module_registry(main_logger)
 
-                    ibkr_client_local = core.ibkr_client
+    enabled_raw = os.getenv("ENABLED_MODULES", "ALL")
+    enabled_modules = registry.resolve_enabled(enabled_raw)
 
-                    # Update risk_manager with ibkr_client
-                    try:
-                        risk_manager.ibkr_client = ibkr_client_local
-                        main_logger.info("Risk manager ibkr_client updated with auto-connected client")
-                    except Exception as re_err:
-                        main_logger.warning(f"RiskManager ibkr_client update warning: {re_err}")
-
-                    # Update queue_manager dependencies
-                    try:
-                        queue_manager.set_dependencies(
-                            ibkr_client=ibkr_client_local,
-                            risk_manager=risk_manager,
-                            strategy_manager=strategy_manager,
-                            connection_manager=connection_manager,
-                            websocket_manager=websocket_manager,
-                            order_manager=order_manager,
-                        )
-                        main_logger.info("Queue manager dependencies updated after auto-connect")
-                    except Exception as dep_err:
-                        main_logger.warning(f"QueueManager set_dependencies warning: {dep_err}")
-            except Exception as e:
-                main_logger.warning(f"Auto-connection failed: {e}")
-                main_logger.info("You can connect later through the web interface.")
-        
-        # Schedule async connection to run in background
-        asyncio.create_task(async_auto_connect())
+    if enabled_modules:
+        main_logger.info(
+            "Starting modules: {}", ", ".join(enabled_modules)
+        )
     else:
-        main_logger.info("Auto-connect disabled. You can connect later through the web interface.")
-    
-    yield
-    # Shutdown
-    main_logger.info("Application shutting down...")
+        main_logger.warning(
+            "No modules enabled; the application will run without background workers."
+        )
+
+    await registry.start_modules(app, enabled_modules)
+
+    try:
+        yield
+    finally:
+        await registry.shutdown_modules()
+        main_logger.info("Application shutdown complete.")
+
 
 # 重新创建带有lifespan的FastAPI应用
 app = FastAPI(title="IBKR Trading Bot", version="1.0.0", lifespan=lifespan)
@@ -288,8 +653,6 @@ async def rapidoc_html_main():
         status_code=200,
     )
 
-# 自定义 OpenAPI：仅保留主服务分组
-
 def _ensure_tag(tags_list, name: str, description: str):
     if not any(t.get("name") == name for t in tags_list):
         tags_list.append({"name": name, "description": description})
@@ -355,15 +718,42 @@ app.openapi = custom_openapi
 # 启用GZip压缩，减小大文件(如 app.js)传输体积
 app.add_middleware(GZipMiddleware, minimum_size=1024)
 
+def _build_cors_origins() -> List[str]:
+    """Construct the list of allowed CORS origins.
+
+    The web UI and API are typically served from the same FastAPI process but
+    the exposed port is configurable through ``WEB_PORT``.  When the port is
+    changed (for example to 8005 as used in several deployment guides) the
+    hard-coded 8000 origins prevented browsers from calling the API because the
+    ``Origin`` header no longer matched the allow list.  Building the origin
+    list dynamically keeps local development behaviour intact while supporting
+    custom ports or hosts.
+    """
+
+    configured = os.getenv("CORS_ALLOW_ORIGINS")
+    if configured:
+        origins = [origin.strip() for origin in configured.split(",") if origin.strip()]
+        return origins or ["*"]
+
+    web_port = os.getenv("WEB_PORT", "8000").strip() or "8000"
+    web_host = os.getenv("WEB_HOST", "0.0.0.0").strip() or "0.0.0.0"
+
+    # Default localhost candidates plus the explicit host if it's not a wildcard.
+    host_candidates = ["localhost", "127.0.0.1"]
+    if web_host not in {"0.0.0.0", "::"}:
+        host_candidates.append(web_host)
+
+    origins: List[str] = []
+    for host in dict.fromkeys(host_candidates):  # Preserve order while deduplicating
+        origins.append(f"http://{host}:{web_port}")
+        origins.append(f"https://{host}:{web_port}")
+
+    return origins
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:8000",
-        "http://127.0.0.1:8000",
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "*"
-    ],
+    allow_origins=_build_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -385,15 +775,7 @@ app.include_router(notifications_router)
 app.include_router(queue_router)
 app.include_router(logs_router)
 app.include_router(websocket_router)
-app.include_router(market_data_router)
-app.include_router(account_router)
-app.include_router(orders_router)
-app.include_router(risk_router)
-app.include_router(strategy_router)
-app.include_router(notifications_router)
-app.include_router(queue_router)
-app.include_router(logs_router)
-app.include_router(websocket_router)
+app.include_router(dom_router)
 
 # Utility helpers
 
@@ -505,59 +887,15 @@ def check_environment() -> bool:
         ok = False
 
     return ok
-# CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 # 添加：全局任务引用用于定期广播账户与持仓（实时PnL展示）
 pnl_broadcast_task = None
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """应用生命周期管理"""
-    main_logger = get_module_logger("main")
-    
-    # 启动时的初始化
-    try:
-        # 在事件循环中启动 risk_manager
-        risk_manager.start()
-        main_logger.info("Risk manager started during application startup")
-    except Exception as e:
-        main_logger.warning(f"Risk manager startup warning: {e}")
-
-    try:
-        strategy_manager.start()
-        main_logger.info("Strategy manager started during application startup")
-    except Exception as e:
-        main_logger.warning(f"Strategy manager startup warning: {e}")
-
-    # 启动定期通过WebSocket广播账户与持仓信息（用于实时PnL展示）
-    # 现在使用异步调用，不会阻塞主线程
-    try:
-        global pnl_broadcast_task
-        if pnl_broadcast_task is None:
-            pnl_broadcast_task = asyncio.create_task(_pnl_broadcast_loop())
-            main_logger.info("Started PnL broadcast loop task with async calls")
-    except Exception as e:
-        main_logger.warning(f"Failed to start PnL broadcast loop: {e}")
-    
-    yield
-    
-    # 关闭时的清理
-    try:
-        if hasattr(risk_manager, 'scheduler') and risk_manager.scheduler.running:
-            risk_manager.scheduler.shutdown()
-            main_logger.info("Risk manager scheduler shutdown")
-    except Exception as e:
-        main_logger.warning(f"Risk manager shutdown warning: {e}")
 
 # 添加：定期通过WebSocket广播账户与持仓信息（用于实时PnL展示）
 async def _pnl_broadcast_loop():
+    last_account_fetch = 0.0
+    last_positions_fetch = 0.0
     try:
         while True:
             await asyncio.sleep(PNL_BROADCAST_INTERVAL_SEC)
@@ -565,11 +903,19 @@ async def _pnl_broadcast_loop():
             if not websocket_manager.connections:
                 continue
             try:
-                    # 仅在已连接且 ibkr_client 可用时运行
-                    if not connection_manager.is_connected() or 'ibkr_client' not in globals() or ibkr_client is None:
-                        continue
-                    account_info = None
-                    positions = None
+                # 仅在已连接且 ibkr_client 可用时运行
+                if not connection_manager.is_connected() or 'ibkr_client' not in globals() or ibkr_client is None:
+                    continue
+
+                now_monotonic = time.monotonic()
+                account_info = None
+                positions = None
+
+                should_fetch_account = (
+                    ACCOUNT_BROADCAST_INTERVAL_SEC == 0
+                    or now_monotonic - last_account_fetch >= ACCOUNT_BROADCAST_INTERVAL_SEC
+                )
+                if should_fetch_account:
                     try:
                         account_info = await asyncio.wait_for(
                             ibkr_client.get_account_info(),
@@ -577,6 +923,14 @@ async def _pnl_broadcast_loop():
                         )
                     except Exception:
                         account_info = None
+                    finally:
+                        last_account_fetch = now_monotonic
+
+                should_fetch_positions = (
+                    PORTFOLIO_BROADCAST_INTERVAL_SEC == 0
+                    or now_monotonic - last_positions_fetch >= PORTFOLIO_BROADCAST_INTERVAL_SEC
+                )
+                if should_fetch_positions:
                     try:
                         positions = await asyncio.wait_for(
                             ibkr_client.get_positions(fast=True),
@@ -584,16 +938,19 @@ async def _pnl_broadcast_loop():
                         )
                     except Exception:
                         positions = None
-                    if account_info is not None:
-                        await websocket_manager.broadcast({
-                            "type": "account_update",
-                            "account_info": account_info
-                        })
-                    if positions is not None:
-                        await websocket_manager.broadcast({
-                            "type": "position_update",
-                            "positions": positions
-                        })
+                    finally:
+                        last_positions_fetch = now_monotonic
+
+                if account_info is not None:
+                    await websocket_manager.broadcast({
+                        "type": "account_update",
+                        "account_info": account_info
+                    })
+                if positions is not None:
+                    await websocket_manager.broadcast({
+                        "type": "position_update",
+                        "positions": positions
+                    })
             except Exception as be:
                 logger.debug(f"PnL broadcast iteration error: {be}")
     except asyncio.CancelledError:
@@ -601,16 +958,6 @@ async def _pnl_broadcast_loop():
         pass
     except Exception as e:
         logger.warning(f"PnL broadcast loop error: {e}")
-
-# 实时行情推送任务
-# Strategy APIs
-
-# Queue Management APIs
-
-# Strategy Executions API
-# Notifications API
-# System Logs API (kept for general debugging)
-
 
 def main():
     """Main application entry point"""
@@ -642,8 +989,8 @@ def main():
         import uvicorn
         uvicorn.run(
             app,
-            host=os.getenv('WEB_HOST', '0.0.0.0'),
-            port=int(os.getenv('WEB_PORT', '8000')),
+            host=web_host,
+            port=web_port,
             log_level="warning"  # 减少HTTP请求日志显示
         )
         

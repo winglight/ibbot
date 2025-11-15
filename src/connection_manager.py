@@ -1,7 +1,15 @@
 from typing import Optional, Dict, Any
+from datetime import datetime
 from dataclasses import dataclass
-from ib_insync import IB, util, ExecutionFilter
+
+try:  # pragma: no cover - exercised indirectly when ib_insync is missing
+    from ib_insync import IB, util, ExecutionFilter
+except ImportError:  # pragma: no cover - fallback for test environments
+    from test.ib_insync_stub import IB, util, ExecutionFilter
 from loguru import logger
+
+from .utils import now_local
+from .restart_utils import restart_program
 
 # 为connection模块创建专用logger
 connection_logger = logger.bind(module="connection", request_id="-")
@@ -12,6 +20,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 import types
+import subprocess
+from pathlib import Path
 
 
 load_dotenv()
@@ -35,6 +45,37 @@ def _get_env_int(key: str, default: int) -> int:
         except Exception:
             pass
         return int(default)
+
+
+def _get_env_float(key: str, default: float) -> float:
+    val = os.getenv(key)
+    if val is None or val == "":
+        return float(default)
+    try:
+        cleaned = val.split('#', 1)[0].strip()
+        return float(cleaned)
+    except Exception:
+        try:
+            connection_logger.warning(f"Invalid float for {key}='{val}', falling back to {default}")
+        except Exception:
+            pass
+        return float(default)
+
+
+def _get_env_bool(key: str, default: bool) -> bool:
+    val = os.getenv(key)
+    if val is None:
+        return bool(default)
+
+    try:
+        cleaned = val.split('#', 1)[0].strip().lower()
+    except Exception:
+        return bool(default)
+
+    if cleaned == "":
+        return bool(default)
+
+    return cleaned in {"1", "true", "yes", "y", "on"}
 
 @dataclass
 class ConnectionConfig:
@@ -75,6 +116,57 @@ class ConnectionManager:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         # 最近一次连接错误（用于快速失败）
         self._last_connect_error: Optional[str] = None
+        self._failed_connect_attempts: int = 0
+        self._max_failed_connect_attempts: int = max(0, _get_env_int('IBKR_MAX_CONNECT_RETRIES', 0))
+        self._restart_delay_sec: float = max(0.0, _get_env_float('IBKR_RESTART_DELAY_SEC', 0.0))
+        self._restart_pending: bool = False
+        self._connect_attempt_lock = threading.Lock()
+        self._connect_state_lock = threading.Lock()
+        self._connect_state_cond = threading.Condition(self._connect_state_lock)
+        self._connect_in_progress = False
+        self._connect_attempt_started_at: Optional[float] = None
+        self._connect_wait_limit_sec: float = max(
+            1.0, _get_env_float("IBKR_CONNECT_WAIT_LIMIT_SEC", 8.0)
+        )
+        self._project_root = Path(__file__).resolve().parents[1]
+        self._pre_restart_script = self._project_root / "vps-setup" / "quick-start.sh"
+        self._pre_restart_attempted = False
+        self._process_restart_enabled = _get_env_bool("IBKR_ENABLE_PROCESS_RESTART", False)
+        self._restart_suppressed_logged = False
+        self._loop_timeout_warning_interval = max(
+            0.1, _get_env_float("IBKR_LOOP_TIMEOUT_WARNING_INTERVAL_SEC", 5.0)
+        )
+        self._last_loop_timeout_warning = 0.0
+        self._loop_timeout_warning_suppressed = 0
+        # Weak reference back to IBKRClient (assigned during IBKRClient initialisation)
+        self._ibkr_client_ref = None  # type: ignore[attr-defined]
+        self._ibkr_connect_in_progress = False
+
+    def _notify_ibkr_client_connected(self, *, external: bool) -> None:
+        """Inform ``IBKRClient`` when a connection succeeds outside its control."""
+
+        ref = getattr(self, "_ibkr_client_ref", None)
+        if ref is None:
+            return
+
+        try:
+            client = ref()  # type: ignore[operator]
+        except Exception:
+            client = None
+
+        if not client:
+            return
+
+        try:
+            client._on_connection_manager_connected(external=external)  # type: ignore[attr-defined]
+        except AttributeError:
+            # Older ``IBKRClient`` versions will simply not receive the callback.
+            return
+        except Exception as exc:  # pragma: no cover - defensive guard
+            connection_logger.debug(
+                "IBKR client notification after connect failed",
+                error=str(exc),
+            )
         
     def update_config(self, config: ConnectionConfig) -> None:
         """更新连接配置"""
@@ -84,6 +176,97 @@ class ConnectionManager:
         
         self.config = config
         connection_logger.info(f"Connection config updated: {config.to_dict()}")
+
+    def _patch_wrapper_depth_guard(self, wrapper: Any) -> None:
+        """防止ib_insync深度更新触发IndexError导致崩溃"""
+
+        if not wrapper or not hasattr(wrapper, "updateMktDepthL2"):
+            return
+
+        update_method = getattr(wrapper.updateMktDepthL2, "__func__", wrapper.updateMktDepthL2)
+        if getattr(update_method, "__ibbot_depth_guard__", False):
+            return
+
+        try:
+            from ib_insync.objects import DOMLevel, MktDepthData
+        except Exception as exc:  # pragma: no cover - defensive guard
+            connection_logger.debug(f"Skipping depth guard patch (missing DOM classes): {exc}")
+            return
+
+        orig_update = wrapper.updateMktDepthL2
+
+        def safe_update(self_wrapped, reqId, position, marketMaker, operation, side, price, size, isSmartDepth=False):
+            ticker = None
+            try:
+                ticker = self_wrapped.reqId2Ticker.get(reqId)
+            except Exception:
+                ticker = None
+
+            if ticker is not None:
+                dom = ticker.domBids if side else ticker.domAsks
+                if operation == 1 and position >= len(dom):
+                    missing = position - len(dom) + 1
+                    if missing > 0:
+                        try:
+                            dom.extend(DOMLevel(price, 0.0, marketMaker) for _ in range(missing))
+                        except Exception:
+                            dom.extend([DOMLevel(price, 0.0, marketMaker)] * missing)
+                    try:
+                        dom[position] = DOMLevel(price, size, marketMaker)
+                    except Exception as assign_error:  # pragma: no cover - extremely unlikely
+                        connection_logger.debug(
+                            "Depth guard assignment failed",
+                            req_id=reqId,
+                            position=position,
+                            side=side,
+                            error=str(assign_error),
+                        )
+                        return
+                    tick = MktDepthData(
+                        self_wrapped.lastTime,
+                        position,
+                        marketMaker,
+                        operation,
+                        side,
+                        price,
+                        size,
+                    )
+                    ticker.domTicks.append(tick)
+                    try:
+                        self_wrapped.pendingTickers.add(ticker)
+                    except Exception:
+                        pass
+                    return
+
+                if operation == 2 and position >= len(dom):
+                    connection_logger.debug(
+                        "Ignoring depth delete beyond bounds",
+                        req_id=reqId,
+                        position=position,
+                        side=side,
+                    )
+                    return
+
+            try:
+                return orig_update(reqId, position, marketMaker, operation, side, price, size, isSmartDepth)
+            except IndexError as exc:  # pragma: no cover - defensive fallback
+                connection_logger.warning(
+                    "Depth update raised IndexError even after guard",
+                    req_id=reqId,
+                    position=position,
+                    side=side,
+                    operation=operation,
+                    error=str(exc),
+                )
+                return None
+
+        safe_update.__ibbot_depth_guard__ = True
+        wrapper.updateMktDepthL2 = types.MethodType(safe_update, wrapper)
+        try:
+            wrapper.updateMktDepth.__func__.__ibbot_depth_guard__ = True  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        connection_logger.debug("Patched ib_insync wrapper.updateMktDepthL2 to guard DOM depth indexes")
     
     def _connect_in_thread(self) -> bool:
         """在独立线程中连接到IBKR服务器"""
@@ -101,6 +284,7 @@ class ConnectionManager:
                 
                 # 创建新的IB实例
                 self.ib = IB()
+                self._patch_wrapper_depth_guard(self.ib.wrapper)
                 
                 # 尝试连接，如果客户端ID冲突则自动尝试其他ID
                 original_client_id = self.config.client_id
@@ -113,11 +297,15 @@ class ConnectionManager:
                     
                     try:
                         connection_logger.info(f"尝试连接IBKR，客户端ID: {try_client_id}")
-                        await self.ib.connectAsync(
-                            host=self.config.host,
-                            port=self.config.port,
-                            clientId=try_client_id,
-                            timeout=10
+                        # 使用asyncio.wait_for添加额外的超时保护
+                        await asyncio.wait_for(
+                            self.ib.connectAsync(
+                                host=self.config.host,
+                                port=self.config.port,
+                                clientId=try_client_id,
+                                timeout=15  # 减少内部超时
+                            ),
+                            timeout=17  # 外部超时保护
                         )
                                 # 验证连接是否真正建立
                         if self.ib.isConnected():
@@ -129,6 +317,10 @@ class ConnectionManager:
                             break
                         else:
                             raise Exception(f"连接建立失败 - 端口 {self.config.port} 不可达或TWS/Gateway未运行")
+                    except asyncio.TimeoutError:
+                        self._last_connect_error = f"连接超时 - 请检查TWS/Gateway是否启用API连接 (端口: {self.config.port})"
+                        connection_logger.error(f"客户端ID {try_client_id} 连接超时")
+                        raise Exception(self._last_connect_error)
                     except Exception as conn_error:
                         error_msg = str(conn_error)
                         if "already connected" in error_msg.lower() or "duplicate" in error_msg.lower():
@@ -193,7 +385,64 @@ class ConnectionManager:
                     def error_handler(reqId, errorCode, errorString, advancedOrderRejectJson=""):
                         """处理IBKR错误，特别是订单相关错误"""
                         connection_logger.info(f"IBKR Error - ReqId: {reqId}, Code: {errorCode}, Message: {errorString}")
-                        
+
+                        if errorCode in {2107, 2108}:
+                            connection_logger.info(
+                                f"IBKR data farm status {errorCode}: {errorString}"
+                            )
+                            client = None
+                            ref = getattr(self, "_ibkr_client_ref", None)
+                            if ref is not None:
+                                try:
+                                    client = ref()
+                                except Exception:
+                                    client = None
+                            if client is not None:
+                                try:
+                                    client.handle_data_farm_status(errorCode, errorString)
+                                except Exception as wake_err:  # pragma: no cover - defensive
+                                    connection_logger.debug(
+                                        f"Failed to schedule data farm wake-up: {wake_err}"
+                                    )
+                            return
+
+                        try:
+                            import core  # 延迟导入避免循环依赖
+
+                            snapshot_service = getattr(core, "account_snapshot_service", None)
+                            if snapshot_service:
+                                connection_loss_codes = {1100, 1300, 2103, 2105, 2110}
+                                connection_restore_codes = {1101, 1102, 1301, 2104, 2106, 2111}
+
+                                if errorCode in connection_loss_codes:
+                                    snapshot_service.flag_connection_loss(
+                                        errorString or f"IBKR error {errorCode}"
+                                    )
+                                elif errorCode in connection_restore_codes:
+                                    snapshot_service.request_immediate_refresh(
+                                        reason="connection_restored"
+                                    )
+                        except Exception as snapshot_err:  # pragma: no cover - 防御性日志
+                            connection_logger.debug(
+                                f"Snapshot service notification failed: {snapshot_err}"
+                            )
+
+                        if errorCode in {2103, 2105}:
+                            client = None
+                            ref = getattr(self, "_ibkr_client_ref", None)
+                            if ref is not None:
+                                try:
+                                    client = ref()
+                                except Exception:
+                                    client = None
+                            if client is not None:
+                                try:
+                                    client.handle_gateway_broken(errorCode, errorString)
+                                except Exception as notify_err:  # pragma: no cover - defensive
+                                    connection_logger.debug(
+                                        f"Failed to dispatch gateway-broken handler: {notify_err}"
+                                    )
+
                         # 检查是否是订单相关错误
                         if reqId and reqId > 0:  # reqId > 0 通常表示订单相关
                             # 常见的订单错误代码：
@@ -223,7 +472,8 @@ class ConnectionManager:
                             if is_order_error:
                                 connection_logger.error(f"Order {reqId} rejected - Code: {errorCode}, Reason: {errorString}")
                                 # 异步更新订单状态为失败
-                                asyncio.create_task(self._handle_order_error(reqId, errorCode, errorString))
+                                import core
+                                asyncio.create_task(core.ibkr_client._handle_order_error(reqId, errorCode, errorString))
                     
                         # 绑定错误处理器到wrapper
                     self.ib.wrapper.error = error_handler
@@ -232,17 +482,127 @@ class ConnectionManager:
                     # 添加订单状态变化事件监听器
                     def order_status_handler(trade):
                         """处理订单状态变化事件"""
-                        try:
-                            order_id = str(trade.order.orderId)
-                            status = trade.orderStatus.status
-                            connection_logger.info(f"Order status update: {order_id} -> {status}")
-                            
-                            # 如果订单已成交，处理佣金和PnL
-                            if status == 'Filled':
-                                asyncio.create_task(self._handle_order_filled(trade))
-                        except Exception as e:
-                            connection_logger.error(f"Error in order status handler: {e}")
-                    
+
+                        async def _process_order_status():
+                            try:
+                                order_id = str(trade.order.orderId)
+                                status = trade.orderStatus.status
+                                connection_logger.info(f"Order status update: {order_id} -> {status}")
+
+                                # 更新本地订单状态，确保手动市价单等及时同步
+                                try:
+                                    from .order_manager import get_order_manager
+                                    om = get_order_manager()
+                                    fill_price = getattr(trade.orderStatus, 'avgFillPrice', None)
+                                    executed_at = now_local() if status in ('Filled', 'PartiallyFilled') else None
+                                    updated = await asyncio.to_thread(
+                                        om.update_order_status,
+                                        order_id=order_id,
+                                        status=status,
+                                        fill_price=fill_price,
+                                        executed_at=executed_at,
+                                    )
+
+                                    if not updated:
+                                        try:
+                                            contract = getattr(trade, 'contract', None)
+                                            order_obj = getattr(trade, 'order', None)
+                                            symbol = (
+                                                getattr(contract, 'symbol', None)
+                                                or getattr(contract, 'localSymbol', None)
+                                                or getattr(order_obj, 'symbol', None)
+                                                or getattr(order_obj, 'localSymbol', '')
+                                            )
+                                            action = (getattr(order_obj, 'action', None) or '').upper()
+                                            quantity = getattr(order_obj, 'totalQuantity', 0) or 0
+                                            order_type = str(getattr(order_obj, 'orderType', None) or 'MKT').upper()
+                                            lmt_price = getattr(order_obj, 'lmtPrice', None)
+                                            aux_price = getattr(order_obj, 'auxPrice', None)
+                                            price_value = None
+                                            for candidate in (lmt_price, aux_price):
+                                                if isinstance(candidate, (int, float)) and candidate != 0:
+                                                    price_value = float(candidate)
+                                                    break
+
+                                            order_source = None
+
+                                            # 优先尝试从 RiskManager/OrderManager 中识别订单来源
+                                            try:
+                                                import core  # 延迟导入避免循环依赖
+
+                                                risk_manager = getattr(core, 'risk_manager', None)
+                                                if (risk_manager and
+                                                        hasattr(risk_manager, 'auto_orders') and
+                                                        order_id in risk_manager.auto_orders):
+                                                    auto_order = risk_manager.auto_orders.get(order_id)
+                                                    candidate = getattr(auto_order, 'order_source', None)
+                                                    if candidate:
+                                                        order_source = str(candidate)
+
+                                                if order_source is None:
+                                                    existing = om.get_order(order_id)
+                                                    if existing and getattr(existing, 'order_source', None):
+                                                        order_source = str(existing.order_source)
+                                            except Exception as detect_err:  # pragma: no cover - defensive
+                                                connection_logger.debug(
+                                                    f"Order source detection failed for {order_id}: {detect_err}"
+                                                )
+
+                                            # 如果仍未识别来源，再回退到 orderRef 的启发式判断
+                                            if not order_source:
+                                                order_source = 'manual'
+                                                order_ref = getattr(order_obj, 'orderRef', '')
+                                                if isinstance(order_ref, str) and order_ref:
+                                                    lower_ref = order_ref.lower()
+                                                    if 'tp' in lower_ref:
+                                                        order_source = 'tp'
+                                                    elif 'sl' in lower_ref:
+                                                        order_source = 'sl'
+                                                    elif ('auto' in lower_ref or
+                                                          'strategy' in lower_ref or
+                                                          'risk' in lower_ref):
+                                                        order_source = 'auto'
+
+                                            await asyncio.to_thread(
+                                                om.add_order,
+                                                {
+                                                    'order_id': order_id,
+                                                    'symbol': str(symbol or ''),
+                                                    'action': action,
+                                                    'quantity': int(quantity),
+                                                    'order_type': order_type,
+                                                    'price': price_value,
+                                                    'status': status or 'Submitted',
+                                                    'order_source': order_source,
+                                                    'exchange': str(getattr(contract, 'exchange', 'SMART') or 'SMART'),
+                                                    'sec_type': str(getattr(contract, 'secType', 'STK') or 'STK'),
+                                                    'fill_price': fill_price,
+                                                },
+                                            )
+
+                                            await asyncio.to_thread(
+                                                om.update_order_status,
+                                                order_id=order_id,
+                                                status=status,
+                                                fill_price=fill_price,
+                                                executed_at=executed_at,
+                                            )
+                                        except Exception as add_err:
+                                            connection_logger.warning(
+                                                f"Failed to record order {order_id} from status event: {add_err}"
+                                            )
+                                except Exception as e:
+                                    connection_logger.warning(f"OrderManager status update failed for {order_id}: {e}")
+
+                                # 如果订单已成交，处理佣金和PnL
+                                if status == 'Filled':
+                                    import core
+                                    asyncio.create_task(core.ibkr_client._handle_order_filled(trade))
+                            except Exception as e:
+                                connection_logger.error(f"Error in order status handler: {e}")
+
+                        asyncio.create_task(_process_order_status())
+
                     # 添加成交细节事件监听器（ib_insync: execDetailsEvent）
                     def exec_details_handler(trade, fill):
                         """处理订单成交明细事件（不含佣金报告）"""
@@ -263,7 +623,8 @@ class ConnectionManager:
                                 f"Commission report for order {order_id}: commission={commission}, pnl={pnl}"
                             )
                             # 异步更新订单的佣金和PnL
-                            asyncio.create_task(self._update_order_commission_pnl(order_id, commission, pnl))
+                            import core
+                            asyncio.create_task(core.ibkr_client._update_order_commission_pnl(order_id, commission, pnl))
                         except Exception as e:
                             connection_logger.error(f"Error in commission report handler: {e}")
                     
@@ -282,24 +643,80 @@ class ConnectionManager:
                 self.connected = True
                 account_type = "Paper" if self.config.paper_trading else "Live"
                 connection_logger.info(f"Connected to IBKR {account_type} account at {self.config.host}:{self.config.port}")
+
+                try:
+                    import core
+
+                    snapshot_service = getattr(core, "account_snapshot_service", None)
+                    if snapshot_service:
+                        snapshot_service.request_immediate_refresh(
+                            reason="connection_established"
+                        )
+                except Exception as notify_err:  # pragma: no cover - defensive logging
+                    connection_logger.debug(
+                        f"Failed to notify snapshot service after connect: {notify_err}"
+                    )
                 
                 # 保存事件循环引用
                 self._loop = loop
                 self._connection_thread_alive = True
-                
+                self._loop_timeout_warning_suppressed = 0
+                self._last_loop_timeout_warning = 0.0
+
+                try:
+                    external = not self._ibkr_connect_in_progress
+                except Exception:
+                    external = True
+                self._notify_ibkr_client_connected(external=external)
+
                 # 保持事件循环运行，直到明确要求断开连接
                 try:
                     while self._connection_thread_alive and self.ib.isConnected():
                         try:
-                            # 使用异步 sleep 避免阻塞事件循环
-                            await asyncio.sleep(0.1)
+                            # 使用异步 sleep 避免阻塞事件循环，添加超时保护
+                            await asyncio.wait_for(asyncio.sleep(0.1), timeout=1.0)
+                        except asyncio.TimeoutError:
+                            # 如果连sleep都超时，说明事件循环可能有问题
+                            now = time.monotonic()
+                            if now - self._last_loop_timeout_warning >= self._loop_timeout_warning_interval:
+                                if self._loop_timeout_warning_suppressed:
+                                    connection_logger.warning(
+                                        "Event loop sleep timeout, checking connection health "
+                                        f"(suppressed {self._loop_timeout_warning_suppressed} duplicates)"
+                                    )
+                                    self._loop_timeout_warning_suppressed = 0
+                                else:
+                                    connection_logger.warning(
+                                        "Event loop sleep timeout, checking connection health"
+                                    )
+                                self._last_loop_timeout_warning = now
+                            else:
+                                self._loop_timeout_warning_suppressed += 1
+                                connection_logger.debug(
+                                    "Event loop sleep timeout detected but warning suppressed",
+                                    suppressed=self._loop_timeout_warning_suppressed,
+                                )
+                            if not self.ib.isConnected():
+                                break
                         except RuntimeError as e:
                             if "Event loop stopped before Future completed" in str(e):
                                 connection_logger.debug("Event loop stopped signal received")
                                 break
                             raise
+                        except Exception as e:
+                            connection_logger.warning(f"Unexpected error in connection loop: {e}")
+                            # 继续循环，除非是严重错误
+                            if "cannot be called from a running event loop" in str(e):
+                                break
                 finally:
-                    # 不在这里批量取消任务，避免递归取消；仅记录日志
+                    # 确保连接状态正确设置
+                    if self.ib and self.ib.isConnected():
+                        try:
+                            self.ib.disconnect()
+                        except Exception as e:
+                            connection_logger.debug(f"Error during cleanup disconnect: {e}")
+                    self.connected = False
+                    self._connection_thread_alive = False
                     connection_logger.info("IBKR connection loop ended")
             
             except Exception as e:
@@ -325,9 +742,33 @@ class ConnectionManager:
             try:
                 # 在事件循环中创建任务并运行整个事件循环，避免 run_until_complete 在停止时抛错
                 task = loop.create_task(connect_worker())
-                loop.run_forever()
+                
+                # 设置事件循环超时，防止无限运行
+                def stop_loop_on_timeout():
+                    if not loop.is_running():
+                        return
+                    # 如果连接线程已经进入稳定运行状态，则不要强制停止事件循环
+                    if self._connection_thread_alive or self.connected:
+                        connection_logger.debug(
+                            "Event loop timeout guard triggered but connection thread is healthy; skipping stop"
+                        )
+                        return
+                    connection_logger.warning("Event loop timeout while waiting for connection; stopping loop")
+                    loop.call_soon_threadsafe(loop.stop)
+                
+                # 30秒后强制停止事件循环（如果还在运行）
+                timeout_timer = threading.Timer(30.0, stop_loop_on_timeout)
+                timeout_timer.start()
+                
+                try:
+                    loop.run_forever()
+                finally:
+                    timeout_timer.cancel()
+                    
             except Exception as e:
                 connection_logger.error(f"Event loop error: {e}")
+                # 设置错误状态，让主线程知道出现了问题
+                self._last_connect_error = f"Event loop error: {e}"
             finally:
                 # 确保任务能够正确完成，避免 "Task was destroyed but it is pending" 警告
                 try:
@@ -335,7 +776,7 @@ class ConnectionManager:
                         task.cancel()
                         # 给任务一点时间来响应取消
                         try:
-                            loop.run_until_complete(asyncio.wait_for(task, timeout=0.5))
+                            loop.run_until_complete(asyncio.wait_for(task, timeout=1.0))
                         except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
                             # 任务被取消或超时是正常的
                             pass
@@ -343,10 +784,20 @@ class ConnectionManager:
                     connection_logger.debug(f"Error during task cleanup: {e}")
                 finally:
                     try:
+                        # 确保所有待处理的任务都被取消
+                        pending_tasks = [t for t in asyncio.all_tasks(loop) if not t.done()]
+                        if pending_tasks:
+                            connection_logger.debug(f"Cancelling {len(pending_tasks)} pending tasks")
+                            for task in pending_tasks:
+                                task.cancel()
+                        
                         if not loop.is_closed():
                             loop.close()
                     except Exception as e:
                         connection_logger.debug(f"Error closing loop: {e}")
+                    finally:
+                        # 清理循环引用
+                        self._loop = None
         
         # 重置最近错误
         self._last_connect_error = None
@@ -355,24 +806,162 @@ class ConnectionManager:
         self._connection_thread = threading.Thread(target=run_worker, daemon=True)
         self._connection_thread.start()
         
-        # 等待连接建立或快速失败
-        max_wait = 12  # 将最大等待缩短，避免API超时
+        # 等待连接建立或快速失败，增加更强的超时保护
+        max_wait = 15  # 增加等待时间，但添加更多检查点
         wait_time = 0
+        check_interval = 0.1  # 更频繁的检查
+        
         while wait_time < max_wait:
-            time.sleep(0.2)
-            wait_time += 0.2
+            time.sleep(check_interval)
+            wait_time += check_interval
+            
             # 若连接成功
             if self.connected:
                 connection_logger.info("IBKR connection established successfully")
                 return True
+                
             # 若出现错误则立即失败返回
             if self._last_connect_error:
                 connection_logger.error(f"IBKR connection failed fast: {self._last_connect_error}")
+                # 确保清理连接线程
+                self._force_stop_connection_thread()
+                return False
+                
+            # 检查连接线程是否还活着
+            if not self._connection_thread or not self._connection_thread.is_alive():
+                connection_logger.error("Connection thread died unexpectedly")
+                self._last_connect_error = "Connection thread terminated unexpectedly"
                 return False
         
-        connection_logger.error("IBKR connection timeout")
+        # 超时处理
+        connection_logger.error(f"IBKR connection timeout after {max_wait} seconds")
+        self._last_connect_error = f"Connection timeout after {max_wait} seconds"
+        
+        # 强制停止连接线程，防止资源泄漏
+        self._force_stop_connection_thread()
         return False
-    
+
+    def _record_connect_result(self, success: bool) -> None:
+        if success:
+            with self._connect_attempt_lock:
+                self._failed_connect_attempts = 0
+                self._restart_pending = False
+                self._pre_restart_attempted = False
+            self._restart_suppressed_logged = False
+            return
+
+        if self._max_failed_connect_attempts <= 0:
+            return
+
+        with self._connect_attempt_lock:
+            self._failed_connect_attempts += 1
+            attempts = self._failed_connect_attempts
+            threshold = self._max_failed_connect_attempts
+
+        last_error = self._last_connect_error
+        if last_error:
+            connection_logger.warning(
+                f"IBKR connection attempt failed ({attempts}/{threshold}): {last_error}"
+            )
+        else:
+            connection_logger.warning(
+                f"IBKR connection attempt failed ({attempts}/{threshold})"
+            )
+
+        if attempts >= threshold:
+            self._trigger_restart(attempts, threshold)
+
+    def _trigger_restart(self, attempts: int, threshold: int) -> None:
+        restart_allowed = self._process_restart_enabled
+
+        with self._connect_attempt_lock:
+            if self._restart_pending:
+                return
+            if restart_allowed:
+                self._restart_pending = True
+
+        last_error = self._last_connect_error
+        reason = f"IBKR connect failed {attempts} times (threshold={threshold})"
+        if last_error:
+            reason = f"{reason}: {last_error}"
+
+        if not restart_allowed:
+            if not self._restart_suppressed_logged:
+                connection_logger.error(
+                    "Exceeded maximum IBKR connect retries but process restart is disabled; "
+                    "set IBKR_ENABLE_PROCESS_RESTART=true to re-enable automatic restarts."
+                )
+                self._restart_suppressed_logged = True
+            with self._connect_attempt_lock:
+                self._failed_connect_attempts = 0
+            return
+
+        self._run_pre_restart_script()
+
+        connection_logger.critical(
+            f"Exceeded maximum IBKR connect retries ({threshold}). Restarting application..."
+        )
+        if self._restart_delay_sec > 0:
+            connection_logger.info(
+                f"Restart scheduled after {self._restart_delay_sec:.2f} seconds"
+            )
+
+        env_updates = {
+            "IBKR_FAILED_CONNECT_ATTEMPTS": str(attempts),
+        }
+        if last_error:
+            env_updates["IBKR_LAST_CONNECT_ERROR"] = last_error
+
+        restart_program(
+            reason=reason,
+            delay_sec=self._restart_delay_sec,
+            env_updates=env_updates,
+        )
+
+    def _run_pre_restart_script(self) -> None:
+        with self._connect_attempt_lock:
+            if self._pre_restart_attempted:
+                return
+            self._pre_restart_attempted = True
+
+        script_path = self._pre_restart_script
+        if not script_path.exists():
+            connection_logger.warning(
+                f"Pre-restart script not found at {script_path}"
+            )
+            return
+
+        connection_logger.info(
+            f"Running pre-restart script prior to restart: {script_path}"
+        )
+        try:
+            result = subprocess.run(
+                ["/bin/bash", str(script_path)],
+                cwd=str(self._project_root),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=max(30, int(self._restart_delay_sec) + 30),
+                check=False,
+            )
+        except Exception as exc:
+            connection_logger.error(
+                f"Pre-restart script execution failed: {exc}"
+            )
+            return
+
+        stdout = (result.stdout or "").strip()
+        stderr = (result.stderr or "").strip()
+        if stdout:
+            connection_logger.info(f"Pre-restart script stdout: {stdout[:500]}")
+        if stderr:
+            connection_logger.warning(f"Pre-restart script stderr: {stderr[:500]}")
+
+        if result.returncode != 0:
+            connection_logger.error(
+                f"Pre-restart script exited with code {result.returncode}"
+            )
+
     def connect(self) -> bool:
         """连接到IBKR服务器"""
         # 检查当前连接是否使用相同配置
@@ -380,17 +969,104 @@ class ConnectionManager:
             # 如果配置发生变化，需要重新连接
             current_host = getattr(self.ib, 'host', None)
             current_port = getattr(self.ib, 'port', None)
-            if (current_host == self.config.host and 
+            if (current_host == self.config.host and
                 current_port == self.config.port):
                 connection_logger.info("Already connected to IBKR with same configuration")
+                self._record_connect_result(True)
                 return True
             else:
                 connection_logger.info("Configuration changed, reconnecting...")
                 self.disconnect()
-        
+
+        wait_logged = False
+        force_abort_existing = False
+        with self._connect_state_cond:
+            while self._connect_in_progress:
+                if not wait_logged:
+                    connection_logger.info("Another IBKR connection attempt is in progress; waiting for completion")
+                    wait_logged = True
+
+                # 如果等待期间连接已经建立，则直接返回
+                if self.connected and self.ib and self.ib.isConnected():
+                    connection_logger.info("IBKR connection became available while waiting for existing attempt")
+                    self._record_connect_result(True)
+                    return True
+
+                started_at = self._connect_attempt_started_at
+                if started_at is not None:
+                    elapsed = time.monotonic() - started_at
+                    if elapsed >= self._connect_wait_limit_sec:
+                        connection_logger.warning(
+                            "Existing IBKR connection attempt exceeded wait limit; forcing new attempt",
+                            elapsed_seconds=round(elapsed, 1),
+                            wait_limit=self._connect_wait_limit_sec,
+                        )
+                        self._connect_in_progress = False
+                        self._connect_attempt_started_at = None
+                        self._connect_state_cond.notify_all()
+                        force_abort_existing = True
+                        break
+
+                # 等待其他连接尝试完成
+                self._connect_state_cond.wait(timeout=1.0)
+
+            # 等待结束后再次检查连接状态，避免重复启动连接
+            if self.connected and self.ib and self.ib.isConnected():
+                connection_logger.info("IBKR connection completed while waiting")
+                self._record_connect_result(True)
+                return True
+
+            # 标记当前正在尝试连接，阻止其他线程同时发起连接
+            self._connect_in_progress = True
+            self._connect_attempt_started_at = time.monotonic()
+
+        if force_abort_existing:
+            self._force_stop_connection_thread()
+
         connection_logger.info("Connecting to IBKR...")
-        return self._connect_in_thread()
-    
+        success = False
+        try:
+            success = self._connect_in_thread()
+            return success
+        finally:
+            self._record_connect_result(success)
+            with self._connect_state_cond:
+                self._connect_in_progress = False
+                self._connect_attempt_started_at = None
+                self._connect_state_cond.notify_all()
+
+    def _force_stop_connection_thread(self) -> None:
+        thread = self._connection_thread
+        loop = self._loop
+
+        self._connection_thread_alive = False
+
+        if loop:
+            try:
+                loop.call_soon_threadsafe(loop.stop)
+            except Exception:
+                try:
+                    loop.stop()
+                except Exception:
+                    pass
+
+        if thread and thread.is_alive():
+            try:
+                thread.join(timeout=2.0)
+            except Exception:
+                pass
+
+        if self.ib:
+            try:
+                self.ib.disconnect()
+            except Exception:
+                pass
+
+        self.connected = False
+        self.ib = None
+        self._loop = None
+        self._connection_thread = None
+
     def disconnect(self) -> None:
         """断开与IBKR服务器的连接，并停止事件循环"""
         try:
@@ -426,6 +1102,17 @@ class ConnectionManager:
             self.ib = None
             self._loop = None
             self._connection_thread = None
+
+            try:
+                import core
+
+                snapshot_service = getattr(core, "account_snapshot_service", None)
+                if snapshot_service:
+                    snapshot_service.flag_connection_loss("disconnected")
+            except Exception as notify_err:  # pragma: no cover - defensive logging
+                connection_logger.debug(
+                    f"Failed to notify snapshot service on disconnect: {notify_err}"
+                )
         except Exception as e:
             connection_logger.error(f"Disconnect error: {e}")
 
@@ -434,26 +1121,48 @@ class ConnectionManager:
         if not self.ib:
             self.connected = False
             return False
-            
+
+        try:
+            # 优先使用 ib_insync 提供的 isConnected 方法，避免 connState 出现短暂不同步导致误判
+            if hasattr(self.ib, "isConnected") and self.ib.isConnected():
+                self.connected = True
+                return True
+        except Exception as exc:  # pragma: no cover - 容错保护
+            connection_logger.debug(f"ib.isConnected() check failed: {exc}")
+
         try:
             # 直接检查client的连接状态，避免调用可能阻塞的方法
             # ib_insync的client对象有connState属性：DISCONNECTED=0, CONNECTING=1, CONNECTED=2
-            if hasattr(self.ib, 'client') and self.ib.client:
-                # 直接检查连接状态常量，不调用任何方法
-                conn_state = getattr(self.ib.client, 'connState', 0)
-                is_connected = (conn_state == self.ib.client.CONNECTED)  # CONNECTED = 2
-                self.connected = is_connected
-                return is_connected
-            else:
-                # 如果没有client属性，说明未连接
-                self.connected = False
-                return False
-                
-        except Exception as e:
-            connection_logger.warning(f"Connection check failed: {e}")
+            client = getattr(self.ib, "client", None)
+            if client:
+                conn_state = getattr(client, "connState", 0)
+                connected_state = getattr(client, "CONNECTED", 2)
+                if conn_state == connected_state:  # CONNECTED = 2
+                    self.connected = True
+                    return True
+
+                # 如果处于连接中状态且之前判定为已连接，则保持连接状态，减少抖动
+                connecting_state = getattr(client, "CONNECTING", 1)
+                if conn_state == connecting_state and self.connected:
+                    return True
+
+                disconnected_state = getattr(client, "DISCONNECTED", 0)
+                if conn_state == disconnected_state:
+                    self.connected = False
+                    return False
+
+            # client 不存在时视为未连接
             self.connected = False
             return False
-    
+
+        except Exception as e:
+            connection_logger.warning(f"Connection check failed: {e}")
+            # 如果之前判定为已连接，保持结果，避免短暂错误导致的误判
+            if self.connected:
+                return True
+            self.connected = False
+            return False
+
     def get_last_connect_error(self) -> Optional[str]:
         """获取最近一次连接错误原因，便于对外展示更具体的失败信息"""
         try:
@@ -467,237 +1176,24 @@ class ConnectionManager:
             return self.ib
         return None
     
-    def get_account_info(self) -> Dict[str, Any]:
-        """获取账户信息"""
-        if not self.is_connected():
-            raise Exception("Not connected to IBKR")
-            
-        try:
-            account_values = self.ib.accountValues()
-            account_summary = self.ib.accountSummary()
-            
-            # 提取关键信息
-            info = {
-                'account_id': '',
-                'account_type': 'Paper' if self.config.paper_trading else 'Live',
-                'total_cash': 0.0,
-                'net_liquidation': 0.0,
-                'buying_power': 0.0
-            }
-            
-            # 从account_values中提取信息
-            for av in account_values:
-                if av.tag == 'AccountCode':
-                    info['account_id'] = av.value
-                elif av.tag == 'TotalCashValue' and av.currency == 'USD':
-                    info['total_cash'] = float(av.value)
-                elif av.tag == 'NetLiquidation' and av.currency == 'USD':
-                    info['net_liquidation'] = float(av.value)
-                elif av.tag == 'BuyingPower' and av.currency == 'USD':
-                    info['buying_power'] = float(av.value)
-            
-            return info
-            
-        except Exception as e:
-            connection_logger.error(f"Failed to get account info: {e}")
-            raise
     
-    async def _handle_order_error(self, req_id, error_code, error_string):
-        """处理订单错误，更新订单状态为失败"""
-        try:
-            from .order_manager import get_order_manager
-            from .models import OrderStatus
-            
-            # 记录错误信息
-            connection_logger.error(f"Order error - ReqId: {req_id}, Code: {error_code}, Message: {error_string}")
-            
-            # 从IBKRClient获取reqId到订单ID的映射
-            if hasattr(self, '_ibkr_client_ref') and self._ibkr_client_ref:
-                ibkr_client = self._ibkr_client_ref()
-                if ibkr_client and hasattr(ibkr_client, 'req_id_to_order_id'):
-                    order_id = ibkr_client.req_id_to_order_id.get(req_id)
-                    if order_id:
-                        # 更新订单状态为失败
-                        order_manager = get_order_manager()
-                        order_manager.update_order_status(
-                            order_id=order_id,
-                            status=OrderStatus.REJECTED.value,
-                            notes=f"IBKR Error {error_code}: {error_string}"
-                        )
-                        connection_logger.info(f"Updated order {order_id} status to REJECTED due to error {error_code}")
-                        
-                        # 清理映射
-                        del ibkr_client.req_id_to_order_id[req_id]
-                    else:
-                        connection_logger.warning(f"No order mapping found for reqId {req_id}")
-                else:
-                    connection_logger.warning(f"IBKRClient reference not available for error handling")
-            
-        except Exception as e:
-            connection_logger.error(f"Failed to handle order error: {e}")
-    
-    async def _handle_order_filled(self, trade):
-        """处理订单成交事件"""
-        try:
-            order_id = str(trade.order.orderId)
-            connection_logger.info(f"Handling filled order: {order_id}")
-            
-            # 获取佣金和PnL信息
-            total_commission = 0
-            total_pnl = 0
-            
-            for fill in trade.fills:
-                if hasattr(fill, 'commissionReport') and fill.commissionReport:
-                    total_commission += fill.commissionReport.commission
-                    if hasattr(fill.commissionReport, 'realizedPNL'):
-                        total_pnl += fill.commissionReport.realizedPNL or 0
-            
-            connection_logger.info(f"Order {order_id} commission: {total_commission}, pnl: {total_pnl}")
-            
-            # 更新数据库中的订单信息
-            await self._update_order_commission_pnl(order_id, total_commission, total_pnl)
-            
-        except Exception as e:
-            connection_logger.error(f"Error handling filled order: {e}")
-    
-    async def _update_order_commission_pnl(self, order_id, commission, pnl):
-        """更新订单的佣金和PnL到数据库并同步内存对象"""
-        try:
-            from .database import get_db_manager
-            
-            db = get_db_manager()
-            oid = str(order_id)
-            await db.update_order_commission_pnl(oid, commission, pnl)
-            connection_logger.info(f"Updated order {oid} commission={commission}, pnl={pnl} in database")
-
-            # 同步内存中的订单（如果存在）
-            try:
-                from .order_manager import get_order_manager
-                om = get_order_manager()
-                oid = str(order_id)
-                order = om.orders.get(oid)
-                if order:
-                    prev_comm, prev_pnl = order.commission, order.pnl
-                    if commission is not None:
-                        order.commission = commission
-                    if pnl is not None:
-                        order.pnl = pnl
-                    connection_logger.debug(
-                        f"Synchronized in-memory order {oid} commission: {prev_comm} -> {order.commission}, pnl: {prev_pnl} -> {order.pnl}"
-                    )
-                else:
-                    connection_logger.debug(f"In-memory order {oid} not found for commission/pnl sync")
-            except Exception as sync_err:
-                connection_logger.debug(f"Failed to sync in-memory order commission/pnl: {sync_err}")
-            
-            # 将最新的佣金和PnL更新通过 WebSocket 广播给前端，触发订单列表刷新
-            try:
-                from .websocket_manager import websocket_manager
-                message = {
-                    "type": "order_update",
-                    "order_id": oid,
-                    "commission": commission,
-                    "pnl": pnl,
-                }
-                # 如果拿到了内存中的订单对象，补充更多字段（与 order_filled 事件保持一致的结构）
-                if 'order' in locals() and order:
-                    message.update({
-                        "symbol": getattr(order, 'symbol', None),
-                        "action": getattr(order, 'action', None),
-                        "quantity": getattr(order, 'quantity', None),
-                        "fill_price": getattr(order, 'fill_price', None),
-                        "order_type": getattr(order, 'order_type', None),
-                        "executed_at": order.executed_at.isoformat() if getattr(order, 'executed_at', None) else None,
-                    })
-                await websocket_manager.broadcast(message)
-                connection_logger.info(f"Broadcasted order_update for order {oid} (commission={commission}, pnl={pnl})")
-            except Exception as ws_err:
-                connection_logger.warning(f"Failed to broadcast order_update for order {oid}: {ws_err}")
-            
-        except Exception as e:
-            connection_logger.error(f"Error updating order commission/pnl in database: {e}")
-    
-    def backfill_commissions(self, days: int = 7) -> int:
-        """Backfill commission and PnL for recent executions by requesting executions from IBKR.
-        This will not override existing non-null commission/pnl in DB thanks to COALESCE guards.
-        Returns the number of update attempts made.
-        """
-        try:
-            if not self.ib or not self.ib.isConnected():
-                connection_logger.error("Cannot backfill commissions: IB not connected")
-                return 0
-
-            import datetime as _dt
-
-            async def _backfill_op():
-                try:
-                    ib_local = self.ib
-                    # Compute start time for the execution filter (local time, format YYYYMMDD-HH:MM:SS)
-                    start_dt = _dt.datetime.now() - _dt.timedelta(days=max(1, int(days)))
-                    # IB API expects a hyphen between date and time, e.g. 20250131-13:45:00
-                    start_str = start_dt.strftime('%Y%m%d-%H:%M:%S')
-
-                    # Request executions; this will also trigger commissionReport events
-                    filt = ExecutionFilter(time=start_str)
-                    connection_logger.info(f"Requesting executions since {start_str} for backfilling commissions/PnL")
-                    try:
-                        await ib_local.reqExecutionsAsync(filt)
-                    except Exception as e:
-                        connection_logger.warning(f"reqExecutionsAsync failed: {e}; trying sync fallback")
-                        try:
-                            ib_local.reqExecutions(filt)
-                        except Exception as e2:
-                            connection_logger.error(f"Sync reqExecutions failed: {e2}")
-                            return 0
-
-                    # Allow some time for commission reports to arrive and pair with executions
-                    await asyncio.sleep(1.5)
-
-                    fills = ib_local.fills()
-                    if not fills:
-                        connection_logger.info("No fills returned from IBKR for the specified window")
-                        return 0
-
-                    update_count = 0
-                    for fill in fills:
-                        try:
-                            # Prefer commissionReport attached to fill
-                            cr = getattr(fill, 'commissionReport', None)
-                            exec_obj = getattr(fill, 'execution', None)
-                            if cr and exec_obj and hasattr(exec_obj, 'orderId'):
-                                order_id = str(exec_obj.orderId)
-                                commission = cr.commission
-                                pnl = getattr(cr, 'realizedPNL', None)
-                                connection_logger.debug(
-                                    f"Backfill commission report for order {order_id}: commission={commission}, pnl={pnl}"
-                                )
-                                # Use the same updater which syncs DB and in-memory order
-                                await self._update_order_commission_pnl(order_id, commission, pnl)
-                                update_count += 1
-                        except Exception as inner_e:
-                            connection_logger.warning(f"Failed to process a fill during backfill: {inner_e}")
-
-                    connection_logger.info(f"Backfill completed. Updates attempted: {update_count}")
-                    return update_count
-                except Exception as e:
-                    connection_logger.error(f"Backfill operation failed: {e}")
-                    return 0
-
-            result = self.run_async_in_connection_thread(_backfill_op())
-            try:
-                return int(result or 0)
-            except Exception:
-                return 0
-        except Exception as e:
-            connection_logger.error(f"Backfill commissions wrapper error: {e}")
-            return 0
 
     def get_config(self) -> ConnectionConfig:
         """获取当前配置"""
         return self.config
     
-    def run_in_connection_thread(self, func, *args, **kwargs):
-        """在连接线程的事件循环中执行同步函数，跨线程安全调度并等待结果。"""
+    def run_in_connection_thread(
+        self,
+        func,
+        *args,
+        timeout: Optional[float] = 60.0,
+        **kwargs,
+    ):
+        """在连接线程的事件循环中执行同步函数，跨线程安全调度并等待结果。
+
+        ``timeout`` 参数允许调用者为等待连接线程执行结果设置自定义超时时间，
+        从而避免在底层 API 卡住时长时间阻塞调用方的协程。
+        """
         try:
             loop = self._loop
             if not loop or loop.is_closed():
@@ -731,10 +1227,34 @@ class ConnectionManager:
                 connection_logger.error(f"Failed to schedule function on connection loop: {e}")
                 return None
 
+            wait_for: Optional[float]
+            if timeout is None:
+                wait_for = None
+            else:
+                try:
+                    wait_for = float(timeout)
+                except (TypeError, ValueError):
+                    wait_for = 60.0
+                    connection_logger.debug(
+                        "Invalid timeout %r provided to run_in_connection_thread; falling back to 60s",
+                        timeout,
+                    )
+                else:
+                    if wait_for <= 0:
+                        wait_for = 60.0
+
             try:
-                return result_future.result(timeout=60)
+                return result_future.result(timeout=wait_for)
             except concurrent.futures.TimeoutError:
-                connection_logger.error("Execution in connection thread timed out after 60 seconds")
+                if wait_for is None:
+                    connection_logger.error(
+                        "Execution in connection thread timed out with no limit"
+                    )
+                else:
+                    connection_logger.error(
+                        "Execution in connection thread timed out after %.1f seconds",
+                        wait_for,
+                    )
                 return None
             except Exception as e:
                 connection_logger.error(f"Execution in connection thread raised error: {e}")

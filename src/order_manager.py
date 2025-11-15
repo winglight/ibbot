@@ -2,10 +2,11 @@
 将原有的 auto_orders 表重构为 orders 表，支持完整的订单生命周期管理
 """
 
+import asyncio
 import sqlite3
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Awaitable
 from datetime import datetime, timedelta
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, fields
 from enum import Enum
 from loguru import logger
 import re
@@ -13,7 +14,16 @@ import re
 order_logger = logger.bind(module="order_manager", request_id="-")
 
 from .database import get_db_manager
-
+from .utils import (
+    ensure_local_timezone,
+    now_local,
+    parse_local_datetime,
+    to_local_iso,
+)
+from .utils.strategy_cache import record_filled_order as cache_record_filled_order
+from .utils.account_pnl_cache import (
+    record_account_fill as cache_record_account_fill,
+)
 
 class OrderStatus(Enum):
     """订单状态枚举"""
@@ -67,12 +77,11 @@ class Order:
     pnl: Optional[float] = None  # 新增：订单盈亏（来自IB API）
     # 新增：软删除标记，防止被 IBKR 同步重新创建
     is_deleted: int = 0
-    
+
     def __post_init__(self):
-        if self.created_at is None:
-            self.created_at = datetime.now()
-        if self.updated_at is None:
-            self.updated_at = self.created_at
+        self.created_at = ensure_local_timezone(self.created_at) or now_local()
+        self.updated_at = ensure_local_timezone(self.updated_at) or self.created_at
+        self.executed_at = ensure_local_timezone(self.executed_at)
 
 
 class OrderManager:
@@ -103,9 +112,8 @@ class OrderManager:
     def _initialize_database(self):
         """初始化数据库表结构"""
         try:
-            with sqlite3.connect(self.db_manager.db_path) as conn:
-                cursor = conn.cursor()
-                
+            with self.db_manager.cursor() as cursor:
+
                 # 创建新的 orders 表
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS orders (
@@ -133,13 +141,31 @@ class OrderManager:
                     )
                 """)
                 
-                # 兼容老库：缺失 is_deleted 列则补齐
+                # 兼容老库：缺失列则补齐
                 cursor.execute("PRAGMA table_info('orders')")
                 cols = [row[1] for row in cursor.fetchall()]
-                if 'is_deleted' not in cols:
-                    cursor.execute("ALTER TABLE orders ADD COLUMN is_deleted INTEGER DEFAULT 0")
-                    order_logger.info("Added is_deleted column to orders table")
-                
+
+                # 需要确保存在的字段（旧库可能缺失）
+                required_columns = {
+                    'executed_at': "TEXT",
+                    'fill_price': "REAL",
+                    'order_source': "TEXT DEFAULT 'manual'",
+                    'strategy_name': "TEXT",
+                    'rule_id': "TEXT",
+                    'parent_order_id': "TEXT",
+                    'exchange': "TEXT DEFAULT 'SMART'",
+                    'sec_type': "TEXT DEFAULT 'STK'",
+                    'notes': "TEXT",
+                    'commission': "REAL",
+                    'pnl': "REAL",
+                    'is_deleted': "INTEGER DEFAULT 0",
+                }
+
+                for column_name, column_def in required_columns.items():
+                    if column_name not in cols:
+                        cursor.execute(f"ALTER TABLE orders ADD COLUMN {column_name} {column_def}")
+                        order_logger.info(f"Added missing column '{column_name}' to orders table")
+
                 # 检查是否需要从 auto_orders 迁移数据
                 cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='auto_orders'")
                 auto_orders_exists = cursor.fetchone() is not None
@@ -180,18 +206,138 @@ class OrderManager:
                     cursor.execute("ALTER TABLE orders ADD COLUMN pnl REAL")
                     order_logger.info("Added pnl column to orders table")
                 
-                conn.commit()
                 order_logger.info("Orders table initialized successfully")
                 
         except Exception as e:
             order_logger.error(f"Error initializing orders database: {e}")
             raise
 
+    def _row_to_order(self, row: tuple) -> Optional[Order]:
+        """将数据库行转换为 ``Order`` 对象并更新内存缓存。"""
+        if row[20]:
+            # 软删除的订单，记录其ID用于去重，避免IBKR重新创建
+            self.deleted_order_ids.add(row[0])
+            return None
+
+        order = Order(
+            order_id=row[0],
+            symbol=row[1],
+            action=row[2],
+            quantity=row[3],
+            order_type=row[4],
+            price=row[5],
+            status=row[6] or OrderStatus.SUBMITTED.value,
+            created_at=parse_local_datetime(row[7]) or now_local(),
+            updated_at=parse_local_datetime(row[8]) or None,
+            executed_at=parse_local_datetime(row[9]),
+            fill_price=row[10],
+            order_source=row[11] or OrderSource.MANUAL.value,
+            strategy_name=row[12],
+            rule_id=row[13],
+            parent_order_id=row[14],
+            exchange=row[15] or "SMART",
+            sec_type=row[16] or "STK",
+            notes=row[17],
+            commission=row[18],
+            pnl=row[19],
+            is_deleted=0
+        )
+        self.orders[order.order_id] = order
+        return order
+
+    def _ensure_order_cached(self, order_id: str) -> Optional[Order]:
+        """确保指定订单已加载到内存缓存。"""
+
+        existing = self.orders.get(order_id)
+        if existing is not None:
+            return existing
+
+        try:
+            with self.db_manager.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT order_id, symbol, action, quantity, order_type, price,
+                           status, created_at, updated_at, executed_at, fill_price,
+                           order_source, strategy_name, rule_id, parent_order_id,
+                           exchange, sec_type, notes, commission, pnl, is_deleted
+                    FROM orders
+                    WHERE order_id = ?
+                    LIMIT 1
+                    """,
+                    (order_id,),
+                )
+                row = cursor.fetchone()
+            if row:
+                return self._row_to_order(row)
+        except Exception as exc:
+            order_logger.error(f"Failed to load order {order_id} from database: {exc}")
+        return None
+
+    def _fetch_orders_from_database(self,
+                                    limit: Optional[int] = None,
+                                    start_date: Optional[datetime] = None,
+                                    offset: Optional[int] = None,
+                                    return_total: bool = False) -> Any:
+        """按需从数据库获取订单，避免全量加载导致的性能问题。
+
+        当 ``return_total`` 为 ``True`` 时，同时返回符合条件的总记录数。
+        """
+        try:
+            with self.db_manager.cursor() as cursor:
+                base_query = """
+                    FROM orders
+                    WHERE is_deleted = 0
+                """
+                params: List[Any] = []
+
+                if start_date:
+                    start_dt = ensure_local_timezone(start_date)
+                    base_query += " AND created_at >= ?"
+                    params.append(start_dt.isoformat())
+
+                count_total: Optional[int] = None
+                if return_total:
+                    count_query = "SELECT COUNT(*) " + base_query
+                    cursor.execute(count_query, list(params))
+                    row = cursor.fetchone()
+                    count_total = int(row[0]) if row and row[0] is not None else 0
+
+                query = "SELECT order_id, symbol, action, quantity, order_type, price, " \
+                        "status, created_at, updated_at, executed_at, fill_price, " \
+                        "order_source, strategy_name, rule_id, parent_order_id, " \
+                        "exchange, sec_type, notes, commission, pnl, is_deleted " + base_query + " ORDER BY created_at DESC"
+
+                query_params: List[Any] = list(params)
+
+                if limit:
+                    query += " LIMIT ?"
+                    query_params.append(limit)
+                elif offset and offset > 0:
+                    query += " LIMIT -1"
+
+                if offset and offset > 0:
+                    query += " OFFSET ?"
+                    query_params.append(offset)
+
+                cursor.execute(query, query_params)
+                rows = cursor.fetchall()
+
+            orders: List[Order] = []
+            for row in rows:
+                order = self._row_to_order(row)
+                if order:
+                    orders.append(order)
+            if return_total:
+                return orders, (count_total or 0)
+            return orders
+        except Exception as e:
+            order_logger.error(f"Error fetching orders from database: {e}")
+            raise
+
     def _load_orders_from_database(self):
         """从数据库加载订单到内存"""
         try:
-            with sqlite3.connect(self.db_manager.db_path) as conn:
-                cursor = conn.cursor()
+            with self.db_manager.cursor() as cursor:
                 cursor.execute("""
                     SELECT order_id, symbol, action, quantity, order_type, price,
                            status, created_at, updated_at, executed_at, fill_price,
@@ -200,45 +346,18 @@ class OrderManager:
                     FROM orders
                     ORDER BY created_at DESC
                 """)
-                
+
                 rows = cursor.fetchall()
-                
+
                 for row in rows:
-                    if row[20]:  # is_deleted字段现在是第20个（索引19）
-                        # 软删除的订单，记录其ID用于去重，避免IBKR重新创建
-                        self.deleted_order_ids.add(row[0])
-                        continue
-                    order = Order(
-                        order_id=row[0],
-                        symbol=row[1],
-                        action=row[2],
-                        quantity=row[3],
-                        order_type=row[4],
-                        price=row[5],
-                        status=row[6] or OrderStatus.SUBMITTED.value,
-                        created_at=datetime.fromisoformat(row[7]) if row[7] else datetime.now(),
-                        updated_at=datetime.fromisoformat(row[8]) if row[8] else datetime.now(),
-                        executed_at=datetime.fromisoformat(row[9]) if row[9] else None,
-                        fill_price=row[10],
-                        order_source=row[11] or OrderSource.MANUAL.value,
-                        strategy_name=row[12],
-                        rule_id=row[13],
-                        parent_order_id=row[14],
-                        exchange=row[15] or "SMART",
-                        sec_type=row[16] or "STK",
-                        notes=row[17],
-                        commission=row[18],
-                        pnl=row[19],
-                        is_deleted=0
-                    )
-                    self.orders[order.order_id] = order
-                
+                    self._row_to_order(row)
+
                 order_logger.info(f"Loaded {len(self.orders)} orders from database")
-                
+
         except Exception as e:
             order_logger.error(f"Error loading orders from database: {e}")
 
-    def create_order(self, 
+    def create_order(self,
                     order_id: str,
                     symbol: str,
                     action: str,
@@ -276,7 +395,7 @@ class OrderManager:
                     existing_order.status = OrderStatus.SUBMITTED.value
                     if price is not None:
                         existing_order.price = price
-                    existing_order.updated_at = datetime.now()
+                    existing_order.updated_at = now_local()
                     self._update_order_in_database(existing_order)
                     return existing_order
             
@@ -313,22 +432,102 @@ class OrderManager:
             order_logger.error(f"Error creating order {order_id}: {e}")
             raise
 
-    def update_order_status(self, 
-                          order_id: str, 
+    def add_order(self, order: "Order" | Dict[str, Any]) -> "Order":
+        """将外部生成的订单同步到订单管理器
+
+        该方法会在订单已存在时更新基础信息；如果是新订单，则写入内存与数据库。
+        """
+        try:
+            if not isinstance(order, Order):
+                if isinstance(order, dict):
+                    order = Order(**order)
+                else:
+                    raise TypeError("order must be an Order instance or dict")
+
+            # 统一字符串格式的订单ID
+            order_id = str(order.order_id)
+            order.order_id = order_id
+
+            # 确保关键字段有默认值
+            if not order.status:
+                order.status = OrderStatus.SUBMITTED.value
+            if not order.order_source:
+                order.order_source = OrderSource.MANUAL.value
+            if order.created_at is None:
+                order.created_at = now_local()
+            order.created_at = ensure_local_timezone(order.created_at)
+            order.updated_at = ensure_local_timezone(order.updated_at) or now_local()
+            order.executed_at = ensure_local_timezone(order.executed_at)
+            order.is_deleted = 0
+
+            # 如果之前被软删除，重新激活
+            if order_id in self.deleted_order_ids:
+                self.deleted_order_ids.discard(order_id)
+
+            existing_order = self.orders.get(order_id)
+            if existing_order:
+                status_priority = {
+                    "PendingSubmit": 1,
+                    "Submitted": 2,
+                    "PartiallyFilled": 3,
+                    "Filled": 4,
+                    "Cancelled": 4,
+                    "Rejected": 4,
+                }
+
+                new_status = order.status or existing_order.status
+                if new_status:
+                    old_priority = status_priority.get(existing_order.status, 0)
+                    new_priority = status_priority.get(new_status, 0)
+                    if new_priority >= old_priority:
+                        existing_order.status = new_status
+
+                for field in fields(Order):
+                    name = field.name
+                    if name in {"order_id", "status"}:
+                        continue
+                    value = getattr(order, name)
+                    if value is None:
+                        continue
+                    if name == "created_at" and existing_order.created_at is not None:
+                        continue
+                    if name == "updated_at":
+                        continue
+                    setattr(existing_order, name, value)
+
+                existing_order.updated_at = now_local()
+                existing_order.is_deleted = 0
+                self._update_order_in_database(existing_order)
+                order_logger.info(f"🔄 更新已有订单信息: {order_id}")
+                return existing_order
+
+            # 新订单写入内存与数据库
+            self.orders[order_id] = order
+            self._save_order_to_database(order)
+            order_logger.info(f"📥 新订单已添加到管理器: {order_id}")
+            return order
+
+        except Exception as e:
+            order_logger.error(f"Error adding order {getattr(order, 'order_id', 'unknown')}: {e}")
+            raise
+
+    def update_order_status(self,
+                          order_id: str,
                           status: str,
                           fill_price: Optional[float] = None,
                           executed_at: Optional[datetime] = None,
                           commission: Optional[float] = None,
-                          pnl: Optional[float] = None) -> bool:
+                          pnl: Optional[float] = None,
+                          notes: Optional[str] = None) -> bool:
         """更新订单状态"""
         try:
             # 统一标准化为字符串，避免传入 int 导致无法匹配内存订单
             order_id = str(order_id)
-            if order_id not in self.orders:
+            order = self._ensure_order_cached(order_id)
+            if order is None:
                 order_logger.warning(f"Order {order_id} not found for status update")
                 return False
-            
-            order = self.orders[order_id]
+
             old_status = order.status
             
             # 防止订单状态回退：定义状态优先级
@@ -352,17 +551,20 @@ class OrderManager:
             
             # 更新订单状态
             order.status = status
-            order.updated_at = datetime.now()
-            
+            order.updated_at = now_local()
+
             if fill_price is not None:
                 order.fill_price = fill_price
                 if order.price is None or order.price == 0:
                     order.price = fill_price
-            
+
             if executed_at is not None:
-                order.executed_at = executed_at
+                order.executed_at = ensure_local_timezone(executed_at)
             elif status == OrderStatus.FILLED.value:
-                order.executed_at = datetime.now()
+                order.executed_at = now_local()
+
+            if notes:
+                order.notes = f"{order.notes} | {notes}" if order.notes else notes
             
             # 只有在新值不为None时才更新commission和pnl，避免覆盖已有的有效值
             if commission is not None:
@@ -375,10 +577,25 @@ class OrderManager:
             
             # 更新数据库
             self._update_order_in_database(order)
-            
+
             # 记录日志
             order_logger.info(f"📊 订单状态更新: {order_id} | {old_status} → {status} | 成交价: {fill_price or 'N/A'}")
-            
+
+            if status == OrderStatus.FILLED.value:
+                try:
+                    self._schedule_async(
+                        cache_record_filled_order(order),
+                        "Strategy cache update",
+                    )
+                    self._schedule_async(
+                        cache_record_account_fill(order),
+                        "Account PnL cache update",
+                    )
+                except Exception as exc:
+                    order_logger.debug(
+                        f"Failed to enqueue cache updates for order {order_id}: {exc}"
+                    )
+
             # 如果订单状态变为Filled，发送通知
             if status == OrderStatus.FILLED.value and old_status != OrderStatus.FILLED.value:
                 self._send_filled_notifications(order)
@@ -388,6 +605,29 @@ class OrderManager:
         except Exception as e:
             order_logger.error(f"Error updating order {order_id} status: {e}")
             return False
+
+    def _schedule_async(self, coro: Awaitable, context: str):
+        """Run an async coroutine safely whether or not a loop is active."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            task = loop.create_task(coro)
+
+            def _log_task_result(task: "asyncio.Task"):
+                try:
+                    task.result()
+                except Exception as exc:  # pragma: no cover - defensive logging
+                    order_logger.error(f"{context} failed: {exc}")
+
+            task.add_done_callback(_log_task_result)
+        else:
+            try:
+                asyncio.run(coro)
+            except Exception as exc:  # pragma: no cover - defensive logging
+                order_logger.error(f"{context} failed: {exc}")
 
     def _send_filled_notifications(self, order: Order):
         """发送订单成交通知（浏览器通知和Telegram消息）"""
@@ -401,7 +641,7 @@ class OrderManager:
                 "quantity": order.quantity,
                 "fill_price": order.fill_price,
                 "order_type": order.order_type,
-                "executed_at": order.executed_at.isoformat() if order.executed_at else None,
+                "executed_at": to_local_iso(order.executed_at),
                 "commission": order.commission,
                 "pnl": order.pnl,
                 "message": f"订单已成交: {order.symbol} {order.action} {order.quantity}股 @ {order.fill_price or 'N/A'}"
@@ -412,59 +652,90 @@ class OrderManager:
             # 发送浏览器通知
             if hasattr(self, 'websocket_manager') and self.websocket_manager:
                 try:
-                    import asyncio
-                    # 在事件循环中发送WebSocket消息
-                    try:
-                        loop = asyncio.get_running_loop()
-                        asyncio.create_task(self.websocket_manager.broadcast(message))
-                    except RuntimeError:
-                        # 没有运行中的事件循环，创建新的
-                        asyncio.run(self.websocket_manager.broadcast(message))
+                    async def _broadcast():
+                        await self.websocket_manager.broadcast(message)
+                        try:
+                            import core  # 延迟导入避免循环导入
+                            positions = await core.ibkr_client.get_positions()
+                        except Exception:
+                            positions = []
+                        await self.websocket_manager.broadcast(
+                            {"type": "portfolio_update", "portfolio": positions}
+                        )
+
+                    self._schedule_async(_broadcast(), "WebSocket broadcast")
                     order_logger.info(f"🌐 已发送浏览器通知: 订单 {order.order_id} 成交")
                 except Exception as e:
                     order_logger.error(f"发送浏览器通知失败: {e}")
-            
+
             # 发送通知消息
             if hasattr(self, 'notification_manager') and self.notification_manager:
                 try:
-                    import asyncio
                     # 使用统一的通知管理器发送订单通知
-                    try:
-                        loop = asyncio.get_running_loop()
-                        asyncio.create_task(self.notification_manager.send_order_notification(
+                    self._schedule_async(
+                        self.notification_manager.send_order_notification(
                             order_type=order.order_type,
                             symbol=order.symbol,
                             quantity=order.quantity,
                             price=order.fill_price,
                             status="Filled",
                             order_id=order.order_id
-                        ))
-                    except RuntimeError:
-                        # 没有运行中的事件循环，创建新的
-                        asyncio.run(self.notification_manager.send_order_notification(
-                            order_type=order.order_type,
-                            symbol=order.symbol,
-                            quantity=order.quantity,
-                            price=order.fill_price,
-                            status="Filled",
-                            order_id=order.order_id
-                        ))
+                        ),
+                        "Order notification dispatch"
+                    )
                     order_logger.info(f"📱 已发送Telegram通知: 订单 {order.order_id} 成交")
                 except Exception as e:
                     order_logger.error(f"发送Telegram通知失败: {e}")
-            
+
             # 检查并停用已平仓资产的风险规则
+            self._schedule_async(
+                self._check_and_deactivate_risk_rules(order.symbol, order.order_source),
+                "Risk rule deactivation"
+            )
+
+            # 异步刷新账户与持仓快照，确保API能够快速返回最新数据
             try:
-                loop = asyncio.get_running_loop()
-                asyncio.create_task(self._check_and_deactivate_risk_rules(order.symbol, order.order_source))
-            except RuntimeError:
-                # 没有运行中的事件循环，创建新的
-                asyncio.run(self._check_and_deactivate_risk_rules(order.symbol, order.order_source))
-                    
+                import core  # 延迟导入避免循环依赖
+
+                snapshot_service = getattr(core, "account_snapshot_service", None)
+                if snapshot_service:
+                    snapshot_service.notify_fill()
+                    self._schedule_async(
+                        snapshot_service.refresh_both(
+                            reason="fill_event", fast_positions=True
+                        ),
+                        "Account snapshot refresh after fill",
+                    )
+                else:
+                    async def _refresh_fallback():
+                        ib_client = getattr(core, "ibkr_client", None)
+                        if ib_client is None:
+                            return
+                        from .account_snapshot_cache import (
+                            write_account_info_snapshot,
+                            write_positions_snapshot,
+                        )
+
+                        account_info = await ib_client.get_account_info()
+                        positions = await ib_client.get_positions(fast=True)
+                        await write_account_info_snapshot(
+                            account_info or {}, "fill_event"
+                        )
+                        await write_positions_snapshot(positions or [], "fill_event")
+
+                    self._schedule_async(
+                        _refresh_fallback(),
+                        "Account snapshot refresh after fill (fallback)",
+                    )
+            except Exception as refresh_exc:
+                order_logger.warning(
+                    f"Failed to refresh account snapshots after fill: {refresh_exc}"
+                )
+
         except Exception as e:
             order_logger.error(f"发送订单成交通知失败: {e}")
     
-    async def _check_and_deactivate_risk_rules(self, symbol: str, order_source: str = None, ibkr_client=None):
+    async def _check_and_deactivate_risk_rules(self, symbol: str, order_source: str = None):
         """检查指定资产的持仓状态和订单来源，决定是否停用相关的风险规则"""
         try:
             if not hasattr(self, 'risk_manager') or not self.risk_manager:
@@ -487,13 +758,8 @@ class OrderManager:
                 deactivate_reason = "手动下单"
             else:
                 # 获取当前持仓信息
-                if ibkr_client:
-                    positions = await ibkr_client.get_positions()
-                else:
-                    # 如果没有传入ibkr_client，创建新实例（保持向后兼容）
-                    from .ibkr_client import IBKRClient
-                    temp_client = IBKRClient()
-                    positions = await temp_client.get_positions()
+                import core  # 延迟导入避免循环导入
+                positions = await core.ibkr_client.get_positions()
                 
                 # 查找指定资产的持仓
                 position_qty = 0
@@ -514,14 +780,17 @@ class OrderManager:
                 
                 # 更新数据库中的风险规则状态
                 from .database import RiskRule as DatabaseRiskRule
-                from datetime import datetime
                 db_rule = DatabaseRiskRule(
                     symbol=rule.symbol,
                     stop_loss_price=rule.stop_loss_price,
                     take_profit_price=rule.take_profit_price,
                     max_loss_percent=rule.max_loss_percent,
                     enabled=rule.enabled,
-                    timestamp=rule.created_at.isoformat() if rule.created_at else datetime.now().isoformat()
+                    max_time_span=rule.max_time_span,
+                    timestamp=to_local_iso(rule.created_at) or now_local().isoformat(),
+                    auto_trailing=rule.auto_trailing,
+                    atr_params=rule.atr_params,
+                    rule_type=rule.rule_type,
                 )
                 self.risk_manager.db_manager.save_risk_rule(db_rule)
                 
@@ -550,23 +819,6 @@ class OrderManager:
                     except Exception as e:
                         order_logger.error(f"发送风险规则停用通知失败: {e}")
                 
-                # 发送浏览器通知
-                if hasattr(self, 'websocket_manager') and self.websocket_manager:
-                    try:
-                        notification = {
-                            "type": "risk_rule_deactivated",
-                            "symbol": symbol,
-                            "message": f"风险规则已自动停用: {symbol} ({deactivate_reason})"
-                        }
-                        import asyncio
-                        loop = asyncio.get_event_loop()
-                        if loop.is_running():
-                            asyncio.create_task(self.websocket_manager.broadcast(notification))
-                        else:
-                            asyncio.run(self.websocket_manager.broadcast(notification))
-                    except Exception as e:
-                        order_logger.error(f"发送风险规则停用浏览器通知失败: {e}")
-                
         except Exception as e:
             order_logger.error(f"检查和停用风险规则失败 ({symbol}): {e}")
 
@@ -586,7 +838,7 @@ class OrderManager:
             
             # 更新状态
             order.status = OrderStatus.CANCELLED.value
-            order.updated_at = datetime.now()
+            order.updated_at = now_local()
             if reason:
                 order.notes = (order.notes or "") + f" | 取消原因: {reason}"
             
@@ -629,7 +881,7 @@ class OrderManager:
             if new_quantity is not None:
                 order.quantity = new_quantity
             
-            order.updated_at = datetime.now()
+            order.updated_at = now_local()
             order.notes = (order.notes or "") + f" | 修改: 价格 {old_price} → {order.price}, 数量 {old_quantity} → {order.quantity}"
             
             # 更新数据库
@@ -648,15 +900,34 @@ class OrderManager:
         """获取单个订单"""
         return self.orders.get(order_id)
 
-    def get_orders(self, 
+    def get_orders(self,
                   symbol: Optional[str] = None,
                   status: Optional[str] = None,
                   order_source: Optional[str] = None,
                   strategy_name: Optional[str] = None,
-                  limit: Optional[int] = None) -> List[Order]:
+                  limit: Optional[int] = None,
+                  start_date: Optional[datetime] = None,
+                  offset: Optional[int] = None,
+                  return_total: bool = False) -> Any:
         """获取订单列表"""
+        simple_filter = not any([symbol, status, order_source, strategy_name])
+
+        # 对于常见的“近期订单”请求（仅限制数量或起始时间）直接从数据库分页读取，避免全量加载。
+        if simple_filter and (limit is not None or start_date is not None or offset):
+            return self._fetch_orders_from_database(
+                limit=limit,
+                start_date=start_date,
+                offset=offset,
+                return_total=return_total,
+            )
+
+        self._load_orders_from_database()
         orders = list(self.orders.values())
-        
+
+        if start_date:
+            start_dt = ensure_local_timezone(start_date)
+            orders = [o for o in orders if ensure_local_timezone(o.created_at) >= start_dt]
+
         # 过滤条件
         if symbol:
             orders = [o for o in orders if o.symbol == symbol]
@@ -666,14 +937,22 @@ class OrderManager:
             orders = [o for o in orders if o.order_source == order_source]
         if strategy_name:
             orders = [o for o in orders if o.strategy_name == strategy_name]
-        
+
         # 按创建时间降序排列
         orders.sort(key=lambda x: x.created_at, reverse=True)
-        
+
+        total_count = len(orders)
+
+        if offset and offset > 0:
+            orders = orders[offset:]
+
         # 限制数量
         if limit:
             orders = orders[:limit]
-        
+
+        if return_total:
+            return orders, total_count
+
         return orders
 
     def get_active_orders(self) -> List[Order]:
@@ -703,7 +982,7 @@ class OrderManager:
             匹配的订单对象，如果没有找到则返回None
         """
         try:
-            current_time = datetime.now()
+            current_time = now_local()
             time_threshold = current_time - timedelta(seconds=time_window_seconds)
             
             # 在内存中查找匹配的订单
@@ -754,13 +1033,12 @@ class OrderManager:
             
             # 更新数据库中的订单ID
             try:
-                with sqlite3.connect(self.db_manager.db_path) as conn:
-                    conn.execute(
+                with self.db_manager.cursor() as cursor:
+                    cursor.execute(
                         "UPDATE orders SET order_id = ? WHERE order_id = ?",
                         (new_order_id, old_order_id)
                     )
-                    conn.commit()
-                    
+
                 order_logger.info(f"成功更新订单ID: {old_order_id} -> {new_order_id}")
                 return True
                 
@@ -779,30 +1057,37 @@ class OrderManager:
     def _save_order_to_database(self, order: Order):
         """保存订单到数据库"""
         try:
-            with sqlite3.connect(self.db_manager.db_path) as conn:
-                cursor = conn.cursor()
+            with self.db_manager.cursor() as cursor:
                 cursor.execute(
                     """
-                    INSERT INTO orders 
-                    (order_id, symbol, action, quantity, order_type, price, status, 
-                     created_at, updated_at, executed_at, fill_price, order_source, 
-                     strategy_name, rule_id, parent_order_id, exchange, sec_type, 
+                    INSERT INTO orders
+                    (order_id, symbol, action, quantity, order_type, price, status,
+                     created_at, updated_at, executed_at, fill_price, order_source,
+                     strategy_name, rule_id, parent_order_id, exchange, sec_type,
                      notes, commission, is_deleted)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         order.order_id, order.symbol, order.action, order.quantity,
                         order.order_type, order.price, order.status,
-                        order.created_at.isoformat() if order.created_at else datetime.now().isoformat(),
-                        order.updated_at.isoformat() if order.updated_at else datetime.now().isoformat(),
-                        order.executed_at.isoformat() if order.executed_at else None,
+                        to_local_iso(order.created_at) or now_local().isoformat(),
+                        to_local_iso(order.updated_at) or now_local().isoformat(),
+                        to_local_iso(order.executed_at),
                         order.fill_price, order.order_source, order.strategy_name,
                         order.rule_id, order.parent_order_id, order.exchange,
                         order.sec_type, order.notes, order.commission, order.is_deleted
                     )
                 )
-                conn.commit()
                 order_logger.debug(f"Order {order.order_id} saved to database")
+        except sqlite3.IntegrityError as e:
+            if "UNIQUE constraint failed: orders.order_id" in str(e):
+                order_logger.warning(
+                    f"Order {order.order_id} already exists in database. Falling back to update."
+                )
+                self._update_order_in_database(order)
+            else:
+                order_logger.error(f"Error saving order {order.order_id} to database: {e}")
+                raise
         except Exception as e:
             order_logger.error(f"Error saving order {order.order_id} to database: {e}")
             raise
@@ -810,11 +1095,10 @@ class OrderManager:
     def _update_order_in_database(self, order: Order):
         """更新数据库中的订单"""
         try:
-            with sqlite3.connect(self.db_manager.db_path) as conn:
-                cursor = conn.cursor()
+            with self.db_manager.cursor() as cursor:
                 cursor.execute(
                     """
-                    UPDATE orders SET 
+                    UPDATE orders SET
                         symbol=?, action=?, quantity=?, order_type=?, price=?, status=?,
                         updated_at=?, executed_at=?, fill_price=?, order_source=?,
                         strategy_name=?, rule_id=?, parent_order_id=?, exchange=?,
@@ -824,15 +1108,14 @@ class OrderManager:
                     (
                         order.symbol, order.action, order.quantity, order.order_type,
                         order.price, order.status, 
-                        order.updated_at.isoformat() if order.updated_at else datetime.now().isoformat(),
-                        order.executed_at.isoformat() if order.executed_at else None,
+                        to_local_iso(order.updated_at) or now_local().isoformat(),
+                        to_local_iso(order.executed_at),
                         order.fill_price, order.order_source, order.strategy_name,
                         order.rule_id, order.parent_order_id, order.exchange,
                         order.sec_type, order.notes, order.commission, order.pnl, order.is_deleted,
                         order.order_id
                     )
                 )
-                conn.commit()
                 order_logger.debug(f"Order {order.order_id} updated in database (commission/pnl preserved when None)")
         except Exception as e:
             order_logger.error(f"Error updating order {order.order_id} in database: {e}")

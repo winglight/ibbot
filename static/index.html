@@ -59,39 +59,393 @@
             border-right: 5px solid transparent;
             border-top: 5px solid #333;
         }
+        .panel-loading-indicator {
+            display: inline-flex;
+            align-items: center;
+            font-size: 0.95rem;
+        }
     </style>
 </head>
 <body>
     <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
         <div class="container-fluid">
-            <a class="navbar-brand" href="#">
-                <i class="fas fa-chart-line"></i> IBKR Trading Bot
-            </a>
-            <div class="navbar-nav ms-auto">
-                <button class="btn btn-outline-light btn-sm me-2" id="connectionSettingsBtn">
+            <div class="d-flex align-items-center gap-2">
+                <a class="navbar-brand" href="#">
+                    <i class="fas fa-chart-line"></i> IBKR Trading Bot
+                </a>
+                <button class="btn btn-outline-light btn-sm" id="openConfigurationBtn" title="Configuration">
+                    <i class="fas fa-sliders-h"></i>
+                </button>
+            </div>
+            <div class="d-flex align-items-center ms-auto gap-2">
+                <button class="btn btn-outline-light btn-sm" id="connectionSettingsBtn">
                     <i class="fas fa-cog"></i> IBKR
                 </button>
-                <button class="btn btn-outline-light btn-sm me-2" id="loginBtn">
+                <button class="btn btn-outline-light btn-sm" id="loginBtn">
                     <i class="fas fa-user"></i> Login
                 </button>
-                <button class="btn btn-outline-light btn-sm me-2" id="logoutBtn" style="display: none;">
+                <button class="btn btn-outline-light btn-sm" id="logoutBtn" style="display: none;">
                     <i class="fas fa-sign-out-alt"></i> Logout
                 </button>
-                <span class="navbar-text">
+                <span class="navbar-text d-flex align-items-center gap-2">
                     <span id="connectionStatus" class="status-indicator status-disconnected"></span>
                     <span id="connectionText">Disconnected</span>
+                </span>
+                <button class="btn btn-outline-light btn-sm" id="openNotificationsBtn" title="Notifications">
+                    <i class="fas fa-bell"></i>
+                </button>
+                <span id="authRoleBadge" class="badge bg-warning text-dark d-none">
+                    <i class="fas fa-user-shield me-1"></i>Visitor
                 </span>
             </div>
         </div>
     </nav>
 
+    <div id="panelOverlay" class="panel-overlay" tabindex="-1"></div>
+
+    <aside id="configurationPanel" class="side-panel side-panel-left" aria-hidden="true" tabindex="-1">
+        <div class="side-panel-header d-flex align-items-center justify-content-between">
+            <h5 class="mb-0"><i class="fas fa-sliders-h me-2"></i> Configuration</h5>
+        </div>
+        <div class="side-panel-body">
+            <div class="d-flex justify-content-end flex-wrap gap-2 mb-3">
+                <button class="btn btn-outline-primary btn-sm" id="gRulesSettingsBtn" title="G Rules Settings">
+                    <i class="fas fa-cog"></i> G
+                </button>
+                <button class="btn btn-outline-info btn-sm" id="sRulesSettingsBtn" title="S Rules Settings">
+                    <i class="fas fa-calculator"></i> S
+                </button>
+                <button class="btn btn-warning btn-sm" id="addRiskRuleBtn">
+                    <i class="fas fa-plus"></i>
+                </button>
+            </div>
+
+            <div class="card config-card mb-3" id="domSettingsCard">
+                <div class="card-header">
+                    <h6 class="mb-0"><i class="fas fa-sliders-h me-2"></i> Monitor Settings</h6>
+                </div>
+                <div class="card-body">
+                    <form id="domSettingsForm" class="row g-3">
+                        <div class="col-12 col-sm-6">
+                            <label class="form-label">Window</label>
+                            <input type="number" class="form-control form-control-sm" id="domWindow">
+                        </div>
+                        <div class="col-12 col-sm-6">
+                            <label class="form-label">Max Levels</label>
+                            <input type="number" class="form-control form-control-sm" id="domMaxLevels">
+                        </div>
+                        <div class="col-12 col-sm-6">
+                            <label class="form-label">Depth Rows</label>
+                            <input type="number" class="form-control form-control-sm" id="domNumRows" value="5">
+                            <div class="form-text">Number of depth levels displayed in the DOM panel.</div>
+                        </div>
+                        <div class="col-12">
+                            <label class="form-label">Trend Score Thresholds</label>
+                            <div class="row g-2">
+                                <div class="col-6 col-md-3">
+                                    <div class="input-group input-group-sm">
+                                        <span class="input-group-text">L1</span>
+                                        <input type="number" class="form-control" id="domTrendThreshold1" min="0" step="0.01" placeholder="0.50">
+                                    </div>
+                                </div>
+                                <div class="col-6 col-md-3">
+                                    <div class="input-group input-group-sm">
+                                        <span class="input-group-text">L2</span>
+                                        <input type="number" class="form-control" id="domTrendThreshold2" min="0" step="0.01" placeholder="0.70">
+                                    </div>
+                                </div>
+                                <div class="col-6 col-md-3">
+                                    <div class="input-group input-group-sm">
+                                        <span class="input-group-text">L3</span>
+                                        <input type="number" class="form-control" id="domTrendThreshold3" min="0" step="0.01" placeholder="0.85">
+                                    </div>
+                                </div>
+                                <div class="col-6 col-md-3">
+                                    <div class="input-group input-group-sm">
+                                        <span class="input-group-text">L4</span>
+                                        <input type="number" class="form-control" id="domTrendThreshold4" min="0" step="0.01" placeholder="0.95">
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="form-text">Enter only positive thresholds; negative thresholds are mirrored automatically.</div>
+                        </div>
+                    </form>
+                    <div class="text-end mt-3">
+                        <button type="button" class="btn btn-primary btn-sm" id="saveDomSettingsBtn">
+                            <i class="fas fa-save"></i> Save
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card config-card mb-3" id="dataPushSettingsCard">
+                <div class="card-header">
+                    <h6 class="mb-0"><i class="fas fa-stream me-2"></i> Data Push Settings</h6>
+                </div>
+                <div class="card-body">
+                    <div class="form-check form-switch requires-write mb-2">
+                        <input class="form-check-input" type="checkbox" id="holidayDataPushSwitch" checked>
+                        <label class="form-check-label" for="holidayDataPushSwitch">Pause data push on holidays</label>
+                    </div>
+                    <div class="small text-muted" id="holidayDataPushStatusText">
+                        Current status: Enabled. Data push automatically pauses on US market holidays.
+                    </div>
+                    <div class="form-text mt-2">
+                        When disabled, strategy data continues even on holidays.
+                    </div>
+                </div>
+            </div>
+
+            <div id="configurationCards" class="configuration-cards">
+                <div class="card config-card mb-3" id="gRulesCard">
+                    <div class="card-header p-0">
+                        <button class="config-card-toggle w-100 text-start" id="g-rules-tab" type="button"
+                            data-bs-toggle="collapse" data-bs-target="#gRulesCardBody" aria-expanded="true" aria-controls="gRulesCardBody">
+                            <span><i class="fas fa-gavel me-2"></i> G Rules</span>
+                            <i class="fas fa-chevron-down toggle-icon"></i>
+                        </button>
+                    </div>
+                    <div id="gRulesCardBody" class="collapse show">
+                        <div class="card-body">
+                            <!-- G Rules Configuration Form (Hidden by default) -->
+
+                            <hr>
+
+                            <!-- G Rules Status Display -->
+                            <div class="mb-3">
+                                <h6><i class="fas fa-list"></i> G Rules Status</h6>
+                                <div class="table-responsive">
+                                    <table class="table table-sm" id="gRulesStatusTable">
+                                        <thead>
+                                            <tr>
+                                                <th>Rule</th>
+                                                <th>Description</th>
+                                                <th>Status</th>
+                                                <th>Current Value</th>
+                                                <th>Last Check</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            <tr>
+                                                <td>G0</td>
+                                                <td>Account-level circuit breaker</td>
+                                                <td><span id="g0_status" class="badge bg-success">Normal</span></td>
+                                                <td id="g0_message">-1.2%</td>
+                                                <td id="g0_last">Just now</td>
+                                            </tr>
+                                            <tr>
+                                                <td>G1</td>
+                                                <td>Maximum risk per trade</td>
+                                                <td><span id="g1_status" class="badge bg-success">Normal</span></td>
+                                                <td id="g1_message">1.5%</td>
+                                                <td id="g1_last">Just now</td>
+                                            </tr>
+                                            <tr>
+                                                <td>G2</td>
+                                                <td>Max position per symbol</td>
+                                                <td><span id="g2_status" class="badge bg-success">Normal</span></td>
+                                                <td id="g2_message">8.3%</td>
+                                                <td id="g2_last">Just now</td>
+                                            </tr>
+                                            <tr>
+                                                <td>G3</td>
+                                                <td>Correlation check</td>
+                                                <td><span id="g3_status" class="badge bg-success">Normal</span></td>
+                                                <td id="g3_message">0.65</td>
+                                                <td id="g3_last">Just now</td>
+                                            </tr>
+                                            <tr>
+                                                <td>G4</td>
+                                                <td>Liquidity check</td>
+                                                <td><span id="g4_status" class="badge bg-success">Normal</span></td>
+                                                <td id="g4_message">Sufficient</td>
+                                                <td id="g4_last">Just now</td>
+                                            </tr>
+                                            <tr>
+                                                <td>G5</td>
+                                                <td>Trading window restriction</td>
+                                                <td><span id="g5_status" class="badge bg-success">Normal</span></td>
+                                                <td id="g5_message">During trading hours</td>
+                                                <td id="g5_last">Just now</td>
+                                            </tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card config-card" id="sRulesCard">
+                    <div class="card-header p-0">
+                        <button class="config-card-toggle w-100 text-start collapsed" id="s-rules-tab" type="button"
+                            data-bs-toggle="collapse" data-bs-target="#sRulesCardBody" aria-expanded="false" aria-controls="sRulesCardBody">
+                            <span><i class="fas fa-calculator me-2"></i> S Rules</span>
+                            <i class="fas fa-chevron-down toggle-icon"></i>
+                        </button>
+                    </div>
+                    <div id="sRulesCardBody" class="collapse">
+                        <div class="card-body">
+                            <hr>
+
+                            <!-- S Rules Status Display -->
+                            <div class="mb-3">
+                                <h6><i class="fas fa-list"></i> S Rules Status</h6>
+                                <div class="table-responsive">
+                                    <table class="table table-sm" id="sRulesStatusTable">
+                                        <thead>
+                                            <tr>
+                                                <th>Rule</th>
+                                                <th>Description</th>
+                                                <th>Status</th>
+                                                <th>Current Value</th>
+                                                <th>Last Check</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            <tr>
+                                                <td>S0</td>
+                                                <td>Position sizing method</td>
+                                                <td><span id="s0_status" class="badge bg-success">Normal</span></td>
+                                                <td id="s0_message">Percentage</td>
+                                                <td id="s0_last">Just now</td>
+                                            </tr>
+                                            <tr>
+                                                <td>S1</td>
+                                                <td>Position size value/percentage</td>
+                                                <td><span id="s1_status" class="badge bg-success">Normal</span></td>
+                                                <td id="s1_message">1.0%</td>
+                                                <td id="s1_last">Just now</td>
+                                            </tr>
+                                            <tr>
+                                                <td>S2</td>
+                                                <td>Maximum number of positions</td>
+                                                <td><span id="s2_status" class="badge bg-success">Normal</span></td>
+                                                <td id="s2_message">10</td>
+                                                <td id="s2_last">Just now</td>
+                                            </tr>
+                                            <tr>
+                                                <td>S3</td>
+                                                <td>Position rebalancing</td>
+                                                <td><span id="s3_status" class="badge bg-success">Normal</span></td>
+                                                <td id="s3_message">Enabled</td>
+                                                <td id="s3_last">Just now</td>
+                                            </tr>
+                                            <tr>
+                                                <td>S4</td>
+                                                <td>Volatility adjustment</td>
+                                                <td><span id="s4_status" class="badge bg-success">Normal</span></td>
+                                                <td id="s4_message">Enabled</td>
+                                                <td id="s4_last">Just now</td>
+                                            </tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+
+                            <!-- Sizing History -->
+                            <div class="mb-3">
+                                <h6><i class="fas fa-history"></i> Sizing History</h6>
+                                <div class="table-responsive" style="max-height: 200px;">
+                                    <table class="table table-sm" id="sizingHistoryTable">
+                                        <thead>
+                                            <tr>
+                                                <th>Time</th>
+                                                <th>Symbol</th>
+                                                <th>Action</th>
+                                                <th>Suggested Qty</th>
+                                                <th>Method</th>
+                                                <th>Price</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody></tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </aside>
+
+    <aside id="notificationsPanel" class="side-panel side-panel-right" aria-hidden="true" tabindex="-1">
+        <div class="side-panel-header d-flex align-items-center justify-content-between">
+            <h5 class="mb-0"><i class="fas fa-bell me-2"></i> Notifications</h5>
+            <div class="btn-group btn-group-sm">
+                <button class="btn btn-outline-primary" onclick="app.notificationsManager.showNotificationSettings()">
+                    <i class="fas fa-cog"></i> Settings
+                </button>
+                <button class="btn btn-outline-secondary" id="clearNotificationsBtn">
+                    <i class="fas fa-trash"></i> Clear All
+                </button>
+            </div>
+        </div>
+        <div class="side-panel-body">
+            <div class="mb-3">
+                <div class="row g-2">
+                    <div class="col-md-3">
+                        <select class="form-select form-select-sm" id="historyStatusFilter">
+                            <option value="">All Status</option>
+                            <option value="sent">Sent</option>
+                            <option value="failed">Failed</option>
+                            <option value="pending">Pending</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <select class="form-select form-select-sm" id="historyChannelFilter">
+                            <option value="">All Channels</option>
+                            <option value="telegram">Telegram</option>
+                            <option value="email">Email</option>
+                            <option value="websocket">WebSocket</option>
+                        </select>
+                    </div>
+                    <div class="col-md-4">
+                        <input type="date" class="form-control form-control-sm" id="historySinceFilter" placeholder="Since date">
+                    </div>
+                    <div class="col-md-2">
+                        <button class="btn btn-sm btn-primary w-100" onclick="app.filterNotificationHistory()">Filter</button>
+                    </div>
+                </div>
+            </div>
+            <div class="table-responsive notification-history-table">
+                <table class="table table-sm" id="notificationHistoryTable">
+                    <thead class="table-light sticky-top">
+                        <tr>
+                            <th>Time</th>
+                            <th>Channel</th>
+                            <th>Event</th>
+                            <th>Message</th>
+                            <th>Status</th>
+                            <th>Error</th>
+                        </tr>
+                    </thead>
+                    <tbody id="notificationHistoryBody">
+                        <tr>
+                            <td colspan="6" class="text-center text-muted py-3">
+                                <i class="fas fa-history"></i>
+                                <p class="mb-0">Loading notification history...</p>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </aside>
+
     <div class="container-fluid mt-4">
+        <div id="readOnlyBanner" class="alert alert-warning d-none" role="alert">
+            <i class="fas fa-eye-slash me-2"></i>Visitor accounts are read-only and cannot execute trades or change settings.
+        </div>
         <!-- Account Information Panel -->
         <div class="row mb-4">
             <div class="col-md-12">
                 <div class="card">
-                    <div class="card-header">
-                        <h5><i class="fas fa-user"></i> Account Information</h5>
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0"><i class="fas fa-user"></i> Account Information</h5>
+                        <button type="button" class="btn btn-outline-secondary btn-sm" id="openDailySummaryBtn" data-bs-toggle="modal" data-bs-target="#dailyAccountSummaryModal">
+                            <i class="fas fa-chart-line me-1"></i>Analytics
+                        </button>
                     </div>
                     <div class="card-body" id="accountInfo">
                         <p class="text-muted">Connect to view account information</p>
@@ -100,23 +454,27 @@
             </div>
         </div>
 
-        <!-- Trading Panel -->
-        <div class="row mb-4">
-
-
-        </div>
+        <!-- Trading Panel removed: DOM monitor moved into monitor modal -->
 
         <!-- Data Tables -->
         <div class="row">
             <div class="col-md-6">
                 <div class="card">
                     <div class="card-header d-flex justify-content-between align-items-center">
-                        <h5><i class="fas fa-list"></i> Orders</h5>
-                        <div>
+                        <h5 class="mb-0 d-flex align-items-center gap-2">
+                            <i class="fas fa-list"></i>
+                            <span>Orders</span>
+                        </h5>
+                        <div class="d-flex align-items-center gap-2">
+                            <span class="panel-loading-indicator text-white-50 d-none" data-panel-spinner="orders" aria-hidden="true">
+                                <i class="fas fa-circle-notch fa-spin"></i>
+                            </span>
                             <button class="btn btn-sm btn-primary me-2" id="placeOrderBtn">
                                 <i class="fas fa-plus"></i> Place Order
                             </button>
-
+                            <button class="btn btn-sm btn-danger" id="cancelAllOrdersBtn" title="Cancel All Orders">
+                                <i class="fas fa-times"></i>
+                            </button>
                         </div>
                     </div>
                     <div class="card-body">
@@ -130,19 +488,26 @@
                                         <th>Qty</th>
                                         <th>Price</th>
                                         <th>Status</th>
+                                        <th>Created At</th>
                                         <th>PnL</th>
                                         <th>Commission</th>
-                                        <th>来源</th>
+                                        <th>Source</th>
                                         <th>Actions</th>
                                     </tr>
                                 </thead>
                                 <tbody></tbody>
                             </table>
                         </div>
-                        <div class="mt-2">
-                            <button class="btn btn-sm btn-danger" id="cancelAllOrdersBtn">
-                                <i class="fas fa-times"></i> Cancel All
-                            </button>
+                        <div class="d-flex justify-content-between align-items-center mt-3" id="ordersPaginationControls">
+                            <div class="text-muted small" id="ordersPaginationInfo">&nbsp;</div>
+                            <div class="btn-group btn-group-sm" role="group" aria-label="Orders pagination">
+                                <button type="button" class="btn btn-outline-secondary" id="ordersPrevPageBtn" title="Previous page">
+                                    <i class="fas fa-chevron-left"></i>
+                                </button>
+                                <button type="button" class="btn btn-outline-secondary" id="ordersNextPageBtn" title="Next page">
+                                    <i class="fas fa-chevron-right"></i>
+                                </button>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -153,7 +518,11 @@
                 <div class="card">
                     <div class="card-header d-flex justify-content-between align-items-center">
                         <h5><i class="fas fa-briefcase"></i> Portfolio</h5>
-
+                        <div class="d-flex align-items-center gap-2">
+                            <span class="panel-loading-indicator text-white-50 d-none" data-panel-spinner="portfolio" aria-hidden="true">
+                                <i class="fas fa-circle-notch fa-spin"></i>
+                            </span>
+                        </div>
                     </div>
                     <div class="card-body">
                         <div class="table-responsive">
@@ -183,7 +552,10 @@
                 <div class="card">
                     <div class="card-header d-flex justify-content-between align-items-center">
                         <h5><i class="fas fa-shield-alt"></i> Risk Rules</h5>
-                        <div>
+                        <div class="d-flex align-items-center gap-2">
+                            <span class="panel-loading-indicator text-white-50 d-none" data-panel-spinner="risk-rules" aria-hidden="true">
+                                <i class="fas fa-circle-notch fa-spin"></i>
+                            </span>
                             <button class="btn btn-sm btn-warning" id="addRiskRuleBtn2">
                                 <i class="fas fa-plus"></i>
                             </button>
@@ -195,6 +567,7 @@
                                 <thead>
                                     <tr>
                                         <th>Symbol</th>
+                                        <th>Type</th>
                                         <th>Stop Loss</th>
                                         <th>Take Profit</th>
                                         <th>Max Time</th>
@@ -212,7 +585,13 @@
                 <div class="card" id="strategiesCard">
                   <div class="card-header d-flex justify-content-between align-items-center">
                     <h5 class="mb-0">Strategies</h5>
-                    <div class="d-flex gap-2">
+                    <div class="d-flex align-items-center gap-2">
+                      <span class="panel-loading-indicator text-white-50 d-none" data-panel-spinner="strategies" aria-hidden="true">
+                        <i class="fas fa-circle-notch fa-spin"></i>
+                      </span>
+                      <button class="btn btn-outline-secondary btn-sm" id="openDomOptimizerModalBtn" data-bs-toggle="modal" data-bs-target="#domOptimizerModal" title="DOM Optimizer">
+                        <i class="fas fa-arrow-up"></i>
+                      </button>
                       <button class="btn btn-outline-secondary btn-sm" id="strategySettingsBtn">
                         <i class="fas fa-cog"></i>
                       </button>
@@ -229,8 +608,9 @@
                             <th>Name</th>
                             <th>Symbol</th>
                             <th>Status</th>
+                            <th>Data Reception Status</th>
                             <th>P&L</th>
-                            <th>Actions</th>
+                            <th>Trades</th>
                           </tr>
                         </thead>
                         <tbody></tbody>
@@ -239,262 +619,10 @@
                   </div>
                 </div>
             </div>
-            <div class="col-md-6">
-                <div class="card">
-                    <div class="card-header d-flex justify-content-between align-items-center">
-                        <h5><i class="fas fa-shield-alt"></i> Position & Risk Controls</h5>
-                        <div>
-                            <button class="btn btn-sm btn-outline-primary me-2" id="gRulesSettingsBtn" title="G Rules Settings">
-                                <i class="fas fa-cog"></i> G
-                            </button>
-                            <button class="btn btn-sm btn-outline-info me-2" id="sRulesSettingsBtn" title="S Rules Settings">
-                                <i class="fas fa-calculator"></i> S
-                            </button>
-                            <button class="btn btn-sm btn-warning" id="addRiskRuleBtn">
-                                <i class="fas fa-plus"></i>
-                            </button>
-                        </div>
-                    </div>
-                    <div class="card-body">
-                        <!-- Tabs for G Rules and S Rules -->
-                        <ul class="nav nav-tabs" id="riskControlTabs" role="tablist">
-                            <li class="nav-item" role="presentation">
-                                <button class="nav-link active" id="g-rules-tab" data-bs-toggle="tab" data-bs-target="#g-rules" type="button" role="tab" aria-controls="g-rules" aria-selected="true">
-                                    <i class="fas fa-gavel"></i> G Rules
-                                </button>
-                            </li>
-                            <li class="nav-item" role="presentation">
-                                <button class="nav-link" id="s-rules-tab" data-bs-toggle="tab" data-bs-target="#s-rules" type="button" role="tab" aria-controls="s-rules" aria-selected="false">
-                                    <i class="fas fa-calculator"></i> S Rules
-                                </button>
-                            </li>
-                        </ul>
-                        
-                        <div class="tab-content mt-3" id="riskControlTabContent">
-                            <!-- G Rules Tab -->
-                            <div class="tab-pane fade show active" id="g-rules" role="tabpanel" aria-labelledby="g-rules-tab">
-                                <!-- G Rules Configuration Form (Hidden by default) -->
 
-                                
-                                <hr>
-                                
-                                <!-- G Rules Status Display -->
-                                <div class="mb-3">
-                                    <h6><i class="fas fa-list"></i> G Rules Status</h6>
-                                    <div class="table-responsive">
-                                        <table class="table table-sm" id="gRulesStatusTable">
-                                            <thead>
-                                                <tr>
-                                                    <th>Rule</th>
-                                                    <th>Description</th>
-                                                    <th>Status</th>
-                                                    <th>Current Value</th>
-                                                    <th>Last Check</th>
-                                                </tr>
-                                            </thead>
-                                            <tbody>
-                                                <tr>
-                                                    <td>G0</td>
-                                                    <td>账户级断路器</td>
-                                                    <td><span id="g0_status" class="badge bg-success">正常</span></td>
-                                                    <td id="g0_message">-1.2%</td>
-                                                    <td id="g0_last">刚刚</td>
-                                                </tr>
-                                                <tr>
-                                                    <td>G1</td>
-                                                    <td>单笔最大风险</td>
-                                                    <td><span id="g1_status" class="badge bg-success">正常</span></td>
-                                                    <td id="g1_message">1.5%</td>
-                                                    <td id="g1_last">刚刚</td>
-                                                </tr>
-                                                <tr>
-                                                    <td>G2</td>
-                                                    <td>单标的最大仓位</td>
-                                                    <td><span id="g2_status" class="badge bg-success">正常</span></td>
-                                                    <td id="g2_message">8.3%</td>
-                                                    <td id="g2_last">刚刚</td>
-                                                </tr>
-                                                <tr>
-                                                    <td>G3</td>
-                                                    <td>相关性检查</td>
-                                                    <td><span id="g3_status" class="badge bg-success">正常</span></td>
-                                                    <td id="g3_message">0.65</td>
-                                                    <td id="g3_last">刚刚</td>
-                                                </tr>
-                                                <tr>
-                                                    <td>G4</td>
-                                                    <td>流动性检查</td>
-                                                    <td><span id="g4_status" class="badge bg-success">正常</span></td>
-                                                    <td id="g4_message">充足</td>
-                                                    <td id="g4_last">刚刚</td>
-                                                </tr>
-                                                <tr>
-                                                    <td>G5</td>
-                                                    <td>时间窗口限制</td>
-                                                    <td><span id="g5_status" class="badge bg-success">正常</span></td>
-                                                    <td id="g5_message">交易时间内</td>
-                                                    <td id="g5_last">刚刚</td>
-                                                </tr>
-                                            </tbody>
-                                        </table>
-                                    </div>
-                                </div>
-                            </div>
-                            
-                            <!-- S Rules Tab -->
-                            <div class="tab-pane fade" id="s-rules" role="tabpanel" aria-labelledby="s-rules-tab">
-                                <hr>
-                                
-                                <!-- S Rules Status Display -->
-                                <div class="mb-3">
-                                    <h6><i class="fas fa-list"></i> S Rules Status</h6>
-                                    <div class="table-responsive">
-                                        <table class="table table-sm" id="sRulesStatusTable">
-                                            <thead>
-                                                <tr>
-                                                    <th>Rule</th>
-                                                    <th>Description</th>
-                                                    <th>Status</th>
-                                                    <th>Current Value</th>
-                                                    <th>Last Check</th>
-                                                </tr>
-                                            </thead>
-                                            <tbody>
-                                                <tr>
-                                                    <td>S0</td>
-                                                    <td>仓位计算方法</td>
-                                                    <td><span id="s0_status" class="badge bg-success">正常</span></td>
-                                                    <td id="s0_message">百分比</td>
-                                                    <td id="s0_last">刚刚</td>
-                                                </tr>
-                                                <tr>
-                                                    <td>S1</td>
-                                                    <td>仓位数值/百分比</td>
-                                                    <td><span id="s1_status" class="badge bg-success">正常</span></td>
-                                                    <td id="s1_message">1.0%</td>
-                                                    <td id="s1_last">刚刚</td>
-                                                </tr>
-                                                <tr>
-                                                    <td>S2</td>
-                                                    <td>最大仓位数量</td>
-                                                    <td><span id="s2_status" class="badge bg-success">正常</span></td>
-                                                    <td id="s2_message">10</td>
-                                                    <td id="s2_last">刚刚</td>
-                                                </tr>
-                                                <tr>
-                                                    <td>S3</td>
-                                                    <td>仓位重平衡</td>
-                                                    <td><span id="s3_status" class="badge bg-success">正常</span></td>
-                                                    <td id="s3_message">启用</td>
-                                                    <td id="s3_last">刚刚</td>
-                                                </tr>
-                                                <tr>
-                                                    <td>S4</td>
-                                                    <td>波动率调整</td>
-                                                    <td><span id="s4_status" class="badge bg-success">正常</span></td>
-                                                    <td id="s4_message">启用</td>
-                                                    <td id="s4_last">刚刚</td>
-                                                </tr>
-                                            </tbody>
-                                        </table>
-                                    </div>
-                                </div>
-                                
-                                <!-- Sizing History -->
-                                <div class="mb-3">
-                                    <h6><i class="fas fa-history"></i> Sizing History</h6>
-                                    <div class="table-responsive" style="max-height: 200px;">
-                                        <table class="table table-sm" id="sizingHistoryTable">
-                                            <thead>
-                                                <tr>
-                                                    <th>Time</th>
-                                                    <th>Symbol</th>
-                                                    <th>Action</th>
-                                                    <th>Suggested Qty</th>
-                                                    <th>Method</th>
-                                                    <th>Price</th>
-                                                </tr>
-                                            </thead>
-                                            <tbody></tbody>
-                                        </table>
-                                    </div>
-                                </div>
-                            </div>
-
-                        </div>
-                    </div>
-                </div>
-            </div>
-            <div class="col-md-6">
-                <!-- Notifications Panel -->
-                <div class="card">
-                    <div class="card-header d-flex justify-content-between align-items-center">
-                        <h5><i class="fas fa-bell"></i> Notifications</h5>
-                        <div class="btn-group">
-                            <button class="btn btn-sm btn-outline-primary" onclick="app.showNotificationSettings()">
-                                <i class="fas fa-cog"></i> Settings
-                            </button>
-                            <button class="btn btn-sm btn-outline-secondary" id="clearNotificationsBtn">
-                                <i class="fas fa-trash"></i> Clear All
-                            </button>
-                        </div>
-                    </div>
-                    <div class="card-body">
-                        <!-- Notification History Filters -->
-                        <div class="mb-3">
-                            <div class="row g-2">
-                                <div class="col-md-3">
-                                    <select class="form-select form-select-sm" id="historyStatusFilter">
-                                        <option value="">All Status</option>
-                                        <option value="sent">Sent</option>
-                                        <option value="failed">Failed</option>
-                                        <option value="pending">Pending</option>
-                                    </select>
-                                </div>
-                                <div class="col-md-3">
-                                    <select class="form-select form-select-sm" id="historyChannelFilter">
-                                        <option value="">All Channels</option>
-                                        <option value="telegram">Telegram</option>
-                                        <option value="email">Email</option>
-                                        <option value="websocket">WebSocket</option>
-                                    </select>
-                                </div>
-                                <div class="col-md-4">
-                                    <input type="date" class="form-control form-control-sm" id="historySinceFilter" placeholder="Since date">
-                                </div>
-                                <div class="col-md-2">
-                                    <button class="btn btn-sm btn-primary" onclick="app.filterNotificationHistory()">Filter</button>
-                                </div>
-                            </div>
-                        </div>
-                        
-                        <!-- Notification History Table -->
-                        <div class="table-responsive" style="max-height: 400px; overflow-y: auto;">
-                            <table class="table table-sm" id="notificationHistoryTable">
-                                <thead class="table-light sticky-top">
-                                    <tr>
-                                        <th>Time</th>
-                                        <th>Channel</th>
-                                        <th>Event</th>
-                                        <th>Message</th>
-                                        <th>Status</th>
-                                        <th>Error</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="notificationHistoryBody">
-                                    <tr>
-                                        <td colspan="6" class="text-center text-muted py-3">
-                                            <i class="fas fa-history"></i>
-                                            <p class="mb-0">Loading notification history...</p>
-                                        </td>
-                                    </tr>
-                                </tbody>
-                            </table>
-                        </div>
-                    </div>
-                </div>
-            </div>
         </div>
+
+        <!-- DOM Optimizer moved to modal -->
 
 
     </div>
@@ -571,6 +699,64 @@
         </div>
     </div>
 
+    <!-- Daily Account Summary Modal -->
+    <div class="modal fade" id="dailyAccountSummaryModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-xl modal-dialog-scrollable">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title"><i class="fas fa-calendar-day me-2"></i>Daily Account Surplus &amp; PnL</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
+                        <div class="d-flex flex-wrap align-items-center gap-2">
+                            <label for="dailySummaryRange" class="form-label mb-0 me-2">Time Range</label>
+                            <select class="form-select form-select-sm" id="dailySummaryRange">
+                                <option value="7">Last 7 days</option>
+                                <option value="14">Last 14 days</option>
+                                <option value="30" selected>Last 30 days</option>
+                                <option value="60">Last 60 days</option>
+                            </select>
+                            <button class="btn btn-outline-secondary btn-sm" id="refreshDailySummaryBtn" title="Refresh">
+                                <i class="fas fa-sync-alt"></i>
+                            </button>
+                        </div>
+                        <small class="text-muted">Times shown in America/New_York</small>
+                    </div>
+                    <div class="mb-4">
+                        <div class="ratio ratio-16x9">
+                            <canvas id="dailySummaryChart"></canvas>
+                        </div>
+                    </div>
+                    <div class="table-responsive">
+                        <table class="table table-sm table-striped" id="dailyAccountSummaryTable">
+                            <thead class="table-light">
+                                <tr>
+                                    <th>Date (NY)</th>
+                                    <th class="text-end">Orders</th>
+                                    <th class="text-end">Realized PnL (USD)</th>
+                                    <th class="text-end">Starting Surplus</th>
+                                    <th class="text-end">Ending Surplus</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr>
+                                    <td colspan="5" class="text-center text-muted py-3">
+                                        <i class="fas fa-info-circle me-2"></i>Load daily surplus data after logging in
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <div class="small text-muted mt-2" id="dailySummaryMeta"></div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- Strategy Settings Modal -->
     <div class="modal fade" id="strategySettingsModal" tabindex="-1" aria-hidden="true">
       <div class="modal-dialog modal-lg modal-dialog-scrollable">
@@ -599,7 +785,7 @@
               </div>
               <div class="col-12">
                 <label class="form-label">Strategy Path</label>
-                <input type="text" class="form-control" id="strategyPath" placeholder="project/strategy/">
+                <input type="text" class="form-control" id="strategyPath" placeholder="project/src/strategies/">
               </div>
               <div class="col-12">
                 <div class="form-check form-switch">
@@ -613,7 +799,7 @@
                   <input type="text" class="form-control" id="strategyAuthToken" placeholder="Click Generate Token" readonly>
                   <button class="btn btn-outline-secondary" type="button" id="generateStrategyTokenBtn">Generate Token</button>
                 </div>
-                <div class="form-text">如果开启鉴权，请在外部策略调用时将 token 放在请求体的 token 字段中</div>
+                <div class="form-text">If authentication is enabled, include the token in the external strategy request body under the token field.</div>
               </div>
             </div>
           </div>
@@ -646,7 +832,7 @@
                                 </div>
                             </div>
                             <div id="currentPriceDisplay" class="mt-2" style="display: none;">
-                                <small class="text-muted">当前价格: <span id="currentPriceValue" class="fw-bold text-primary">--</span></small>
+                                <small class="text-muted">Current Price: <span id="currentPriceValue" class="fw-bold text-primary">--</span></small>
                             </div>
                         </div>
                         <div class="row">
@@ -727,29 +913,29 @@
                         
                         <!-- Suggested Position Size Section -->
                         <div id="suggestedPositionSection" class="border rounded p-3 mb-3" style="background-color: #e8f5e8;">
-                            <h6 class="mb-3"><i class="fas fa-balance-scale"></i> 建议仓位 (S)</h6>
+                            <h6 class="mb-3"><i class="fas fa-balance-scale"></i> Suggested Position (S)</h6>
                             <div class="row g-2 mb-2">
                                 <div class="col-md-3">
                                     <div class="mb-2">
-                                        <label class="form-label text-muted small">建议数量</label>
+                                        <label class="form-label text-muted small">Suggested Quantity</label>
                                         <div class="fw-bold text-success" id="suggestedQuantity">--</div>
                                     </div>
                                 </div>
                                 <div class="col-md-3">
                                     <div class="mb-2">
-                                        <label class="form-label text-muted small">止损距离</label>
+                                        <label class="form-label text-muted small">Stop Distance</label>
                                         <div class="fw-bold" id="stopDistance">--</div>
                                     </div>
                                 </div>
                                 <div class="col-md-3">
                                     <div class="mb-2">
-                                        <label class="form-label text-muted small">点值</label>
+                                        <label class="form-label text-muted small">Point Value</label>
                                         <div class="fw-bold" id="pointValue">--</div>
                                     </div>
                                 </div>
                                 <div class="col-md-3">
                                     <div class="mb-2">
-                                        <label class="form-label text-muted small">总缩放</label>
+                                        <label class="form-label text-muted small">Total Scaling</label>
                                         <div class="fw-bold" id="scaleTotal">--</div>
                                     </div>
                                 </div>
@@ -757,25 +943,25 @@
                             <div class="row g-2 mb-2">
                                 <div class="col-md-3">
                                     <div class="mb-2">
-                                        <label class="form-label text-muted small">波动缩放</label>
+                                        <label class="form-label text-muted small">Volatility Scaling</label>
                                         <div class="fw-bold" id="scaleVol">--</div>
                                     </div>
                                 </div>
                                 <div class="col-md-3">
                                     <div class="mb-2">
-                                        <label class="form-label text-muted small">回撤缩放</label>
+                                        <label class="form-label text-muted small">Drawdown Scaling</label>
                                         <div class="fw-bold" id="scaleDd">--</div>
                                     </div>
                                 </div>
                                 <div class="col-md-3">
                                     <div class="mb-2">
-                                        <label class="form-label text-muted small">信号缩放</label>
+                                        <label class="form-label text-muted small">Signal Scaling</label>
                                         <div class="fw-bold" id="scaleSig">--</div>
                                     </div>
                                 </div>
                                 <div class="col-md-3">
                                     <div class="mb-2">
-                                        <label class="form-label text-muted small">执行缩放</label>
+                                        <label class="form-label text-muted small">Execution Scaling</label>
                                         <div class="fw-bold" id="scaleExec">--</div>
                                     </div>
                                 </div>
@@ -783,33 +969,33 @@
                             <div class="row g-2 mb-2">
                                 <div class="col-md-3">
                                     <div class="mb-2">
-                                        <label class="form-label text-muted small">最大风险 (R)</label>
+                                        <label class="form-label text-muted small">Max Risk (R)</label>
                                         <div class="fw-bold text-danger" id="maxRisk">--</div>
                                     </div>
                                 </div>
                                 <div class="col-md-3">
                                     <div class="mb-2">
-                                        <label class="form-label text-muted small">预估投入 (R*)</label>
+                                        <label class="form-label text-muted small">Estimated Capital (R*)</label>
                                         <div class="fw-bold text-primary" id="estimatedInvestment">--</div>
                                     </div>
                                 </div>
                                 <div class="col-md-6">
                                     <div class="mb-2">
-                                        <label class="form-label text-muted small">计算方法</label>
+                                        <label class="form-label text-muted small">Calculation Method</label>
                                         <div class="fw-bold" id="sizingMethod">--</div>
                                     </div>
                                 </div>
                             </div>
                             <div class="mb-2">
-                                <label class="form-label text-muted small">详细说明</label>
+                                <label class="form-label text-muted small">Detailed Explanation</label>
                                 <div class="bg-light p-2 rounded small" id="sizingExplanation" style="white-space: pre-wrap; max-height: 100px; overflow-y: auto;">--</div>
                             </div>
                             <div class="mt-2">
                                 <button type="button" class="btn btn-sm btn-outline-success" id="applySuggestedQuantity">
-                                    <i class="fas fa-check"></i> 应用建议数量
+                                    <i class="fas fa-check"></i> Apply Suggested Quantity
                                 </button>
                                 <button type="button" class="btn btn-sm btn-outline-secondary" id="refreshSuggestion">
-                                    <i class="fas fa-sync"></i> 刷新建议
+                                    <i class="fas fa-sync"></i> Refresh Suggestion
                                 </button>
                             </div>
                         </div>
@@ -894,8 +1080,16 @@
       <div class="modal-dialog modal-xl modal-dialog-scrollable">
         <div class="modal-content">
           <div class="modal-header">
-            <h5 class="modal-title">Strategy Details - <span id="detailsStrategyName"></span></h5>
-            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            <h5 class="modal-title">Strategy Details - <span id="detailsStrategyName"></span><span id="detailsPrimarySymbolWrap" class="d-none"> - <span id="detailsPrimarySymbol"></span></span></h5>
+            <div class="d-flex align-items-center gap-2">
+              <button type="button" class="btn btn-outline-warning btn-sm" id="resetStrategyDataBtn" title="Reset strategy orders and stats">
+                <i class="bi bi-arrow-counterclockwise"></i> Reset
+              </button>
+              <button type="button" class="btn btn-outline-danger btn-sm" id="deleteStrategyFromDetails">
+                <i class="bi bi-trash"></i> Delete
+              </button>
+              <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
           </div>
           <div class="modal-body">
             <div class="row g-3 mb-3">
@@ -957,6 +1151,11 @@
                   <i class="fas fa-info-circle"></i> Summary
                 </button>
               </li>
+              <li class="nav-item d-none" role="presentation" id="risk-settings-tab-wrap">
+                <button class="nav-link" id="risk-settings-tab" data-bs-toggle="tab" data-bs-target="#risk-settings" type="button" role="tab" aria-controls="risk-settings" aria-selected="false">
+                  <i class="fas fa-shield-alt"></i> Risk Control Settings
+                </button>
+              </li>
               <li class="nav-item d-none" role="presentation" id="internal-orders-tab-wrap">
                 <button class="nav-link" id="internal-orders-tab" data-bs-toggle="tab" data-bs-target="#internal-orders" type="button" role="tab" aria-controls="internal-orders" aria-selected="false">
                   <i class="fas fa-list"></i> Orders &amp; PnL
@@ -965,6 +1164,11 @@
               <li class="nav-item" role="presentation" id="charts-tab-wrap">
                 <button class="nav-link active" id="charts-tab" data-bs-toggle="tab" data-bs-target="#charts" type="button" role="tab" aria-controls="charts" aria-selected="true">
                   <i class="fas fa-chart-line"></i> <span id="charts-tab-text">Charts</span>
+                </button>
+              </li>
+              <li class="nav-item" role="presentation" id="strategy-chart-tab-wrap">
+                <button class="nav-link" id="strategy-chart-tab" data-bs-toggle="tab" data-bs-target="#strategy-chart" type="button" role="tab" aria-controls="strategy-chart" aria-selected="false">
+                  <i class="fas fa-chart-area"></i> Strategy Candles
                 </button>
               </li>
               <li class="nav-item" role="presentation" id="executions-tab-wrap">
@@ -987,23 +1191,171 @@
             <div class="tab-content mt-3" id="strategyDetailsTabContent">
               <!-- Summary Tab -->
               <div class="tab-pane fade d-none" id="summary" role="tabpanel" aria-labelledby="summary-tab">
-                <div class="mb-3">
-                  <p id="summaryDescription" class="mb-1"></p>
-                  <div>Path: <code id="summaryPath"></code></div>
-                </div>
-                <div class="mb-3">
-                  <h6>Schedule</h6>
-                  <ul id="summarySchedule" class="list-unstyled mb-0"></ul>
-                </div>
-                <div>
-                  <h6>SL/TP Settings</h6>
-                  <div class="table-responsive">
-                    <table class="table table-sm" id="summaryRiskTable">
-                      <thead><tr><th>Symbol</th><th>Stop Loss</th><th>Take Profit</th></tr></thead>
-                      <tbody></tbody>
-                    </table>
+                <div class="row g-3">
+                  <div class="col-12">
+                    <div id="summaryInfoStatus" class="alert alert-warning d-none" role="alert"></div>
+                  </div>
+                  <div class="col-lg-8">
+                    <div class="mb-3">
+                      <h6>Strategy Overview</h6>
+                      <p id="summaryDescription" class="mb-2"></p>
+                      <div class="mb-3">
+                        <label class="form-label">Primary Symbol</label>
+                        <div class="position-relative">
+                          <input type="text" class="form-control" id="summaryPrimarySymbolInput" placeholder="Select symbol" autocomplete="off">
+                          <div class="dropdown-menu w-100" id="summaryPrimarySymbolDropdown"></div>
+                        </div>
+                        <div class="form-text" id="summaryPrimarySymbolStatus">Select a symbol to save</div>
+                      </div>
+                      <div>Path: <code id="summaryPath"></code></div>
+                    </div>
+                    <div class="mb-3">
+                      <h6>Key Behaviors</h6>
+                      <ul id="summaryHighlights" class="list-unstyled mb-0"></ul>
+                    </div>
+                    <div class="mb-3">
+                      <h6>Schedule</h6>
+                      <ul id="summarySchedule" class="list-unstyled mb-0"></ul>
+                    </div>
+                    <div class="mb-3">
+                      <h6>Risk Controls</h6>
+                      <ul id="summaryRiskParams" class="list-unstyled mb-0"></ul>
+                    </div>
+                    <div class="mb-3">
+                      <h6>Strategy Parameters</h6>
+                      <div class="table-responsive">
+                        <table class="table table-sm" id="summaryParameterTable">
+                          <thead><tr><th>Name</th><th>Current</th><th>Default</th><th>Range</th></tr></thead>
+                          <tbody><tr><td colspan="4" class="text-muted">Loading...</td></tr></tbody>
+                        </table>
+                      </div>
+                    </div>
+                    <div class="mb-3">
+                      <h6>Data Subscription</h6>
+                      <div class="row g-2 align-items-center">
+                        <div class="col-sm-7">
+                          <select class="form-select form-select-sm" id="summaryDataFeedSelect">
+                            <option value="market_data">Real-time Price and Volume</option>
+                            <option value="dom_trend">DOM and Trend Score</option>
+                          </select>
+                        </div>
+                        <div class="col-sm-5">
+                          <div class="form-check form-switch mb-0 d-flex align-items-center justify-content-sm-end">
+                            <input class="form-check-input" type="checkbox" role="switch" id="summaryDataPushSwitch">
+                            <label class="form-check-label ms-2 small" for="summaryDataPushSwitch">Push</label>
+                          </div>
+                          <div class="small text-muted text-sm-end" id="summaryDataPushStatus">Not Pushing</div>
+                        </div>
+                      </div>
+                    </div>
+                    <div class="mb-3">
+                      <h6>Position Timing Controls</h6>
+                      <ul id="summaryPositionSettings" class="list-unstyled mb-0"></ul>
+                    </div>
+                    <div>
+                      <h6>SL/TP Settings</h6>
+                      <div class="table-responsive">
+                        <table class="table table-sm" id="summaryRiskTable">
+                          <thead><tr><th>Symbol</th><th>Stop Loss</th><th>Take Profit</th></tr></thead>
+                          <tbody></tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="col-lg-4">
+                    <div class="card h-100">
+                      <div class="card-header d-flex justify-content-between align-items-center">
+                        <span class="fw-semibold">Runtime Metrics</span>
+                        <button class="btn btn-outline-secondary btn-sm" id="summaryStatusRefreshBtn" type="button">
+                          <i class="bi bi-arrow-repeat"></i> Refresh
+                        </button>
+                      </div>
+                      <div class="card-body">
+                        <div class="d-flex justify-content-between small mb-2">
+                          <span>Receiving Data</span>
+                          <span id="summaryStatusReceiving" class="fw-semibold">-</span>
+                        </div>
+                        <div class="d-flex justify-content-between small mb-2">
+                          <span>Runtime (s)</span>
+                          <span id="summaryStatusRuntime" class="fw-semibold">-</span>
+                        </div>
+                        <div class="d-flex justify-content-between small mb-2">
+                          <span>Snapshots Processed</span>
+                          <span id="summaryStatusProcessed" class="fw-semibold">-</span>
+                        </div>
+                        <div class="d-flex justify-content-between small mb-2">
+                          <span>Threshold Hits</span>
+                          <span id="summaryStatusThresholdHits" class="fw-semibold">-</span>
+                        </div>
+                        <div class="d-flex justify-content-between small mb-2">
+                          <span>Buy Signals</span>
+                          <span id="summaryStatusBuySignals" class="fw-semibold">-</span>
+                        </div>
+                        <div class="d-flex justify-content-between small mb-2">
+                          <span>Stop Loss Price</span>
+                          <span id="summaryStatusStopLoss" class="fw-semibold">-</span>
+                        </div>
+                        <div class="d-flex justify-content-between small mb-2">
+                          <span>Take Profit Price</span>
+                          <span id="summaryStatusTakeProfit" class="fw-semibold">-</span>
+                        </div>
+                        <div class="d-flex justify-content-between small">
+                          <span>Sell Signals</span>
+                          <span id="summaryStatusSellSignals" class="fw-semibold">-</span>
+                        </div>
+                        <hr class="my-3">
+                        <div class="mb-2">
+                          <span class="fw-semibold small text-uppercase text-muted">Data Feed Log</span>
+                        </div>
+                        <ul class="list-unstyled small mb-0" id="summaryDataLogList">
+                          <li class="text-muted">No records yet</li>
+                        </ul>
+                      </div>
+                    </div>
                   </div>
                 </div>
+              </div>
+
+              <!-- Strategy Risk Settings Tab -->
+              <div class="tab-pane fade d-none" id="risk-settings" role="tabpanel" aria-labelledby="risk-settings-tab">
+                <form id="riskSettingsForm" class="row gy-3">
+                  <div class="col-lg-6">
+                    <label class="form-label" for="riskMaxPositions">Max Position Count</label>
+                    <input type="number" class="form-control" id="riskMaxPositions" min="0" step="1" placeholder="Unlimited">
+                    <div class="form-text">Leave blank for no limit on positions.</div>
+                  </div>
+                  <div class="col-lg-6">
+                    <label class="form-label" for="riskLossTimeThreshold">Unrealized loss duration threshold (seconds)</label>
+                    <input type="number" class="form-control" id="riskLossTimeThreshold" min="0" step="1" placeholder="e.g., 300">
+                    <div class="form-text">Trigger auto close when unrealized loss exceeds this duration; set 0 or leave blank to disable.</div>
+                  </div>
+                  <div class="col-lg-6">
+                    <div class="form-check form-switch mt-4">
+                      <input class="form-check-input" type="checkbox" id="riskForbidAddOnLoss">
+                      <label class="form-check-label" for="riskForbidAddOnLoss">Forbid adding positions during unrealized losses</label>
+                    </div>
+                    <div class="form-text">Block new or add-on orders whenever any position has an unrealized loss.</div>
+                  </div>
+                  <div class="col-lg-6">
+                    <label class="form-label" for="riskLossPnlThreshold">Unrealized loss threshold</label>
+                    <input type="number" class="form-control" id="riskLossPnlThreshold" step="0.01" placeholder="<= 0">
+                    <div class="form-text">Treat unrealized PnL below this value as a loss; typically a negative number (e.g., -50 or -0.5).</div>
+                  </div>
+                  <div class="col-12">
+                    <div class="form-check form-switch">
+                      <input class="form-check-input" type="checkbox" id="riskNotifyOnTrigger">
+                      <label class="form-check-label" for="riskNotifyOnTrigger">Send alerts for critical risk signals</label>
+                    </div>
+                    <div class="form-text">When disabled, only log the event without notifications; manage channels in Notification Settings.</div>
+                  </div>
+                  <div class="col-12 d-flex justify-content-end gap-2">
+                    <button type="button" class="btn btn-outline-secondary" id="riskSettingsResetBtn">Reset</button>
+                    <button type="submit" class="btn btn-primary" id="riskSettingsSaveBtn">Save Settings</button>
+                  </div>
+                  <div class="col-12">
+                    <div class="small text-muted" id="riskSettingsStatus">Load risk control settings after selecting a strategy.</div>
+                  </div>
+                </form>
               </div>
 
               <!-- Orders & PnL Tab -->
@@ -1018,22 +1370,23 @@
                         <th>Qty</th>
                         <th>Price</th>
                         <th>Status</th>
+                        <th>Created At</th>
                         <th>PnL</th>
                         <th>Commission</th>
-                        <th>来源</th>
+                        <th>Source</th>
                         <th>Actions</th>
                       </tr>
                     </thead>
-                    <tbody></tbody>
-                  </table>
-                </div>
+                  <tbody></tbody>
+                </table>
               </div>
+            </div>
 
-              <!-- Charts Tab -->
-              <div class="tab-pane fade show active" id="charts" role="tabpanel" aria-labelledby="charts-tab">
-                <div class="row">
-                  <div class="col-md-6">
-                    <div class="card">
+            <!-- Charts Tab -->
+            <div class="tab-pane fade show active" id="charts" role="tabpanel" aria-labelledby="charts-tab">
+              <div class="row">
+                <div class="col-md-6">
+                  <div class="card">
                       <div class="card-header">
                         <h6 class="mb-0"><i class="fas fa-chart-line"></i> Cumulative PnL</h6>
                       </div>
@@ -1077,6 +1430,52 @@
                 </div>
               </div>
 
+            <!-- Strategy Chart Tab -->
+            <div class="tab-pane fade" id="strategy-chart" role="tabpanel" aria-labelledby="strategy-chart-tab">
+              <div class="d-flex flex-wrap gap-3 align-items-end mb-3">
+                <div class="d-flex flex-wrap gap-3 align-items-end">
+                  <div>
+                    <label for="strategyChartInterval" class="form-label small mb-1">Interval</label>
+                    <select class="form-select form-select-sm" id="strategyChartInterval">
+                      <option value="1 min">1 minute</option>
+                      <option value="5 mins" selected>5 minutes</option>
+                      <option value="15 mins">15 minutes</option>
+                      <option value="30 mins">30 minutes</option>
+                      <option value="1 hour">1 hour</option>
+                      <option value="1 day">1 day</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label for="strategyChartDuration" class="form-label small mb-1">Duration</label>
+                    <select class="form-select form-select-sm" id="strategyChartDuration">
+                      <option value="1 D" selected>1 Day</option>
+                      <option value="2 D">2 Days</option>
+                      <option value="5 D">5 Days</option>
+                      <option value="1 W">1 Week</option>
+                      <option value="1 M">1 Month</option>
+                      <option value="3 M">3 Months</option>
+                      <option value="1 Y">1 Year</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="ms-auto d-flex flex-wrap gap-2">
+                  <button class="btn btn-outline-success btn-sm" id="strategyChartRealtimeBtn" type="button">
+                    <i class="fas fa-play"></i> Live
+                  </button>
+                  <button class="btn btn-outline-secondary btn-sm" id="strategyChartReplayBtn" type="button">
+                    <i class="fas fa-history"></i> Replay
+                  </button>
+                </div>
+              </div>
+              <div id="strategyChartContainer" class="border rounded" style="min-height: 420px;">
+                <div class="text-center text-muted py-5" id="strategyChartPlaceholder">Charts will display after loading a strategy.</div>
+              </div>
+              <div class="d-flex justify-content-between align-items-center mt-2 small text-muted">
+                <span id="strategyChartSummary"></span>
+                <span id="strategyChartStatus"></span>
+              </div>
+            </div>
+
               <!-- Executions Tab -->
               <div class="tab-pane fade" id="executions" role="tabpanel" aria-labelledby="executions-tab">
                 <div class="d-flex justify-content-between align-items-center mb-3">
@@ -1084,7 +1483,7 @@
                     <label class="form-label me-2">Items per page:</label>
                     <select class="form-select form-select-sm d-inline-block w-auto" id="executionsPageSize">
                       <option value="10">10</option>
-                      <option value="25" selected>25</option>
+                      <option value="20" selected>20</option>
                       <option value="50">50</option>
                       <option value="100">100</option>
                     </select>
@@ -1165,21 +1564,63 @@
                             <input type="text" class="form-control" id="riskSymbol" placeholder="AAPL">
                         </div>
                         <div class="mb-3">
+                            <label class="form-label">Rule Type</label>
+                            <select class="form-select" id="riskRuleType">
+                                <option value="fixed" selected>Fixed</option>
+                                <option value="trailing">Trailing (ATR)</option>
+                            </select>
+                        </div>
+                        <div class="mb-3 fixed-rule-field">
                             <label class="form-label">Stop Loss Price</label>
                             <input type="number" class="form-control" id="riskStopLossPrice" step="0.01">
                         </div>
-                        <div class="mb-3">
+                        <div class="mb-3 fixed-rule-field">
                             <label class="form-label">Take Profit Price</label>
                             <input type="number" class="form-control" id="riskTakeProfitPrice" step="0.01">
                         </div>
-                        <div class="mb-3">
+                        <div class="mb-3 fixed-rule-field">
                             <label class="form-label">Max Time (optional)</label>
                             <input type="text" class="form-control" id="riskMaxTime" name="max_time_span" placeholder="e.g., 1d, 2h, 30m">
                             <div class="form-text">Maximum time to hold position before auto-close</div>
                         </div>
-                        
+
+                        <div class="mb-3" id="atrParamsSection" style="display: none;">
+                            <hr>
+                            <h6 class="text-muted"><i class="fas fa-wave-square"></i> ATR Parameters</h6>
+                            <div class="row g-2">
+                                <div class="col-6 col-md-4">
+                                    <label class="form-label">Lookback</label>
+                                    <input type="number" class="form-control" id="atrLookback" value="14" min="1" step="1" data-default="14">
+                                </div>
+                                <div class="col-6 col-md-4">
+                                    <label class="form-label">Bar Minutes</label>
+                                    <input type="number" class="form-control" id="atrBarMinutes" value="5" min="1" step="1" data-default="5">
+                                </div>
+                                <div class="col-6 col-md-4">
+                                    <label class="form-label">Stream Interval (s)</label>
+                                    <input type="number" class="form-control" id="atrStreamInterval" value="5" min="1" step="1" data-default="5">
+                                </div>
+                                <div class="col-6 col-md-4">
+                                    <label class="form-label">Update Throttle (s)</label>
+                                    <input type="number" class="form-control" id="atrUpdateThrottle" value="30" min="1" step="0.1" data-default="30">
+                                </div>
+                                <div class="col-6 col-md-4">
+                                    <label class="form-label">SL Multiplier</label>
+                                    <input type="number" class="form-control" id="atrMultiplierSl" value="1" min="0" step="0.1" data-default="1">
+                                </div>
+                                <div class="col-6 col-md-4">
+                                    <label class="form-label">TP Multiplier</label>
+                                    <input type="number" class="form-control" id="atrMultiplierTp" value="2" min="0" step="0.1" data-default="2">
+                                </div>
+                                <div class="col-12 col-md-6">
+                                    <label class="form-label">Delta Threshold</label>
+                                    <input type="number" class="form-control" id="atrDeltaThreshold" value="0.25" min="0" step="0.01" data-default="0.25">
+                                </div>
+                            </div>
+                        </div>
+
                         <!-- PnL Preview Section -->
-                        <div class="mb-3" id="pnlPreviewSection" style="display: none;">
+                        <div class="mb-3 fixed-rule-field" id="pnlPreviewSection" style="display: none;">
                             <hr>
                             <h6 class="text-muted"><i class="fas fa-calculator"></i> Expected PnL</h6>
                             <div class="row">
@@ -1271,8 +1712,21 @@
         <div class="modal-dialog" style="max-width: 95%; width: 95%;">
             <div class="modal-content">
                 <div class="modal-header">
-                    <h5 class="modal-title"><i class="fas fa-eye"></i> 监控 - <span id="monitorSymbol">SYMBOL</span></h5>
-                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                    <h5 class="modal-title"><i class="fas fa-eye"></i> Monitor - <span id="monitorSymbol">SYMBOL</span></h5>
+                    <div class="d-flex align-items-center gap-2">
+                        <button class="btn btn-sm btn-outline-secondary" id="domSettingsBtn" title="DOM Settings">
+                            <i class="fas fa-cog"></i>
+                        </button>
+                        <button class="btn btn-sm btn-outline-primary" id="monitorDomHistoryToggle" title="View today's historical signals"
+                                type="button" data-bs-toggle="collapse" data-bs-target="#monitorDomHistoryPanel"
+                                aria-expanded="false" aria-controls="monitorDomHistoryPanel">
+                            <i class="fas fa-history"></i>
+                        </button>
+                        <button class="btn btn-sm btn-outline-secondary" id="monitorFullscreenBtn" title="Fullscreen">
+                            <i class="fas fa-expand"></i>
+                        </button>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                    </div>
                 </div>
                 <div class="modal-body">
                     <div class="row g-3 mb-3">
@@ -1290,7 +1744,7 @@
                         <div class="col-md-3">
                             <label class="form-label">Duration</label>
                             <select class="form-select" id="monitorDuration">
-                                <option value="1 D" selected>1 Day</option>
+                                 <option value="1 D" selected>1 Day</option>
                                 <option value="2 D">2 Days</option>
                                 <option value="5 D">5 Days</option>
                                 <option value="1 W">1 Week</option>
@@ -1308,22 +1762,33 @@
                                 <label class="btn btn-outline-primary" for="chartTypeCandlestick">Candlestick</label>
                             </div>
                         </div>
-                        <div class="col-md-3 d-flex align-items-end justify-content-end">
-                            <button class="btn btn-primary me-2" id="refreshMonitorChartBtn"><i class="fas fa-sync"></i> 更新图表</button>
-                            <button class="btn btn-secondary me-2" id="resetChartZoomBtn"><i class="fas fa-expand-arrows-alt"></i> 重置缩放</button>
-                            <button class="btn btn-info" id="monitorRealtimeBtn"><i class="fas fa-play"></i> 实时</button>
+                        <div class="col-md-3 d-flex align-items-end justify-content-end flex-wrap gap-2">
+                            <button class="btn btn-outline-success" id="monitorDomToggleBtn"><i class="fas fa-play"></i> Start DOM</button>
+                            <button class="btn btn-secondary" id="resetChartZoomBtn"><i class="fas fa-expand-arrows-alt"></i> Reset Zoom</button>
+                            <button class="btn btn-info" id="monitorRealtimeBtn"><i class="fas fa-play"></i> Live</button>
                         </div>
                     </div>
                     <div class="row g-3">
                         <div class="col-lg-8">
-                            <div id="monitorChartContainer" style="height: 420px; border: 1px solid #ddd;">
-                                <div class="d-flex justify-content-center align-items-center h-100">
-                                    <p class="text-muted">图表加载中...</p>
+                            <div id="monitorTrendChartWrapper" class="mb-2" style="height: 150px;">
+                                <canvas id="monitorTrendChart"></canvas>
+                            </div>
+                            <div class="collapse" id="monitorDomHistoryPanel">
+                                <div class="card border-0 shadow-sm mb-3">
+                                    <div class="card-body py-2">
+                                        <div class="d-flex justify-content-between align-items-center mb-2">
+                                            <span class="text-muted small">Today's DOM signals</span>
+                                            <small class="text-muted" id="monitorDomHistoryMeta">-</small>
+                                        </div>
+                                        <div id="monitorDomHistoryList" class="list-group list-group-flush small">
+                                            <div class="list-group-item text-center text-muted py-2">No signals yet</div>
+                                        </div>
+                                    </div>
                                 </div>
                             </div>
-                            <div id="monitorVolumeContainer" style="height: 240px; border: 1px solid #ddd; border-top: none; margin-top: 0;">
+                            <div id="monitorChartContainer" style="height: 660px; border: 1px solid #ddd;">
                                 <div class="d-flex justify-content-center align-items-center h-100">
-                                    <p class="text-muted">Volume加载中...</p>
+                                    <p class="text-muted">Chart loading...</p>
                                 </div>
                             </div>
                         </div>
@@ -1331,16 +1796,16 @@
                             <div class="card mb-3">
                                 <div class="card-body p-3">
                                     <div class="d-flex justify-content-between align-items-center mb-2">
-                                        <small class="text-muted">今日涨跌</small>
+                                        <small class="text-muted">Today's change</small>
                                         <div>
                                             <span id="monitorAssetChange" class="fw-bold">$0.00</span>
                                             <small id="monitorAssetChangePercent">(0.00%)</small>
                                         </div>
                                     </div>
                                     <div class="mt-2">
-                                        <div class="text-muted small mb-1">日内价格分布（按价格从低到高）</div>
+                                        <div class="text-muted small mb-1">Intraday price distribution (low to high)</div>
                                         <div id="monitorOhlcStrip" class="w-100" style="height: 14px;">
-                                            <!-- JS 将在此渲染一段高度10px的水平线段与四个点 -->
+                                            <!-- JS renders a 10px-high horizontal line segment with four points here -->
                                         </div>
                                     </div>
                                 </div>
@@ -1349,15 +1814,15 @@
                             <div class="card mb-3">
                                 <div class="card-body p-3">
                                     <div class="d-flex justify-content-between">
-                                        <span class="text-muted">持仓</span>
+                                        <span class="text-muted">Position</span>
                                         <span id="monitorPositionCombined" class="fw-bold">0 ($0.00)</span>
                                     </div>
                                     <div class="d-flex justify-content-between">
-                                        <span class="text-muted">当前价格 <span style="color: rgb(255, 206, 84); font-weight: bold;">——</span></span>
+                                        <span class="text-muted">Current Price <span style="color: rgb(255, 206, 84); font-weight: bold;">——</span></span>
                                         <span id="monitorCurrentPrice" class="fw-bold">$0.00</span>
                                     </div>
                                     <div class="d-flex justify-content-between">
-                                        <span class="text-muted">平均成本 <span style="color: rgb(153, 102, 255); font-weight: bold;">——</span></span>
+                                        <span class="text-muted">Average cost <span style="color: rgb(153, 102, 255); font-weight: bold;">——</span></span>
                                         <span id="monitorAvgCost" class="fw-bold">$0.00</span>
                                     </div>
                                 </div>
@@ -1366,32 +1831,32 @@
                             <div class="card mb-3 border-0">
                                 <div class="card-body p-3">
                                     <div class="d-flex justify-content-between align-items-center mb-2">
-                                        <small class="text-muted">实时PnL</small>
+                                        <small class="text-muted">Live PnL</small>
                                         <div>
                                             <span id="monitorPnL" class="fw-bold">$0.00</span>
                                             <small id="monitorPnLPercent">(0.00%)</small>
                                         </div>
                                     </div>
                                     <div class="d-flex justify-content-between align-items-center">
-                                        <small class="text-muted">风险规则</small>
+                                        <small class="text-muted">Risk Rules</small>
                                         <div class="form-check form-switch">
                                             <input class="form-check-input" type="checkbox" id="monitorRiskToggle">
-                                            <label class="form-check-label" for="monitorRiskToggle">激活</label>
+                                            <label class="form-check-label" for="monitorRiskToggle">Activate</label>
                                         </div>
                                     </div>
                                     <!-- Active Risk Rule Display -->
                                     <div class="mt-2 p-2 bg-success bg-opacity-10 border border-success rounded" id="activeRiskRuleDisplay" style="display: none;">
                                         <div class="d-flex align-items-center">
                                             <i class="fas fa-shield-alt text-success me-2"></i>
-                                            <small class="text-success fw-bold">激活的风险规则</small>
+                                            <small class="text-success fw-bold">Active risk rules</small>
                                         </div>
                                         <div class="row g-1 mt-1">
                                             <div class="col-6">
-                                                <small class="text-muted d-block">止损价格</small>
+                                                <small class="text-muted d-block">Stop-loss price</small>
                                                 <span class="fw-bold text-danger" id="activeStopLossPrice">$0.00</span>
                                             </div>
                                             <div class="col-6">
-                                                <small class="text-muted d-block">止盈价格</small>
+                                                <small class="text-muted d-block">Take-profit price</small>
                                                 <span class="fw-bold text-success" id="activeTakeProfitPrice">$0.00</span>
                                             </div>
                                         </div>
@@ -1399,14 +1864,14 @@
                                     <div class="row g-2 mt-2">
                                         <div class="col-6">
                                             <div class="input-group input-group-sm">
-                                                <span class="input-group-text">止损 <span style="color: rgb(255, 99, 132); font-weight: bold;">- - -</span></span>
+                                                <span class="input-group-text">Stop-loss <span style="color: rgb(255, 99, 132); font-weight: bold;">- - -</span></span>
                                                 <input type="number" step="0.01" class="form-control" id="monitorStopLoss">
                                             </div>
                                             <div><small id="monitorStopLossDelta" class="text-muted">Δ — / —%</small></div>
                                         </div>
                                         <div class="col-6">
                                             <div class="input-group input-group-sm">
-                                                <span class="input-group-text">止盈 <span style="color: rgb(75, 192, 192); font-weight: bold;">- - -</span></span>
+                                                <span class="input-group-text">Take-profit <span style="color: rgb(75, 192, 192); font-weight: bold;">- - -</span></span>
                                                 <input type="number" step="0.01" class="form-control" id="monitorTakeProfit">
                                             </div>
                                             <div><small id="monitorTakeProfitDelta" class="text-muted">Δ — / —%</small></div>
@@ -1415,11 +1880,11 @@
                                     <div class="mt-2 p-2 bg-light rounded" id="expectedPnLSection" style="display: none;">
                                         <div class="row g-2 text-center">
                                             <div class="col-4">
-                                                <small class="text-muted d-block">止损预期</small>
+                                                <small class="text-muted d-block">Expected stop-loss PnL</small>
                                                 <span class="fw-bold text-danger" id="expectedStopLossPnL">$0.00</span>
                                             </div>
                                             <div class="col-4">
-                                                <small class="text-muted d-block">止盈预期</small>
+                                                <small class="text-muted d-block">Expected take-profit PnL</small>
                                                 <span class="fw-bold text-success" id="expectedTakeProfitPnL">$0.00</span>
                                             </div>
                                             <div class="col-4">
@@ -1429,13 +1894,13 @@
                                         </div>
                                     </div>
                                     <div class="d-grid gap-2 mt-3">
-                                        <button class="btn btn-sm btn-warning" id="saveMonitorRiskBtn"><i class="fas fa-save"></i> 保存规则</button>
+                                        <button class="btn btn-sm btn-warning" id="saveMonitorRiskBtn"><i class="fas fa-save"></i> Save Rules</button>
                                         <div class="row g-2 mt-2">
                                             <div class="col-6">
-                                                <button class="btn btn-sm btn-danger w-100" id="closePositionBtn"><i class="fas fa-times-circle"></i> 平仓</button>
+                                                <button class="btn btn-sm btn-danger w-100" id="closePositionBtn"><i class="fas fa-times-circle"></i> Close Position</button>
                                             </div>
                                             <div class="col-6">
-                                                <button class="btn btn-sm btn-info w-100" id="reversePositionBtn"><i class="fas fa-exchange-alt"></i> 反向下单</button>
+                                                <button class="btn btn-sm btn-info w-100" id="reversePositionBtn"><i class="fas fa-exchange-alt"></i> Reverse Order</button>
                                             </div>
                                         </div>
                                     </div>
@@ -1446,7 +1911,7 @@
                             <div class="card">
                                 <div class="card-body p-3">
                                     <div class="d-flex justify-content-between align-items-center mb-2">
-                                        <small class="text-muted">订单列表</small>
+                                        <small class="text-muted">Order List</small>
                                         <div class="btn-group btn-group-sm" role="group">
                                             <input type="radio" class="btn-check" name="orderStatusFilter" id="orderStatusWorking" value="working" checked>
                                             <label class="btn btn-outline-primary" for="orderStatusWorking">Working</label>
@@ -1456,7 +1921,7 @@
                                     </div>
                                     <div id="monitorOrdersList" class="" style="max-height: 200px; overflow-y: auto;">
                                         <div class="text-center text-muted py-2">
-                                            <small>加载中...</small>
+                                            <small>Loading...</small>
                                         </div>
                                     </div>
                                 </div>
@@ -1465,7 +1930,7 @@
                     </div>
                 </div>
                 <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
                 </div>
             </div>
         </div>
@@ -1478,16 +1943,18 @@
                 <div class="card-header d-flex justify-content-between align-items-center">
                     <h5 class="mb-0"><i class="fas fa-file-alt"></i> Logs</h5>
                     <div>
-                        <button class="btn btn-sm btn-outline-light me-2" id="logStatsBtn">统计</button>
+                        <button class="btn btn-sm btn-outline-light me-2" id="logStatsBtn">Analytics</button>
                     </div>
                 </div>
                 <div class="card-body">
                     <div class="row g-2 mb-2">
                         <div class="col-md-2">
                             <select class="form-select form-select-sm" id="logModule">
+                                <option value="internal_strategy,queue_manager" selected>Strategy signal pipeline</option>
                                 <option value="all">All Modules</option>
-                                <option value="internal_strategy">内部策略</option>
-                                <option value="external_strategy">外部策略</option>
+                                <option value="internal_strategy">Internal strategy</option>
+                                <option value="queue_manager">Queue manager</option>
+                                <option value="external_strategy">External strategy</option>
                                 <option value="risk_rule">risk rule</option>
                                 <option value="orders">orders</option>
                                 <option value="portfolio">portfolio</option>
@@ -1528,7 +1995,7 @@
         <div class="modal-dialog modal-lg">
             <div class="modal-content">
                 <div class="modal-header">
-                    <h5 class="modal-title">日志统计</h5>
+                    <h5 class="modal-title">Log analytics</h5>
                     <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
                 </div>
                 <div class="modal-body">
@@ -1536,11 +2003,11 @@
                         <table class="table table-sm" id="logStatsTable">
                             <thead>
                                 <tr>
-                                    <th>模块</th>
-                                    <th>接口</th>
-                                    <th>请求数</th>
-                                    <th>平均响应时间(ms)</th>
-                                    <th>成功率</th>
+                                    <th>Module</th>
+                                    <th>Endpoint</th>
+                                    <th>Requests</th>
+                                    <th>Avg response time (ms)</th>
+                                    <th>Success rate</th>
                                 </tr>
                             </thead>
                             <tbody></tbody>
@@ -1600,6 +2067,7 @@
                     <select class="form-select" id="slTypeSelect" style="max-width: 140px;">
                       <option value="amount" selected>Amount</option>
                       <option value="percent">Percent</option>
+                      <option value="trailing">Trailing (ATR)</option>
                     </select>
                   </div>
                 </div>
@@ -1614,8 +2082,36 @@
                     <select class="form-select" id="tpTypeSelect" style="max-width: 140px;">
                       <option value="amount" selected>Amount</option>
                       <option value="percent">Percent</option>
+                      <option value="trailing">Trailing (ATR)</option>
                     </select>
                   </div>
+                </div>
+              </div>
+            </div>
+            <div id="subscriptionGroup" class="mb-3" style="display:none;">
+              <label class="form-label">Data Subscription</label>
+              <select class="form-select" id="dataSubscriptionSelect">
+                <option value="market_data">Real-time Price + Volume</option>
+                <option value="dom_trend">DOM + Trend Score</option>
+              </select>
+              <div class="form-text">Select the market data feed required for this internal strategy.</div>
+            </div>
+            <div id="positionTimingGroup" class="mb-3" style="display:none;">
+              <label class="form-label">Position Timing Controls</label>
+              <div class="row g-2">
+                <div class="col-sm-6">
+                  <div class="input-group">
+                    <span class="input-group-text">Add Cooldown (min)</span>
+                    <input type="number" min="0" class="form-control" id="positionAddCooldownInput" placeholder="Leave blank for no limit">
+                  </div>
+                  <div class="form-text">Block additional entries for this many minutes after opening or adding.</div>
+                </div>
+                <div class="col-sm-6">
+                  <div class="input-group">
+                    <span class="input-group-text">Exit Before Close (min)</span>
+                    <input type="number" min="0" class="form-control" id="closeBeforeCloseInput" placeholder="Leave blank to skip auto-close">
+                  </div>
+                  <div class="form-text">Automatically flatten remaining positions this many minutes before Nasdaq close.</div>
                 </div>
               </div>
             </div>
@@ -1662,6 +2158,7 @@
                   <select class="form-select" id="editSlTypeSelect" style="max-width: 140px;">
                     <option value="amount">Amount</option>
                     <option value="percent">Percent</option>
+                    <option value="trailing">Trailing (ATR)</option>
                   </select>
                 </div>
               </div>
@@ -1677,9 +2174,39 @@
                   <select class="form-select" id="editTpTypeSelect" style="max-width: 140px;">
                     <option value="amount">Amount</option>
                     <option value="percent">Percent</option>
+                    <option value="trailing">Trailing (ATR)</option>
                   </select>
                 </div>
               </div>
+            </div>
+            <div id="editSubscriptionGroup" class="mb-3" style="display:none;">
+              <label class="form-label">Data Subscription</label>
+              <select class="form-select" id="editDataSubscriptionSelect">
+                <option value="">--</option>
+                <option value="market_data">Real-time Price + Volume</option>
+                <option value="dom_trend">DOM + Trend Score</option>
+              </select>
+            </div>
+            <div id="editPositionTimingGroup" class="mb-3" style="display:none;">
+              <label class="form-label">Position Timing Controls</label>
+              <div class="row g-2">
+                <div class="col-sm-6">
+                  <div class="input-group">
+                    <span class="input-group-text">Add Cooldown (min)</span>
+                    <input type="number" min="0" class="form-control" id="editPositionAddCooldownInput" placeholder="Leave blank for no limit">
+                  </div>
+                </div>
+                <div class="col-sm-6">
+                  <div class="input-group">
+                    <span class="input-group-text">Exit Before Close (min)</span>
+                    <input type="number" min="0" class="form-control" id="editCloseBeforeCloseInput" placeholder="Leave blank to skip auto-close">
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div id="editParameterGroup" class="mb-3" style="display:none;">
+              <label class="form-label">Strategy Parameters</label>
+              <div id="editParameterList" class="vstack gap-3"></div>
             </div>
           </div>
           <div class="modal-footer">
@@ -1695,26 +2222,26 @@
       <div class="modal-dialog">
         <div class="modal-content">
           <div class="modal-header">
-            <h5 class="modal-title"><i class="fas fa-sign-in-alt"></i> 登录</h5>
+            <h5 class="modal-title"><i class="fas fa-sign-in-alt"></i> Login</h5>
             <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
           </div>
           <div class="modal-body">
             <div class="mb-3">
-              <label class="form-label">用户名</label>
+              <label class="form-label">Username</label>
               <input type="text" class="form-control" id="loginUsername" placeholder="admin">
             </div>
             <div class="mb-3">
-              <label class="form-label">密码</label>
+              <label class="form-label">Password</label>
               <input type="password" class="form-control" id="loginPassword" placeholder="••••••">
             </div>
             <div class="form-check">
               <input class="form-check-input" type="checkbox" id="rememberLogin">
-              <label class="form-check-label" for="rememberLogin">记住用户名和密码（仅本机存储）</label>
+              <label class="form-check-label" for="rememberLogin">Remember username and password (stored locally only)</label>
             </div>
           </div>
           <div class="modal-footer">
-            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
-            <button type="button" class="btn btn-primary" id="loginSubmitBtn">登录</button>
+            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+            <button type="button" class="btn btn-primary" id="loginSubmitBtn">Login</button>
           </div>
         </div>
       </div>
@@ -1725,28 +2252,28 @@
         <div class="modal-dialog modal-xl">
             <div class="modal-content">
                 <div class="modal-header">
-                    <h5 class="modal-title"><i class="fas fa-list"></i> 风险规则触发的订单</h5>
+                    <h5 class="modal-title"><i class="fas fa-list"></i> Orders Triggered by Risk Rules</h5>
                     <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
                 </div>
                 <div class="modal-body">
                     <div class="mb-3">
-                        <strong>规则信息：</strong>
+                        <strong>Rule details:</strong>
                         <span id="ruleInfoText"></span>
                     </div>
                     <div class="table-responsive">
                         <table class="table table-sm" id="riskRuleOrdersTable">
                             <thead>
                                 <tr>
-                                    <th>订单ID</th>
-                                    <th>时间</th>
-                                    <th>标的</th>
-                                    <th>操作</th>
-                                    <th>数量</th>
-                                    <th>价格</th>
-                                    <th>状态</th>
-                                    <th>成交价</th>
+                                    <th>Order ID</th>
+                                    <th>Time</th>
+                                    <th>Symbol</th>
+                                    <th>Action</th>
+                                    <th>Quantity</th>
+                                    <th>Price</th>
+                                    <th>Status</th>
+                                    <th>Fill Price</th>
                                     <th>P&L</th>
-                                    <th>来源</th>
+                                    <th>Source</th>
                                 </tr>
                             </thead>
                             <tbody></tbody>
@@ -1757,7 +2284,7 @@
                             <div class="col-md-4">
                                 <div class="card bg-light">
                                     <div class="card-body text-center">
-                                        <h6>总订单数</h6>
+                                        <h6>Total orders</h6>
                                         <h4 id="totalOrdersCount">0</h4>
                                     </div>
                                 </div>
@@ -1765,7 +2292,7 @@
                             <div class="col-md-4">
                                 <div class="card bg-success text-white">
                                     <div class="card-body text-center">
-                                        <h6>总盈利</h6>
+                                        <h6>Total profit</h6>
                                         <h4 id="totalProfit">$0.00</h4>
                                     </div>
                                 </div>
@@ -1773,7 +2300,7 @@
                             <div class="col-md-4">
                                 <div class="card bg-danger text-white">
                                     <div class="card-body text-center">
-                                        <h6>总亏损</h6>
+                                        <h6>Total loss</h6>
                                         <h4 id="totalLoss">$0.00</h4>
                                     </div>
                                 </div>
@@ -1782,39 +2309,39 @@
                     </div>
                 </div>
                 <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
                 </div>
             </div>
         </div>
     </div>
 
-    <!-- 订单详情模态框 -->
+    <!-- Order details modal -->
     <div class="modal fade" id="orderDetailsModal" tabindex="-1" aria-hidden="true">
         <div class="modal-dialog modal-lg">
             <div class="modal-content">
                 <div class="modal-header">
-                    <h5 class="modal-title"><i class="fas fa-info-circle"></i> 订单详情</h5>
+                    <h5 class="modal-title"><i class="fas fa-info-circle"></i> Order Details</h5>
                     <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
                 </div>
                 <div class="modal-body" id="orderDetailsModalBody">
-                    <!-- 订单详情内容将通过JavaScript动态填充 -->
+                    <!-- Order details will be populated dynamically via JavaScript -->
                 </div>
                 <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
                 </div>
             </div>
         </div>
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js" defer></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js" defer></script>
-<script src="https://cdn.jsdelivr.net/npm/luxon" defer></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3" defer></script>
+    <script src="https://cdn.jsdelivr.net/npm/luxon@3.4.4/build/global/luxon.min.js" defer></script>
     <!-- Config Rules Modal -->
     <div class="modal fade" id="configRulesModal" tabindex="-1" aria-labelledby="configRulesModalLabel" aria-hidden="true">
         <div class="modal-dialog modal-lg">
             <div class="modal-content">
                 <div class="modal-header">
-                    <h5 class="modal-title" id="configRulesModalLabel"><i class="fas fa-cog"></i> 规则配置</h5>
+                    <h5 class="modal-title" id="configRulesModalLabel"><i class="fas fa-cog"></i> Rule Configuration</h5>
                     <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
                 </div>
                 <div class="modal-body">
@@ -1841,57 +2368,57 @@
                                     <div class="row">
                                         <div class="col-md-6">
                                             <div class="mb-3">
-                                                <label class="form-label">G0: 最大回撤 (%)</label>
+                                                <label class="form-label">G0: Max drawdown (%)</label>
                                                 <input type="number" class="form-control form-control-sm" id="g0MaxDrawdown" step="0.1" placeholder="5.0" max="20">
-                                                <small class="form-text text-muted">账户最大回撤限制</small>
+                                                <small class="form-text text-muted">Account drawdown limit</small>
                                             </div>
                                         </div>
                                         <div class="col-md-6">
                                             <div class="mb-3">
-                                                <label class="form-label">G1: 最大亏损 (%)</label>
+                                                <label class="form-label">G1: Max loss (%)</label>
                                                 <input type="number" class="form-control form-control-sm" id="g1MaxLoss" step="0.1" placeholder="2.0" max="10">
-                                                <small class="form-text text-muted">单笔交易最大亏损限制</small>
+                                                <small class="form-text text-muted">Maximum loss per trade</small>
                                             </div>
                                         </div>
                                     </div>
                                     <div class="row">
                                         <div class="col-md-6">
                                             <div class="mb-3">
-                                                <label class="form-label">G2: 单标的最大仓位 (%)</label>
+                                                <label class="form-label">G2: Max position per symbol (%)</label>
                                                 <input type="number" class="form-control form-control-sm" id="g2MaxPositionPerSymbol" step="0.1" placeholder="10.0" max="50">
-                                                <small class="form-text text-muted">单个标的最大仓位占账户比例</small>
+                                                <small class="form-text text-muted">Maximum allocation per symbol</small>
                                             </div>
                                         </div>
                                         <div class="col-md-6">
                                             <div class="mb-3">
-                                                <label class="form-label">G3: 相关性检查</label>
+                                                <label class="form-label">G3: Correlation check</label>
                                                 <select class="form-select form-select-sm" id="g3CorrelationCheck">
-                                                    <option value="enabled">启用</option>
-                                                    <option value="disabled">禁用</option>
+                                                    <option value="enabled">Enabled</option>
+                                                    <option value="disabled">Disabled</option>
                                                 </select>
-                                                <small class="form-text text-muted">检查持仓标的间相关性</small>
+                                                <small class="form-text text-muted">Check correlation between positions</small>
                                             </div>
                                         </div>
                                     </div>
                                     <div class="row">
                                         <div class="col-md-6">
                                             <div class="mb-3">
-                                                <label class="form-label">G4: 流动性检查</label>
+                                                <label class="form-label">G4: Liquidity check</label>
                                                 <select class="form-select form-select-sm" id="g4LiquidityCheck">
-                                                    <option value="enabled">启用</option>
-                                                    <option value="disabled">禁用</option>
+                                                    <option value="enabled">Enabled</option>
+                                                    <option value="disabled">Disabled</option>
                                                 </select>
-                                                <small class="form-text text-muted">检查标的流动性是否充足</small>
+                                                <small class="form-text text-muted">Verify symbol liquidity</small>
                                             </div>
                                         </div>
                                         <div class="col-md-6">
                                             <div class="mb-3">
-                                                <label class="form-label">G5: 时间窗口限制</label>
+                                                <label class="form-label">G5: Trading window restriction</label>
                                                 <select class="form-select form-select-sm" id="g5TimeWindow">
-                                                    <option value="enabled">启用</option>
-                                                    <option value="disabled">禁用</option>
+                                                    <option value="enabled">Enabled</option>
+                                                    <option value="disabled">Disabled</option>
                                                 </select>
-                                                <small class="form-text text-muted">限制交易时间窗口</small>
+                                                <small class="form-text text-muted">Restrict the trading time window</small>
                                             </div>
                                         </div>
                                     </div>
@@ -1956,10 +2483,10 @@
                     </div>
                 </div>
                 <div class="modal-footer d-flex justify-content-between">
-                    <button type="button" class="btn btn-warning" id="resetConfigRulesBtn">重置</button>
+                    <button type="button" class="btn btn-warning" id="resetConfigRulesBtn">Reset</button>
                     <div>
-                        <button type="button" class="btn btn-secondary me-2" data-bs-dismiss="modal">取消</button>
-                        <button type="button" class="btn btn-primary" id="saveConfigRulesBtn">保存</button>
+                        <button type="button" class="btn btn-secondary me-2" data-bs-dismiss="modal">Cancel</button>
+                        <button type="button" class="btn btn-primary" id="saveConfigRulesBtn">Save</button>
                     </div>
                 </div>
             </div>
@@ -1978,10 +2505,10 @@
                     <form id="notificationSettingsForm" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore data-dashlane-ignore="true">
                         <ul class="nav nav-tabs mb-3" id="notificationSettingsTabs" role="tablist">
                           <li class="nav-item" role="presentation">
-                            <button class="nav-link active" id="basicSettingsTab-tab" data-bs-toggle="tab" data-bs-target="#basicSettingsTab" type="button" role="tab" aria-controls="basicSettingsTab" aria-selected="true">基础设置</button>
+                            <button class="nav-link active" id="basicSettingsTab-tab" data-bs-toggle="tab" data-bs-target="#basicSettingsTab" type="button" role="tab" aria-controls="basicSettingsTab" aria-selected="true">Basic Settings</button>
                           </li>
                           <li class="nav-item" role="presentation">
-                            <button class="nav-link" id="moduleSettingsTab-tab" data-bs-toggle="tab" data-bs-target="#moduleSettingsTab" type="button" role="tab" aria-controls="moduleSettingsTab" aria-selected="false">模块设置</button>
+                            <button class="nav-link" id="moduleSettingsTab-tab" data-bs-toggle="tab" data-bs-target="#moduleSettingsTab" type="button" role="tab" aria-controls="moduleSettingsTab" aria-selected="false">Module Settings</button>
                           </li>
                         </ul>
                         <div class="tab-content" id="notificationSettingsTabContent">
@@ -2076,10 +2603,10 @@
                                 </div>
                                 <div class="mt-3">
                                     <div class="d-flex gap-2 align-items-center">
-                                        <button type="button" class="btn btn-outline-primary btn-sm" onclick="app.testTradingReminder()">
+                                        <button type="button" class="btn btn-outline-primary btn-sm" id="testTradingReminderBtn">
                                             🔔 Test Reminder
                                         </button>
-                                        <button type="button" class="btn btn-outline-info btn-sm" onclick="app.checkTradingReminderStatus()">
+                                        <button type="button" class="btn btn-outline-info btn-sm" id="checkTradingReminderStatusBtn">
                                             📊 Check Status
                                         </button>
                                         <small class="text-muted" id="tradingReminderStatus">Click to check reminder status</small>
@@ -2096,25 +2623,25 @@
                           <div class="tab-pane fade" id="moduleSettingsTab" role="tabpanel" aria-labelledby="moduleSettingsTab-tab">
                             <div class="card">
                               <div class="card-header">
-                                <h6 class="mb-0"><i class="fas fa-layer-group"></i> 模块设置</h6>
+                                <h6 class="mb-0"><i class="fas fa-layer-group"></i> Module Settings</h6>
                               </div>
                               <div class="card-body">
                                 <div class="table-responsive">
                                   <table class="table table-sm align-middle">
                                     <thead>
                                       <tr>
-                                        <th>事件</th>
-                                        <th>Chrome 通知</th>
-                                        <th>Telegram 通知</th>
-                                        <th>Email 通知</th>
+                                        <th>Event</th>
+                                        <th>Chrome Notification</th>
+                                        <th>Telegram Notification</th>
+                                        <th>Email Notification</th>
                                       </tr>
                                     </thead>
                                     <tbody id="moduleSettingsTableBody">
-                                      <!-- JS 渲染模块行 -->
+                                      <!-- JS renders module rows -->
                                     </tbody>
                                   </table>
                                 </div>
-                                <small class="text-muted">默认 Chrome 全部选中，其他不选。</small>
+                                <small class="text-muted">Chrome notifications selected by default; others remain off.</small>
                               </div>
                             </div>
                           </div>
@@ -2123,26 +2650,433 @@
                 </div>
                 <div class="modal-footer">
                     <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-                    <button type="button" class="btn btn-success" onclick="app.testNotification()">Test</button>
-                    <button type="button" class="btn btn-primary" onclick="app.saveNotificationSettings()">Save</button>
+                    <button type="button" class="btn btn-success" id="testNotificationBtn">Test</button>
+                    <button type="button" class="btn btn-primary" id="saveNotificationSettingsBtn">Save</button>
                 </div>
             </div>
         </div>
     </div>
 
-<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon" defer></script>
-<script src="https://cdn.jsdelivr.net/npm/chartjs-chart-financial" defer></script>
-<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3" defer></script>
-<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2" defer></script>
-    <script src="/static/js/login.js" defer></script>
+    <!-- DOM Outcome Detail Modal -->
+    <!-- DOM Optimizer Modal -->
+    <div class="modal fade" id="domOptimizerModal" tabindex="-1" aria-labelledby="domOptimizerModalLabel" aria-hidden="true">
+        <div class="modal-dialog modal-xl modal-dialog-scrollable">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="domOptimizerModalLabel"><i class="fas fa-sliders-h me-2"></i>DOM Optimizer</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <section id="domOptimizerSection" class="dom-optimizer-modal-section">
+                        <div class="card shadow-sm">
+                            <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
+                                <div>
+                                    <h5 class="mb-1"><i class="fas fa-sliders-h me-2"></i>DOM Optimizer</h5>
+                                    <small class="text-muted">Parameter tuning, signal analytics, and automation overview</small>
+                                </div>
+                                <div class="d-flex align-items-center gap-2">
+                                    <span id="domOptimizerStatusBadge" class="badge bg-secondary text-uppercase">Idle</span>
+                                    <button type="button" class="btn btn-sm btn-outline-secondary" id="domOptimizerRefreshStatusBtn">
+                                        <i class="fas fa-sync-alt me-1"></i>Refresh Status
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="card-body">
+                                <div class="row g-3">
+                                    <div class="col-lg-4 d-flex flex-column gap-3">
+                                        <div class="card h-100 border-0 shadow-sm">
+                                            <div class="card-header py-2 d-flex justify-content-between align-items-center">
+                                                <span class="fw-semibold text-uppercase small text-muted">Configuration & Analytics</span>
+                                                <button type="button" class="btn btn-sm btn-outline-secondary" id="domOptimizerLoadConfigBtn">
+                                                    <i class="fas fa-download me-1"></i>Load
+                                                </button>
+                                            </div>
+                                            <div class="card-body">
+                                                <form id="domOptimizerConfigForm" class="row g-3">
+                                                    <div class="col-12">
+                                                        <label for="domOptimizerSymbolInput" class="form-label">Trading symbol</label>
+                                                        <div class="input-group input-group-sm">
+                                                            <input type="text" class="form-control" id="domOptimizerSymbolInput" placeholder="e.g., MES">
+                                                            <button class="btn btn-outline-secondary" type="button" id="domOptimizerUseMonitorBtn">
+                                                                <i class="fas fa-bolt"></i> Monitor
+                                                            </button>
+                                                        </div>
+                                                        <div class="form-text">Use the current monitor symbol or enter one manually.</div>
+                                                    </div>
+                                                    <div class="col-6">
+                                                        <label for="domOptimizerLookbackInput" class="form-label">Statistics window (minutes)</label>
+                                                        <input type="number" class="form-control form-control-sm" id="domOptimizerLookbackInput" min="15" step="15" value="240">
+                                                        <div class="form-text">Affects analytics panels and signal lists; the outcome window matches this setting.</div>
+                                                    </div>
+                                                    <div class="col-12">
+                                                        <label for="domOptimizerLookbackSlider" class="form-label">Statistics window quick adjust</label>
+                                                        <input type="range" class="form-range" id="domOptimizerLookbackSlider" min="0" max="11" step="1">
+                                                        <div class="form-text" id="domOptimizerLookbackDisplay">240 minutes</div>
+                                                    </div>
+                                                    <div class="col-6">
+                                                        <label for="domOptimizerStatsLimitInput" class="form-label">Max records</label>
+                                                        <input type="number" class="form-control form-control-sm" id="domOptimizerStatsLimitInput" min="50" step="50" value="500">
+                                                    </div>
+                                                    <div class="col-6">
+                                                        <label for="domOptimizerMinSignalsInput" class="form-label">Minimum signals</label>
+                                                        <input type="number" class="form-control form-control-sm" id="domOptimizerMinSignalsInput" min="0" value="0">
+                                                    </div>
+                                                    <div class="col-12">
+                                                        <label class="form-label mb-1">Threshold configuration</label>
+                                                        <div class="small text-muted mb-2">Parameters have two layers: base thresholds (OBI / OFI / Trend) and feature thresholds (stacking, absorption, etc.).</div>
+                                                        <div class="d-flex justify-content-end mb-2">
+                                                            <button type="button" class="btn btn-sm btn-outline-secondary" id="domOptimizerFeaturePresetBtn">
+                                                                <i class="fas fa-download me-1"></i>Populate current configuration
+                                                            </button>
+                                                        </div>
+                                                        <div class="border rounded-3 p-3 bg-light mb-3">
+                                                            <div class="fw-semibold text-uppercase small text-muted mb-2">Base threshold JSON</div>
+                                                            <textarea class="form-control font-monospace" id="domOptimizerBaseThresholdsInput" rows="5" placeholder='{"base_thresholds": {"long": {"obi5": 0.6, "ofi": 0.0}}, "obi_candidates": [0.55, 0.6, 0.65, 0.7], "ofi_candidates": [0, 5, 10, 15], "trend_candidates": [0.5, 0.7, 0.85, 0.95]}'></textarea>
+                                                            <div class="form-text mt-1">Edit base thresholds and candidate sets; leave blank to keep backend configuration.</div>
+                                                        </div>
+                                                        <div class="border rounded-3 p-3 bg-light">
+                                                            <div class="fw-semibold text-uppercase small text-muted mb-2">Feature threshold JSON</div>
+                                                            <textarea class="form-control font-monospace" id="domOptimizerFeatureThresholdsInput" rows="6" placeholder='{"stacking": {"intensity": 0.35}}'></textarea>
+                                                            <div class="form-text mt-1">Supports granular thresholds for stacking/absorption; leave blank to keep current settings.</div>
+                                                        </div>
+                                                    </div>
+                                                </form>
+                                                <div class="d-grid gap-2 mt-2">
+                                                    <button type="button" class="btn btn-primary btn-sm" id="domOptimizerRefreshStatsBtn">
+                                                        <i class="fas fa-chart-bar me-1"></i>Refresh Analytics
+                                                    </button>
+                                                </div>
+                                                <hr>
+                                                <div>
+                                                    <div class="d-flex justify-content-between align-items-center py-1 border-bottom small text-muted">
+                                                        <span>Total signals</span>
+                                                        <span class="fw-semibold" id="domOptimizerStatsTotal">-</span>
+                                                    </div>
+                                                    <div class="d-flex justify-content-between align-items-center py-1 border-bottom small text-muted">
+                                                        <span>Long / Short</span>
+                                                        <span class="fw-semibold" id="domOptimizerStatsBySide">-</span>
+                                                    </div>
+                                                    <div class="d-flex justify-content-between align-items-center py-1 border-bottom small text-muted">
+                                                        <span>Evaluated win rate</span>
+                                                        <span class="fw-semibold text-success" id="domOptimizerStatsSuccessRate">-</span>
+                                                    </div>
+                                                    <div class="d-flex justify-content-between align-items-center py-1 small text-muted">
+                                                        <span>Signals pending review</span>
+                                                        <span class="fw-semibold text-warning" id="domOptimizerStatsPending">-</span>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div class="card border-0 shadow-sm">
+                                            <div class="card-header py-2">
+                                                <span class="fw-semibold text-uppercase small text-muted">Automation status</span>
+                                            </div>
+                                            <div class="card-body">
+                                                <div class="d-flex justify-content-between small text-muted mb-2">
+                                                    <span>Current status</span>
+                                                    <span class="fw-semibold" id="domOptimizerStatusText">-</span>
+                                                </div>
+                                                <div class="d-flex justify-content-between small text-muted mb-2">
+                                                    <span>Last run</span>
+                                                    <span class="fw-semibold" id="domOptimizerLastRun">-</span>
+                                                </div>
+                                                <div class="d-flex justify-content-between small text-muted mb-2">
+                                                    <span>Duration</span>
+                                                    <span class="fw-semibold" id="domOptimizerLastDuration">-</span>
+                                                </div>
+                                                <div class="d-flex justify-content-between small text-muted mb-2">
+                                                    <span>Next scheduled run</span>
+                                                    <span class="fw-semibold" id="domOptimizerNextRun">-</span>
+                                                </div>
+                                                <div class="border rounded p-2 bg-light small" id="domOptimizerLastResultPanel" style="min-height: 72px;">
+                                                    <div class="text-muted mb-1">Latest result</div>
+                                                    <div id="domOptimizerLastResult">No data yet</div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div class="card border-0 shadow-sm">
+                                            <div class="card-header py-2">
+                                                <span class="fw-semibold text-uppercase small text-muted">Performance overview</span>
+                                            </div>
+                                            <div class="card-body">
+                                                <div class="d-flex justify-content-between align-items-center mb-2 small text-muted">
+                                                    <span>Overall signal accuracy</span>
+                                                    <span class="fw-semibold" id="domOptimizerSummaryPrecision">-</span>
+                                                </div>
+                                                <div class="d-flex justify-content-between align-items-center mb-2 small text-muted">
+                                                    <span>Average response time</span>
+                                                    <span class="fw-semibold" id="domOptimizerSummaryDelay">-</span>
+                                                </div>
+                                                <div class="d-flex justify-content-between align-items-center small text-muted">
+                                                    <span>Latest signal</span>
+                                                    <span class="fw-semibold" id="domOptimizerSummaryLatest">-</span>
+                                                </div>
+                                                <hr>
+                                                <div class="small text-muted" id="domOptimizerSummaryNotes">
+                                                    <span class="text-muted">Updates automatically after refreshing analytics or querying signals.</span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="col-lg-8 d-flex flex-column gap-3">
+                                        <div class="card shadow-sm">
+                                            <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
+                                                <div>
+                                                    <h6 class="mb-0">Trend Score vs. price</h6>
+                                                    <small class="text-muted">Drawn from /api/dom/history data</small>
+                                                </div>
+                                                <div class="btn-group btn-group-sm" role="group">
+                                                    <button type="button" class="btn btn-outline-secondary" id="domOptimizerTrendRefreshBtn">
+                                                        <i class="fas fa-sync-alt"></i>
+                                                    </button>
+                                                    <button type="button" class="btn btn-outline-secondary" id="domOptimizerTrendLiveToggle" data-active="0">
+                                                        <i class="fas fa-broadcast-tower"></i>
+                                                    </button>
+                                                </div>
+                                            </div>
+                                            <div class="card-body">
+                                                <div class="ratio ratio-16x9">
+                                                    <canvas id="domOptimizerTrendChart"></canvas>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div class="card shadow-sm">
+                                            <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
+                                                <div>
+                                                    <h6 class="mb-0">OBI / OFI metrics</h6>
+                                                    <small class="text-muted">Includes thresholds and signal markers</small>
+                                                </div>
+                                                <button type="button" class="btn btn-sm btn-outline-secondary" id="domOptimizerIndicatorRefreshBtn">
+                                                    <i class="fas fa-sync-alt"></i>
+                                                </button>
+                                            </div>
+                                            <div class="card-body">
+                                                <div class="ratio ratio-16x9">
+                                                    <canvas id="domOptimizerIndicatorChart"></canvas>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div class="card shadow-sm">
+                                            <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
+                                                <div>
+                                                    <h6 class="mb-0">Threshold signals vs. price</h6>
+                                                    <small class="text-muted">Shows threshold paths alongside price movement</small>
+                                                </div>
+                                                <button type="button" class="btn btn-sm btn-outline-secondary" id="domOptimizerThresholdRefreshBtn">
+                                                    <i class="fas fa-sync-alt"></i>
+                                                </button>
+                                            </div>
+                                            <div class="card-body">
+                                                <div class="ratio ratio-16x9">
+                                                    <canvas id="domOptimizerThresholdChart"></canvas>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div class="card shadow-sm">
+                                            <div class="card-header py-3">
+                                                <div class="row g-2 align-items-end">
+                                                    <div class="col-md-3">
+                                                        <label for="domOptimizerStartInput" class="form-label">Start time</label>
+                                                        <input type="datetime-local" class="form-control form-control-sm" id="domOptimizerStartInput">
+                                                    </div>
+                                                    <div class="col-md-3">
+                                                        <label for="domOptimizerEndInput" class="form-label">End time</label>
+                                                        <input type="datetime-local" class="form-control form-control-sm" id="domOptimizerEndInput">
+                                                    </div>
+                                                    <div class="col-md-2">
+                                                        <label for="domOptimizerPageSizeInput" class="form-label">Page size</label>
+                                                        <input type="number" class="form-control form-control-sm" id="domOptimizerPageSizeInput" min="10" step="10" value="25">
+                                                    </div>
+                                                    <div class="col-md-2">
+                                                        <label for="domOptimizerOutcomeFilter" class="form-label">Outcome</label>
+                                                        <select class="form-select form-select-sm" id="domOptimizerOutcomeFilter">
+                                                            <option value="">All</option>
+                                                            <option value="success">Success</option>
+                                                            <option value="failed">Failure</option>
+                                                            <option value="pending">Pending review</option>
+                                                        </select>
+                                                    </div>
+                                                    <div class="col-md-2 d-grid">
+                                                        <button type="button" class="btn btn-primary btn-sm" id="domOptimizerQuerySignalsBtn">
+                                                            <i class="fas fa-search me-1"></i>Search
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                            <div class="card-body">
+                                                <div class="table-responsive">
+                                                    <table class="table table-sm align-middle" id="domOptimizerSignalsTable">
+                                                        <thead class="table-light">
+                                                            <tr>
+                                                                <th>Time</th>
+                                                                <th>Direction</th>
+                                                                <th>Price</th>
+                                                                <th>OBI</th>
+                                                                <th>OFI</th>
+                                                                <th>Trend</th>
+                                                                <th>Outcome</th>
+                                                            </tr>
+                                                        </thead>
+                                                        <tbody>
+                                                            <tr class="text-center text-muted">
+                                                                <td colspan="7">No signals queried yet</td>
+                                                            </tr>
+                                                        </tbody>
+                                                    </table>
+                                                </div>
+                                            </div>
+                                            <div class="card-footer d-flex flex-column flex-lg-row gap-2 justify-content-between align-items-lg-center">
+                                                <small class="text-muted" id="domOptimizerSignalsRange">Actual time range: -</small>
+                                                <small class="text-muted" id="domOptimizerSignalsSummary">0 records</small>
+                                                <div class="btn-group btn-group-sm" role="group" aria-label="DOM signals pagination" id="domOptimizerPagination">
+                                                    <button type="button" class="btn btn-outline-secondary" data-page="prev" disabled>
+                                                        <i class="fas fa-chevron-left"></i>
+                                                    </button>
+                                                    <button type="button" class="btn btn-outline-secondary disabled">
+                                                        <span id="domOptimizerCurrentPage">1</span>/<span id="domOptimizerTotalPages">1</span>
+                                                    </button>
+                                                    <button type="button" class="btn btn-outline-secondary" data-page="next" disabled>
+                                                        <i class="fas fa-chevron-right"></i>
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div class="card shadow-sm">
+                                            <div class="card-body">
+                                                <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+                                                    <div>
+                                                        <h6 class="mb-1">Manual optimization</h6>
+                                                        <small class="text-muted">Call /api/dom/optimize to tune thresholds</small>
+                                                    </div>
+                                                    <div class="form-check form-switch">
+                                                        <input class="form-check-input" type="checkbox" id="domOptimizerApplySwitch" checked>
+                                                        <label class="form-check-label" for="domOptimizerApplySwitch">Write and apply</label>
+                                                    </div>
+                                                </div>
+                                                <div class="d-flex flex-wrap gap-2 mb-3">
+                                                    <button type="button" class="btn btn-success btn-sm" id="domOptimizerOptimizeBtn">
+                                                        <i class="fas fa-magic me-1"></i>Optimize now
+                                                    </button>
+                                                    <button type="button" class="btn btn-outline-secondary btn-sm" id="domOptimizerClearResultBtn">
+                                                        <i class="fas fa-eraser me-1"></i>Clear results
+                                                    </button>
+                                                </div>
+                                                <div class="border rounded p-3 bg-light" id="domOptimizerOptimizeResult">
+                                                    <div class="text-muted small">After clicking “Optimize now”, the latest results, accuracy stats, and threshold suggestions appear here.</div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </section>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal fade" id="domOutcomeModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-xl modal-dialog-scrollable">
+            <div class="modal-content">
+                <div class="modal-header dom-optimizer-header">
+                    <h5 class="modal-title" id="domOutcomeModalTitle"><i class="fas fa-clipboard-list me-2"></i>Signal evaluation details</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="alert alert-info d-none" id="domOutcomeModalAlert"></div>
+
+                    <div class="mb-4">
+                        <div class="d-flex justify-content-between align-items-center mb-2">
+                            <h6 class="mb-0">Signal overview</h6>
+                            <span class="badge bg-secondary d-none" id="domOutcomeSignalLevel"></span>
+                        </div>
+                        <dl class="row row-cols-1 row-cols-md-2 g-3 small mb-0" id="domOutcomeSignalMetrics"></dl>
+                    </div>
+
+                    <div class="mb-4">
+                        <div class="d-flex justify-content-between align-items-center mb-2">
+                            <h6 class="mb-0">Related orders</h6>
+                            <div class="spinner-border spinner-border-sm text-primary d-none" id="domOutcomeOrdersLoading" role="status">
+                                <span class="visually-hidden">Loading…</span>
+                            </div>
+                        </div>
+                        <div class="table-responsive">
+                            <table class="table table-sm table-striped align-middle mb-0">
+                                <thead class="table-light">
+                                    <tr>
+                                        <th>Order ID</th>
+                                        <th>Direction</th>
+                                        <th>Quantity</th>
+                                        <th>Average Price</th>
+                                        <th>Status</th>
+                                        <th>Submitted At</th>
+                                        <th>Executed At</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="domOutcomeOrdersTbody">
+                                    <tr>
+                                        <td colspan="7" class="text-center text-muted py-3">No related orders</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <div>
+                        <div class="d-flex justify-content-between align-items-center mb-2">
+                            <h6 class="mb-0">Price change</h6>
+                            <small class="text-muted" id="domOutcomePriceMeta"></small>
+                        </div>
+                        <div class="table-responsive">
+                            <table class="table table-sm align-middle mb-0">
+                                <thead class="table-light">
+                                    <tr>
+                                        <th>Time offset</th>
+                                        <th>Price</th>
+                                        <th>Price change</th>
+                                        <th>Change %</th>
+                                        <th>Sample time</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="domOutcomePriceTbody">
+                                    <tr>
+                                        <td colspan="5" class="text-center text-muted py-3">No price data available</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <small class="text-muted me-auto" id="domOutcomeModalMeta"></small>
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon@1.3.1/dist/chartjs-adapter-luxon.umd.min.js" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.0.1/dist/chartjs-plugin-annotation.min.js" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js" defer></script>
+<script src="/static/js/utils/index.js" defer></script>
+<script src="/static/js/login.js" defer></script>
 <script src="/static/js/ibkr.js" defer></script>
 <script src="/static/js/ibkr_data.js" defer></script>
-<script src="/static/js/orders.js?v=2025-09-10-3" defer></script>
+<script src="/static/js/orders/manager.js" defer></script>
 <script src="/static/js/portfolio.js" defer></script>
-<script src="/static/js/risk_rules.js?v=2025-09-10-1" defer></script>
-<script src="/static/js/strategies.js?v=2025-09-10-1" defer></script>
+<script src="/static/js/risk/manager.js" defer></script>
+<script src="/static/js/strategies/manager.js" defer></script>
+<script src="/static/js/strategies/details.js" defer></script>
 <script src="/static/js/pnlcalendar.js" defer></script>
 <script src="/static/js/notifications.js" defer></script>
+<script src="/static/js/logs.js" defer></script>
+<script src="/static/js/dom.js" defer></script>
+<script src="/static/js/dom_optimizer.js" defer></script>
+<script src="/static/js/monitoring/constants.js" defer></script>
+<script src="/static/js/monitoring/utils.js" defer></script>
+<script src="/static/js/monitoring/manager.js" defer></script>
+<script src="/static/js/ui/controller.js" defer></script>
 <script src="/static/js/app.js" defer></script>
 </body>
 </html>

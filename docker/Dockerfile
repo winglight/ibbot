@@ -1,92 +1,140 @@
-# Multi-stage build for IBKR Trading Bot
-FROM python:3.11-slim as base
+# ============================================================
+# Dockerfile — IBKR Trading Bot (production-ready)
+# - Uses gunicorn + uvicorn workers by default (multi-process)
+# - Robust .env loader in entrypoint (ignores comments/blank lines)
+# - Easily override APP_MODULE/WEB_* via environment
+# ============================================================
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    gcc \
-    g++ \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
+FROM python:3.11-slim AS base
 
-# Set working directory
+# -------- System deps --------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc g++ curl ca-certificates \
+    # (Optional) troubleshooting tools — uncomment if you need them:
+    # procps net-tools iproute2 dnsutils iputils-ping mtr-tiny \
+ && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
-# Copy requirements and install dependencies
+# -------- Python deps --------
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt \
+ && pip install --no-cache-dir gunicorn "uvicorn[standard]"
 
-# Copy application code
+# -------- App code --------
 COPY . .
 
-# Create necessary directories
+# Ensure runtime dirs exist (mounted volumes will override)
 RUN mkdir -p logs data strategy
 
-# Set environment variables
-ENV PYTHONPATH=/app
-ENV PYTHONUNBUFFERED=1
+# -------- Defaults (override in compose/env) --------
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app \
+    APP_MODULE=main:app \
+    WEB_HOST=0.0.0.0 \
+    WEB_PORT=8000 \
+    WEB_WORKERS=4 \
+    WEB_BACKLOG=2048 \
+    WEB_TIMEOUT=60
 
-# Expose ports
 EXPOSE 8000
 
-# Create entrypoint script
-RUN echo '#!/bin/bash\n\
-set -e\n\
-\n\
-# Ensure .env exists (fallback to .env.example if provided)\n\
-if [ ! -f ".env" ]; then\n\
-    if [ -f ".env.example" ]; then\n\
-        echo "No .env found, generating from .env.example..."\n\
-        cp .env.example .env\n\
-    else\n\
-        echo "No .env or .env.example found. Continuing with environment defaults."\n\
-    fi\n\
-fi\n\
-\
-# Load .env as defaults only (do NOT override existing environment variables)\n\
-if [ -f ".env" ]; then\n\
-    while IFS="=" read -r key value; do\n\
-        # Skip blank lines and comments\n\
-        [ -z "$key" ] && continue\n\
-        case "$key" in \#*) continue;; esac\n\
-        # Preserve variables already provided by Docker/Compose\n\
-        if [ -z "${!key+x}" ]; then\n\
-            export "$key=$value"\n\
-        fi\n\
-    done < .env\n\
-fi\n\
-\
-# Default to main app if no command specified\n\
-if [ "$#" -eq 0 ]; then\n\
-    echo "Starting IBKR Trading Bot main application..."\n\
-    exec python main.py\n\
-elif [ "$1" = "test" ]; then\n\
-    echo "Running tests..."\n\
-    exec pytest test/ -v\n\
-elif [ "$1" = "runner" ]; then\n\
-    echo "Starting Strategy Runner..."\n\
-    shift  # Remove "runner" from arguments\n\
-    exec python -m strategy.strategy_runner "$@"\n\
-elif [ "$1" = "parallel" ]; then\n\
-    echo "Starting main app in background..."\n\
-    python main.py &\n\
-    MAIN_PID=$!\n\
-    echo "Main app started with PID: $MAIN_PID"\n\
-    \n\
-    echo "Starting Strategy Runner..."\n\
-    shift  # Remove "parallel" from arguments\n\
-    python -m strategy.strategy_runner "$@" &\n\
-    RUNNER_PID=$!\n\
-    echo "Strategy Runner started with PID: $RUNNER_PID"\n\
-    \n\
-    # Wait for either process to exit\n\
-    wait -n $MAIN_PID $RUNNER_PID\n\
-    EXIT_CODE=$?\n\
-    echo "One process exited with code $EXIT_CODE, terminating all..."\n\
-    kill $MAIN_PID $RUNNER_PID 2>/dev/null || true\n\
-    exit $EXIT_CODE\n\
-else\n\
-    echo "Executing command: $@"\n\
-    exec "$@"\n\
-fi' > /entrypoint.sh && chmod +x /entrypoint.sh
+# -------- Robust entrypoint with .env defaults --------
+# - Loads .env only for keys not already set in environment
+# - Ignores blank lines and comments, strips trailing inline comments
+# - Starts gunicorn multi-workers by default; legacy mode available
+RUN set -eux; \
+  cat > /entrypoint.sh <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Create .env from example if missing (non-fatal)
+if [[ ! -f ".env" ]]; then
+  if [[ -f ".env.example" ]]; then
+    echo "No .env found, generating from .env.example..."
+    cp .env.example .env
+  else
+    echo "No .env or .env.example found. Continuing with environment defaults."
+  fi
+fi
+
+# Load .env as defaults only (do NOT override existing env vars)
+# - strip CRLF
+# - remove full-line comments/blank lines
+# - strip trailing inline comments after values
+if [[ -f ".env" ]]; then
+  while IFS='=' read -r k v; do
+    # trim key/value whitespace
+    k="${k#"${k%%[![:space:]]*}"}"; k="${k%"${k##*[![:space:]]}"}"
+    v="${v#"${v%%[![:space:]]*}"}"; v="${v%"${v##*[![:space:]]}"}"
+    # only accept valid shell var names
+    if [[ -z "$k" || ! "$k" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+      continue
+    fi
+    # set only if not present in current environment
+    if [[ -z "${!k+x}" ]]; then
+      export "$k=$v"
+    fi
+  done < <(sed -e 's/\r$//' \
+               -e 's/[[:space:]]*#.*$//' \
+               -e '/^[[:space:]]*$/d' \
+               -e '/^[[:space:]]*#/d' .env)
+fi
+
+# Build gunicorn command (multi workers by default)
+GUNICORN_CMD=(gunicorn "${APP_MODULE:-main:app}"
+  -k uvicorn.workers.UvicornWorker
+  -w "${WEB_WORKERS:-4}"
+  -b "${WEB_HOST:-0.0.0.0}:${WEB_PORT:-8000}"
+  --backlog "${WEB_BACKLOG:-2048}"
+  --timeout "${WEB_TIMEOUT:-60}"
+  --graceful-timeout 20
+  --keep-alive 15
+  --access-logfile -
+  --error-logfile -)
+
+# Modes:
+#  - (default)     : run gunicorn multi-workers
+#  - USE_LEGACY=1  : run python main.py (legacy single process)
+#  - test          : run pytest
+#  - runner        : run strategy runner
+#  - parallel      : run gunicorn + runner together
+if [[ "$#" -eq 0 ]]; then
+  if [[ "${USE_LEGACY:-0}" == "1" ]]; then
+    echo "[LEGACY] Starting via python main.py..."
+    exec python main.py
+  else
+    echo "Starting via gunicorn (multi-workers)..."
+    exec "${GUNICORN_CMD[@]}" ${GUNICORN_EXTRA:-}
+  fi
+elif [[ "$1" == "test" ]]; then
+  echo "Running tests..."
+  exec pytest test/ -v
+elif [[ "$1" == "runner" ]]; then
+  echo "Starting Strategy Runner..."
+  shift
+  exec python -m strategy.strategy_runner "$@"
+elif [[ "$1" == "parallel" ]]; then
+  echo "Starting gunicorn app in background..."
+  "${GUNICORN_CMD[@]}" ${GUNICORN_EXTRA:-} &
+  MAIN_PID=$!
+  echo "App (gunicorn) PID: $MAIN_PID"
+  echo "Starting Strategy Runner..."
+  shift
+  python -m strategy.strategy_runner "$@" &
+  RUNNER_PID=$!
+  echo "Runner PID: $RUNNER_PID"
+  # wait for either to exit
+  wait -n "$MAIN_PID" "$RUNNER_PID"
+  EC=$?
+  echo "One process exited (code=$EC), terminating..."
+  kill "$MAIN_PID" "$RUNNER_PID" 2>/dev/null || true
+  exit "$EC"
+else
+  echo "Executing command: $*"
+  exec "$@"
+fi
+EOF
+RUN chmod +x /entrypoint.sh
 
 ENTRYPOINT ["/entrypoint.sh"]

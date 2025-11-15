@@ -5,12 +5,24 @@ SQLite数据库模块
 
 import sqlite3
 import json
-import pandas as pd
-from datetime import datetime
-from typing import List, Dict, Any, Optional
+import time
+from contextlib import contextmanager
 from pathlib import Path
+from threading import RLock
 from dataclasses import dataclass, asdict
+from datetime import datetime
+from typing import List, Dict, Any, Optional, Sequence, Union
+
+import pandas as pd
 from loguru import logger
+import asyncio
+
+from src.utils import (
+    ensure_local_timezone,
+    now_local,
+    parse_local_datetime,
+    to_local_iso,
+)
 
 # 为数据库模块绑定日志记录器
 database_logger = logger.bind(module="database", request_id="-")
@@ -49,6 +61,9 @@ class RiskRule:
     enabled: bool = True
     max_time_span: Optional[int] = None  # 以分钟为单位的最大持仓时间
     timestamp: str = None
+    auto_trailing: bool = False
+    atr_params: Optional[Dict[str, Any]] = None
+    rule_type: str = "fixed"
 
 
 @dataclass
@@ -63,20 +78,79 @@ class Strategy:
     created_at: str = None
     updated_at: str = None
 
+def _normalise_iso_timestamp(value: Optional[Any]) -> Optional[str]:
+    """Convert values to ISO strings in the local timezone."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return to_local_iso(value)
+    if isinstance(value, str):
+        dt = parse_local_datetime(value)
+        return to_local_iso(dt) if dt else value
+    return str(value)
+
+
 class DatabaseManager:
     """数据库管理器"""
     
     def __init__(self, db_path: str = "data/trading_bot.db"):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(exist_ok=True)
+
+        self._connection_lock: RLock = RLock()
+        self._conn: sqlite3.Connection = sqlite3.connect(
+            str(self.db_path), check_same_thread=False, timeout=30
+        )
+        self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA busy_timeout = 10000")
+
         self._init_database()
         database_logger.info(f"Database initialized at: {self.db_path}")
+
+    @contextmanager
+    def _connection(self):
+        """Provide a serialized connection context with automatic commit/rollback."""
+
+        with self._connection_lock:
+            try:
+                yield self._conn
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+
+    @contextmanager
+    def _cursor(self):
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            try:
+                yield cursor
+            finally:
+                cursor.close()
+
+    # ------------------------------------------------------------------
+    # Public helpers for external modules (e.g., order_manager) needing
+    # serialized access to the shared SQLite connection.
+
+    @contextmanager
+    def transaction(self):
+        """Expose the serialized connection context to other modules."""
+
+        with self._connection() as conn:
+            yield conn
+
+    @contextmanager
+    def cursor(self):
+        """Expose a managed cursor bound to the serialized connection."""
+
+        with self._cursor() as cur:
+            yield cur
     
     def _init_database(self):
         """初始化数据库表结构"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            
+        with self._cursor() as cursor:
+
             # 创建订单表（替代原 auto_orders）——与 OrderManager 保持一致
             cursor.execute(
                 """
@@ -105,7 +179,56 @@ class DatabaseManager:
                 )
                 """
             )
-            
+
+            # 加速常用查询：按策略分页、按策略聚合PNL、按创建时间筛选
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_orders_strategy_source_created
+                ON orders(strategy_name, order_source, is_deleted, created_at DESC)
+                """
+            )
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_orders_source_state_strategy_created
+                ON orders(order_source, is_deleted, strategy_name, created_at DESC)
+                """
+            )
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_orders_strategy_activity
+                ON orders(strategy_name, is_deleted, executed_at, created_at)
+                """
+            )
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_orders_created_flag
+                ON orders(is_deleted, created_at DESC)
+                """
+            )
+
+            # 兼容旧库：补齐缺失列
+            cursor.execute("PRAGMA table_info('orders')")
+            existing_columns = {row[1] for row in cursor.fetchall()}
+            required_columns = {
+                'executed_at': "TEXT",
+                'fill_price': "REAL",
+                'order_source': "TEXT DEFAULT 'manual'",
+                'strategy_name': "TEXT",
+                'rule_id': "TEXT",
+                'parent_order_id': "TEXT",
+                'exchange': "TEXT DEFAULT 'SMART'",
+                'sec_type': "TEXT DEFAULT 'STK'",
+                'notes': "TEXT",
+                'commission': "REAL",
+                'pnl': "REAL",
+                'is_deleted': "INTEGER DEFAULT 0",
+            }
+
+            for column_name, column_def in required_columns.items():
+                if column_name not in existing_columns:
+                    cursor.execute(f"ALTER TABLE orders ADD COLUMN {column_name} {column_def}")
+                    database_logger.info(f"Added missing column '{column_name}' to orders table")
+
 
             # 创建风险规则表
             cursor.execute(
@@ -118,8 +241,47 @@ class DatabaseManager:
                     max_loss_percent REAL,
                     enabled BOOLEAN DEFAULT 1,
                     max_time_span INTEGER,
-                    timestamp TEXT NOT NULL
+                    timestamp TEXT NOT NULL,
+                    auto_trailing BOOLEAN DEFAULT 0,
+                    atr_params TEXT,
+                    rule_type TEXT DEFAULT 'fixed'
                 )
+                """
+            )
+
+            cursor.execute("PRAGMA table_info('risk_rules')")
+            risk_columns = {row[1] for row in cursor.fetchall()}
+            if 'auto_trailing' not in risk_columns:
+                cursor.execute("ALTER TABLE risk_rules ADD COLUMN auto_trailing BOOLEAN DEFAULT 0")
+            if 'atr_params' not in risk_columns:
+                cursor.execute("ALTER TABLE risk_rules ADD COLUMN atr_params TEXT")
+            if 'rule_type' not in risk_columns:
+                cursor.execute("ALTER TABLE risk_rules ADD COLUMN rule_type TEXT DEFAULT 'fixed'")
+            cursor.execute(
+                """
+                UPDATE risk_rules
+                SET rule_type = CASE
+                    WHEN LOWER(TRIM(COALESCE(rule_type, ''))) IN ('fixed', 'trailing')
+                        THEN LOWER(TRIM(rule_type))
+                    WHEN COALESCE(auto_trailing, 0) = 1 THEN 'trailing'
+                    ELSE 'fixed'
+                END
+                WHERE rule_type IS NULL
+                   OR TRIM(rule_type) = ''
+                   OR LOWER(TRIM(rule_type)) NOT IN ('fixed', 'trailing')
+                """
+            )
+            cursor.execute(
+                """
+                UPDATE risk_rules
+                SET auto_trailing = CASE
+                    WHEN LOWER(COALESCE(rule_type, '')) = 'trailing' THEN 1
+                    ELSE 0
+                END
+                WHERE auto_trailing IS NULL
+                   OR auto_trailing NOT IN (0, 1)
+                   OR (LOWER(COALESCE(rule_type, '')) = 'trailing' AND auto_trailing != 1)
+                   OR (LOWER(COALESCE(rule_type, '')) != 'trailing' AND auto_trailing != 0)
                 """
             )
 
@@ -232,41 +394,37 @@ class DatabaseManager:
                     created_at TEXT NOT NULL
                 )
             """)
-            
-            conn.commit()
 
     # 自动订单相关方法 -> 重命名为订单相关方法（保留兼容包装）
     def save_order(self, order: Order):
         """保存订单（新）"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            created = order.timestamp or datetime.now().isoformat()
+        with self._cursor() as cursor:
+            created = _normalise_iso_timestamp(order.timestamp) or now_local().isoformat()
             status = order.status or 'Submitted'
             cursor.execute(
                 """
-                INSERT INTO orders 
-                (order_id, symbol, action, quantity, order_type, price, status, created_at, updated_at, executed_at, order_source, rule_id, exchange, sec_type, commission, pnl)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO orders
+                (order_id, symbol, action, quantity, order_type, price, status, created_at, updated_at, executed_at,
+                 order_source, strategy_name, rule_id, exchange, sec_type, commission, pnl)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     order.order_id, order.symbol, order.action, order.quantity,
-                    order.order_type, order.price, status, created, created, order.executed_at,
-                    order.order_source, order.rule_id, order.exchange, order.sec_type,
+                    order.order_type, order.price, status, created, created, _normalise_iso_timestamp(order.executed_at),
+                    order.order_source, getattr(order, 'strategy_name', None), order.rule_id, order.exchange, order.sec_type,
                     getattr(order, 'commission', None), getattr(order, 'pnl', None),
                 ),
             )
-            conn.commit()
             database_logger.debug(f"Order saved: {order.order_id}")
 
 
     def update_order(self, order_id: str, status: str = None, price: float = None, executed_at: str = None, commission: float = None, pnl: float = None):
         """更新订单状态和价格（新）"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            
+        with self._cursor() as cursor:
+
             update_fields = []
             values = []
-            
+
             if status is not None:
                 update_fields.append("status = ?")
                 values.append(status)
@@ -275,7 +433,7 @@ class DatabaseManager:
                 values.append(price)
             if executed_at is not None:
                 update_fields.append("executed_at = ?")
-                values.append(executed_at)
+                values.append(_normalise_iso_timestamp(executed_at))
             if commission is not None:
                 update_fields.append("commission = ?")
                 values.append(commission)
@@ -284,25 +442,40 @@ class DatabaseManager:
                 update_fields.append("pnl = ?")
                 values.append(pnl)
                 database_logger.debug(f"Adding pnl update: {pnl}")
-            
+
             if update_fields:
                 # 总是更新 updated_at
                 update_fields.append("updated_at = ?")
-                values.append(datetime.now().isoformat())
+                values.append(now_local().isoformat())
                 values.append(order_id)
                 update_sql = f"UPDATE orders SET {', '.join(update_fields)} WHERE order_id = ?"
                 database_logger.debug(f"Executing SQL: {update_sql} with values: {values}")
-                cursor.execute(update_sql, values)
-                conn.commit()
-                database_logger.debug(f"SQL executed successfully, rows affected: {cursor.rowcount}")
-                database_logger.debug(
-                    f"Order {order_id} updated: {dict(zip([f.split(' = ')[0] for f in update_fields], values[:-1]))}"
-                )
+
+                max_attempts = 5
+                delay = 0.05
+                for attempt in range(1, max_attempts + 1):
+                    try:
+                        cursor.execute(update_sql, values)
+                        database_logger.debug(f"SQL executed successfully, rows affected: {cursor.rowcount}")
+                        database_logger.debug(
+                            f"Order {order_id} updated: {dict(zip([f.split(' = ')[0] for f in update_fields], values[:-1]))}"
+                        )
+                        break
+                    except sqlite3.OperationalError as exc:
+                        if "locked" in str(exc).lower() and attempt < max_attempts:
+                            sleep_for = delay * (2 ** (attempt - 1))
+                            database_logger.warning(
+                                f"Database locked when updating order {order_id}; retrying in {sleep_for:.2f}s"
+                            )
+                            time.sleep(sleep_for)
+                            continue
+                        database_logger.error(f"Failed to update order {order_id}: {exc}")
+                        raise
     
     async def update_order_commission_pnl(self, order_id: str, commission: float, pnl: float):
         """异步更新订单的佣金和PnL"""
         try:
-            self.update_order(order_id, commission=commission, pnl=pnl)
+            await asyncio.to_thread(self.update_order, order_id, commission=commission, pnl=pnl)
             database_logger.info(f"Updated order {order_id} commission={commission}, pnl={pnl}")
         except Exception as e:
             database_logger.error(f"Error updating order {order_id} commission/pnl: {e}")
@@ -310,12 +483,11 @@ class DatabaseManager:
 
     def load_orders(self) -> List[Order]:
         """加载所有订单（新）"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
+        with self._cursor() as cursor:
             cursor.execute(
                 """
-                SELECT order_id, symbol, quantity, action, order_type, price, 
-                       created_at as timestamp, exchange, sec_type, 
+                SELECT order_id, symbol, quantity, action, order_type, price,
+                       created_at as timestamp, exchange, sec_type,
                        COALESCE(status, 'Submitted') as status,
                        executed_at,
                        rule_id,
@@ -326,30 +498,72 @@ class DatabaseManager:
                 """
             )
             rows = cursor.fetchall()
-            orders: List[Order] = []
-            for row in rows:
-                orders.append(Order(*row))
-            database_logger.debug(f"Loaded {len(orders)} orders")
-            return orders
+        orders: List[Order] = []
+        for row in rows:
+            orders.append(Order(*row))
+        database_logger.debug(f"Loaded {len(orders)} orders")
+        return orders
+
+    def fetch_orders_for_pnl(self, include_deleted: bool = False) -> List[Dict[str, Any]]:
+        """获取用于PnL统计的基础订单信息"""
+        with self._cursor() as cursor:
+            query = (
+                "SELECT order_id, created_at, executed_at, pnl, is_deleted "
+                "FROM orders"
+            )
+            cursor.execute(query)
+            rows = cursor.fetchall()
+
+        results: List[Dict[str, Any]] = []
+        for row in rows:
+            if not include_deleted and row['is_deleted']:
+                continue
+            results.append(
+                {
+                    'order_id': row['order_id'],
+                    'created_at': row['created_at'],
+                    'executed_at': row['executed_at'],
+                    'pnl': row['pnl'],
+                }
+            )
+        return results
 
     def load_risk_rules(self) -> List[RiskRule]:
         """加载所有风险规则"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT symbol, stop_loss_price, take_profit_price, max_loss_percent, COALESCE(enabled, 1) as enabled, max_time_span, timestamp FROM risk_rules")
+        with self._cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT symbol, stop_loss_price, take_profit_price, max_loss_percent,
+                       COALESCE(enabled, 1) as enabled, max_time_span, timestamp,
+                       COALESCE(auto_trailing, 0) as auto_trailing, atr_params,
+                       COALESCE(rule_type, CASE WHEN COALESCE(auto_trailing, 0) = 1 THEN 'trailing' ELSE 'fixed' END) AS rule_type
+                FROM risk_rules
+                """
+            )
             rows = cursor.fetchall()
-            
+
             rules = []
             for row in rows:
-                # row: (symbol, sl, tp, max_loss_percent, enabled, timestamp)
+                atr_payload = row["atr_params"]
+                parsed_params = None
+                if atr_payload:
+                    try:
+                        parsed_params = json.loads(atr_payload)
+                    except json.JSONDecodeError:
+                        parsed_params = None
+                if parsed_params is None:
+                    parsed_params = {}
                 rule = RiskRule(
-                    symbol=row[0],
-                    stop_loss_price=row[1],
-                    take_profit_price=row[2],
-                    max_loss_percent=row[3],
-                    enabled=bool(row[4]),
-                    max_time_span=row[5],
-                    timestamp=row[6]
+                    symbol=row["symbol"],
+                    stop_loss_price=row["stop_loss_price"],
+                    take_profit_price=row["take_profit_price"],
+                    max_loss_percent=row["max_loss_percent"],
+                    enabled=bool(row["enabled"]),
+                    max_time_span=row["max_time_span"],
+                    timestamp=row["timestamp"],
+                    auto_trailing=bool(row["auto_trailing"]),
+                    atr_params=parsed_params,
+                    rule_type=(row["rule_type"] or 'fixed'),
                 )
                 rules.append(rule)
             
@@ -358,21 +572,39 @@ class DatabaseManager:
 
     def save_risk_rule(self, rule: RiskRule):
         """保存风险规则（按 symbol 幂等：存在则更新，不存在则插入）"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            ts = rule.timestamp or datetime.now().isoformat()
+        with self._cursor() as cursor:
+            ts = _normalise_iso_timestamp(rule.timestamp) or now_local().isoformat()
             enabled_val = 1 if getattr(rule, 'enabled', True) else 0
+            atr_payload = None
+            if getattr(rule, "atr_params", None):
+                try:
+                    atr_payload = json.dumps(rule.atr_params)
+                except TypeError:
+                    atr_payload = None
+            rule_type_val = getattr(rule, "rule_type", None)
+            if not rule_type_val:
+                rule_type_val = 'trailing' if getattr(rule, "auto_trailing", False) else 'fixed'
+            rule_type_val = str(rule_type_val).lower()
+            if rule_type_val not in {"fixed", "trailing"}:
+                rule_type_val = 'fixed'
+
             cursor.execute(
                 """
-                INSERT INTO risk_rules (symbol, stop_loss_price, take_profit_price, max_loss_percent, enabled, max_time_span, timestamp)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO risk_rules (
+                    symbol, stop_loss_price, take_profit_price, max_loss_percent,
+                    enabled, max_time_span, timestamp, auto_trailing, atr_params, rule_type
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(symbol) DO UPDATE SET
                     stop_loss_price=excluded.stop_loss_price,
                     take_profit_price=excluded.take_profit_price,
                     max_loss_percent=excluded.max_loss_percent,
                     enabled=excluded.enabled,
                     max_time_span=excluded.max_time_span,
-                    timestamp=excluded.timestamp
+                    timestamp=excluded.timestamp,
+                    auto_trailing=excluded.auto_trailing,
+                    atr_params=excluded.atr_params,
+                    rule_type=excluded.rule_type
                 """,
                 (
                     rule.symbol,
@@ -382,31 +614,30 @@ class DatabaseManager:
                     enabled_val,
                     rule.max_time_span,
                     ts,
+                    int(getattr(rule, "auto_trailing", False)),
+                    atr_payload,
+                    rule_type_val,
                 ),
             )
-            conn.commit()
             database_logger.debug(f"Risk rule saved: {rule.symbol}")
     
     def delete_risk_rule(self, symbol: str):
         """删除风险规则"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
+        with self._cursor() as cursor:
             cursor.execute("DELETE FROM risk_rules WHERE symbol = ?", (symbol,))
-            conn.commit()
             database_logger.debug(f"Risk rule deleted for symbol: {symbol}")
     
     # 策略相关方法
     def save_strategy(self, strategy: Strategy):
         """保存策略"""
-        now = datetime.now().isoformat()
+        now = now_local().isoformat()
         if not strategy.created_at:
             strategy.created_at = now
         strategy.updated_at = now
         
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
+        with self._cursor() as cursor:
             cursor.execute("""
-                INSERT OR REPLACE INTO strategies 
+                INSERT OR REPLACE INTO strategies
                 (name, strategy_type, enabled, api_endpoint, file_path, description, created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, (
@@ -414,13 +645,11 @@ class DatabaseManager:
                 strategy.api_endpoint, strategy.file_path, strategy.description,
                 strategy.created_at, strategy.updated_at
             ))
-            conn.commit()
             database_logger.debug(f"Strategy saved: {strategy.name}")
     
     def load_strategies(self) -> List[Strategy]:
         """加载所有策略"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
+        with self._cursor() as cursor:
             cursor.execute("SELECT name, strategy_type, enabled, api_endpoint, file_path, description, created_at, updated_at FROM strategies")
             rows = cursor.fetchall()
             
@@ -434,8 +663,7 @@ class DatabaseManager:
     
     def get_strategy(self, name: str) -> Optional[Strategy]:
         """获取指定策略"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
+        with self._cursor() as cursor:
             cursor.execute("SELECT name, strategy_type, enabled, api_endpoint, file_path, description, created_at, updated_at FROM strategies WHERE name = ?", (name,))
             row = cursor.fetchone()
             
@@ -445,58 +673,182 @@ class DatabaseManager:
     
     def delete_strategy(self, name: str):
         """删除策略"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
+        with self._cursor() as cursor:
             cursor.execute("DELETE FROM strategies WHERE name = ?", (name,))
-            conn.commit()
             database_logger.debug(f"Strategy deleted: {name}")
+
+    def update_orders_strategy_name(self, old_name: str, new_name: str) -> int:
+        """将orders表中所有旧策略名迁移为新策略名，返回受影响的行数"""
+        with self._cursor() as cursor:
+            cursor.execute(
+                "UPDATE orders SET strategy_name = ? WHERE strategy_name = ?",
+                (new_name, old_name),
+            )
+            affected = cursor.rowcount if hasattr(cursor, 'rowcount') else 0
+            database_logger.debug(
+                f"Orders strategy_name updated: {old_name} -> {new_name}, rows={affected}"
+            )
+            return affected
     
     # 策略执行表已移除；保留占位符以保持向后兼容接口
-    def load_strategy_orders(self, strategy_name: str, order_source: str = 'strategy', limit: int = 100) -> List[Order]:
+    def load_strategy_orders(
+        self,
+        strategy_name: str,
+        order_source: str = 'strategy',
+        limit: Optional[int] = 100,
+        symbol: Optional[str] = None,
+    ) -> List[Order]:
         """加载指定策略的订单记录"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
+        with self._cursor() as cursor:
+            filters = ["strategy_name = ?", "order_source = ?"]
+            params: List[Any] = [strategy_name, order_source]
+            if isinstance(symbol, str) and symbol.strip():
+                filters.append("UPPER(symbol) = ?")
+                params.append(symbol.strip().upper())
+
+            where_clause = " AND ".join(filters)
+
+            base_query = (
+                "SELECT order_id, symbol, quantity, action, order_type, price, "
+                "created_at as timestamp, exchange, sec_type, "
+                "COALESCE(status, 'Submitted') as status, "
+                "executed_at, "
+                "rule_id, "
+                "COALESCE(order_source, 'auto') as order_source, "
+                "commission, "
+                "pnl "
+                "FROM orders "
+                f"WHERE {where_clause} "
+                "ORDER BY created_at DESC"
+            )
+
+            if limit is None:
+                cursor.execute(base_query, params)
+            else:
+                cursor.execute(f"{base_query} LIMIT ?", [*params, limit])
+            rows = cursor.fetchall()
+        orders: List[Order] = []
+        for row in rows:
+            orders.append(Order(*row))
+        database_logger.debug(f"Loaded {len(orders)} orders for strategy {strategy_name}")
+        return orders
+
+    def get_strategy_daily_pnl(self, strategy_name: str) -> List[Dict[str, float]]:
+        """按天聚合指定策略的PNL数据"""
+        with self._cursor() as cursor:
             cursor.execute(
                 """
-                SELECT order_id, symbol, quantity, action, order_type, price,
-                       created_at as timestamp, exchange, sec_type,
-                       COALESCE(status, 'Submitted') as status,
-                       executed_at,
-                       rule_id,
-                       COALESCE(order_source, 'auto') as order_source,
-                       commission,
-                       pnl
+                SELECT substr(COALESCE(executed_at, created_at), 1, 10) AS trade_day,
+                       SUM(pnl) AS total_pnl
                 FROM orders
-                WHERE strategy_name = ? AND order_source = ?
-                ORDER BY created_at DESC
-                LIMIT ?
+                WHERE strategy_name = ?
+                  AND is_deleted = 0
+                  AND pnl IS NOT NULL
+                GROUP BY trade_day
+                ORDER BY trade_day
                 """,
-                (strategy_name, order_source, limit),
+                (strategy_name,),
             )
             rows = cursor.fetchall()
-            orders: List[Order] = []
-            for row in rows:
-                orders.append(Order(*row))
-            database_logger.debug(f"Loaded {len(orders)} orders for strategy {strategy_name}")
-            return orders
 
-    def delete_strategy_orders(self, strategy_name: str, order_source: str = 'strategy') -> int:
-        """删除指定策略的订单记录"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "DELETE FROM orders WHERE strategy_name = ? AND order_source = ?",
-                (strategy_name, order_source),
+        results: List[Dict[str, float]] = []
+        for day, pnl_value in rows:
+            if not day:
+                continue
+            try:
+                pnl_float = float(pnl_value) if pnl_value is not None else 0.0
+            except (TypeError, ValueError):
+                pnl_float = 0.0
+            results.append({"date": day, "pnl": pnl_float})
+
+        database_logger.debug(
+            f"Loaded {len(results)} aggregated pnl rows for strategy {strategy_name}"
+        )
+        return results
+
+    def get_strategy_order_stats(
+        self,
+        strategy_names: Optional[Sequence[str]] = None,
+        order_source: str = 'strategy',
+    ) -> Dict[str, Dict[str, Any]]:
+        """获取策略订单的数量和最近触发时间"""
+        with self._cursor() as cursor:
+            query = (
+                "SELECT strategy_name, COUNT(*) AS order_count, MAX(created_at) AS last_created_at "
+                "FROM orders WHERE order_source = ? AND is_deleted = 0"
             )
-            deleted = cursor.rowcount
-            conn.commit()
-            database_logger.info(f"Deleted {deleted} orders for strategy: {strategy_name}")
-            return deleted
+            params: List[Any] = [order_source]
+
+            if strategy_names:
+                placeholders = ",".join(["?"] * len(strategy_names))
+                query += f" AND strategy_name IN ({placeholders})"
+                params.extend(strategy_names)
+
+            query += " GROUP BY strategy_name"
+            cursor.execute(query, params)
+
+            stats: Dict[str, Dict[str, Any]] = {}
+            for name, count, last_created_at in cursor.fetchall():
+                stats[name] = {
+                    "order_count": int(count or 0),
+                    "last_created_at": last_created_at,
+                }
+
+            if strategy_names:
+                for name in strategy_names:
+                    stats.setdefault(
+                        name,
+                        {"order_count": 0, "last_created_at": None},
+                    )
+
+            database_logger.debug(
+                f"Loaded order stats for {len(stats)} strategies (source={order_source})"
+            )
+            return stats
+
+    def delete_strategy_orders(
+        self,
+        strategy_name: str,
+        order_source: Optional[Union[str, Sequence[str]]] = 'strategy',
+    ) -> int:
+        """删除指定策略的订单记录
+
+        Args:
+            strategy_name: 策略名称。
+            order_source: 订单来源。可以是单个来源、来源列表/序列，或 None 表示删除该策略的所有来源记录。
+        """
+        with self._cursor() as cursor:
+            params: List[Any] = [strategy_name]
+            if order_source is None:
+                query = "DELETE FROM orders WHERE strategy_name = ?"
+            elif isinstance(order_source, (list, tuple, set)):
+                sources = list(order_source)
+                if not sources:
+                    return 0
+                placeholders = ",".join(["?"] * len(sources))
+                query = f"DELETE FROM orders WHERE strategy_name = ? AND order_source IN ({placeholders})"
+                params.extend(sources)
+            else:
+                query = "DELETE FROM orders WHERE strategy_name = ? AND order_source = ?"
+                params.append(order_source)
+
+            cursor.execute(query, params)
+            deleted = cursor.rowcount or 0
+            if order_source is None:
+                source_desc = 'all sources'
+            elif isinstance(order_source, (list, tuple, set)):
+                source_desc = ','.join(map(str, order_source))
+            else:
+                source_desc = str(order_source)
+            database_logger.info(
+                f"Deleted {deleted} orders for strategy: {strategy_name} (source={source_desc})"
+            )
+            return int(deleted)
     
     # 历史数据相关方法
     def save_historical_data(self, symbol: str, data: pd.DataFrame, bar_size: str = "1 day"):
         """保存历史数据"""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connection() as conn:
             # 重置索引确保存在 date/time 或 timestamp
             if 'date' not in data.columns and 'timestamp' in data.columns:
                 try:
@@ -563,35 +915,37 @@ class DatabaseManager:
 
             cols = required_columns
             cur = conn.cursor()
-            cur.execute("PRAGMA table_info('historical_data')")
-            table_cols = [row[1] for row in cur.fetchall()]
-            missing = [c for c in cols if c not in table_cols]
-            if missing:
-                # 在极端情况下，按需添加缺失列
-                for c in missing:
-                    coltype = 'TEXT' if c in ['symbol','date','time','interval'] else 'REAL'
-                    if c in ['volume']:
-                        coltype = 'INTEGER'
-                    cur.execute(f"ALTER TABLE historical_data ADD COLUMN {c} {coltype}")
+            try:
+                cur.execute("PRAGMA table_info('historical_data')")
+                table_cols = [row[1] for row in cur.fetchall()]
+                missing = [c for c in cols if c not in table_cols]
+                if missing:
+                    # 在极端情况下，按需添加缺失列
+                    for c in missing:
+                        coltype = 'TEXT' if c in ['symbol','date','time','interval'] else 'REAL'
+                        if c in ['volume']:
+                            coltype = 'INTEGER'
+                        cur.execute(f"ALTER TABLE historical_data ADD COLUMN {c} {coltype}")
 
-            # 使用插入或忽略的方式写入，利用UNIQUE(symbol,date,time,interval)
-            insert_sql = (
-                "INSERT OR IGNORE INTO historical_data "
-                "(symbol, date, time, open, high, low, close, volume, interval, adj_close) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-            )
-            rows = [(
-                row['symbol'], str(row['date']), (None if pd.isna(row['time']) else str(row['time'])),
-                float(row['open']) if pd.notna(row['open']) else None,
-                float(row['high']) if pd.notna(row['high']) else None,
-                float(row['low']) if pd.notna(row['low']) else None,
-                float(row['close']) if pd.notna(row['close']) else None,
-                int(row['volume']) if pd.notna(row['volume']) else 0,
-                row['interval'],
-                float(row['adj_close']) if pd.notna(row['adj_close']) else None
-            ) for _, row in data.iterrows()]
-            cur.executemany(insert_sql, rows)
-            conn.commit()
+                # 使用插入或忽略的方式写入，利用UNIQUE(symbol,date,time,interval)
+                insert_sql = (
+                    "INSERT OR IGNORE INTO historical_data "
+                    "(symbol, date, time, open, high, low, close, volume, interval, adj_close) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                )
+                rows = [(
+                    row['symbol'], str(row['date']), (None if pd.isna(row['time']) else str(row['time'])),
+                    float(row['open']) if pd.notna(row['open']) else None,
+                    float(row['high']) if pd.notna(row['high']) else None,
+                    float(row['low']) if pd.notna(row['low']) else None,
+                    float(row['close']) if pd.notna(row['close']) else None,
+                    int(row['volume']) if pd.notna(row['volume']) else 0,
+                    row['interval'],
+                    float(row['adj_close']) if pd.notna(row['adj_close']) else None
+                ) for _, row in data.iterrows()]
+                cur.executemany(insert_sql, rows)
+            finally:
+                cur.close()
             database_logger.debug(f"Historical data saved for {symbol}: {len(rows)} records (interval={interval})")
 
     def _normalize_interval(self, bar_size: str) -> str:
@@ -613,7 +967,7 @@ class DatabaseManager:
 
     def query_historical_cache(self, symbol: str, interval: str, start_dt: Optional[str] = None, end_dt: Optional[str] = None) -> pd.DataFrame:
         """按interval查询缓存。interval: '1d'或'1m'等。start_dt/end_dt为ISO字符串。"""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connection() as conn:
             where = ["symbol = ?", "interval = ?"]
             params: list = [symbol, interval]
             if interval.endswith('d'):
@@ -648,62 +1002,96 @@ class DatabaseManager:
             have_start = pd.to_datetime(have_df['date'].iloc[0])
             have_end = pd.to_datetime(have_df['date'].iloc[-1])
         else:
-            have_start = pd.to_datetime(have_df['date'].iloc[0] + 'T' + (have_df['time'].iloc[0] or '00:00:00'))
-            have_end = pd.to_datetime(have_df['date'].iloc[-1] + 'T' + (have_df['time'].iloc[-1] or '23:59:59'))
-        need_start = pd.to_datetime(start_dt)
-        need_end = pd.to_datetime(end_dt)
+            have_start = pd.to_datetime(
+                have_df['date'].iloc[0]
+                + 'T'
+                + (have_df['time'].iloc[0] or '00:00:00')
+            )
+            have_end = pd.to_datetime(
+                have_df['date'].iloc[-1]
+                + 'T'
+                + (have_df['time'].iloc[-1] or '23:59:59')
+            )
+
+        have_start = ensure_local_timezone(have_start.to_pydatetime())
+        have_end = ensure_local_timezone(have_end.to_pydatetime())
+        need_start = ensure_local_timezone(pd.to_datetime(start_dt).to_pydatetime())
+        need_end = ensure_local_timezone(pd.to_datetime(end_dt).to_pydatetime())
         # 若需求范围不在已有范围内，则认为缺失
         return need_start < have_start or need_end > have_end
     
     def load_historical_data(self, symbol: str, bar_size: str = "1 day") -> pd.DataFrame:
-        """加载历史数据"""
-        with sqlite3.connect(self.db_path) as conn:
-            query = """
-                SELECT timestamp, open, high, low, close, volume 
-                FROM historical_data 
-                WHERE symbol = ? AND bar_size = ? 
-                ORDER BY timestamp
-            """
-            df = pd.read_sql_query(query, conn, params=(symbol, bar_size))
-            
-            if not df.empty:
-                df['timestamp'] = pd.to_datetime(df['timestamp'])
-                df.set_index('timestamp', inplace=True)
-            
-            database_logger.debug(f"Loaded historical data for {symbol}: {len(df)} records")
-            return df
+        """加载历史数据（兼容新schema，使用date/time/interval列）。"""
+
+        interval = self._normalize_interval(bar_size)
+        with self._connection() as conn:
+            if interval.endswith("d"):
+                query = (
+                    "SELECT date, open, high, low, close, volume, adj_close "
+                    "FROM historical_data "
+                    "WHERE symbol = ? AND interval = ? "
+                    "ORDER BY date"
+                )
+            else:
+                query = (
+                    "SELECT date, time, open, high, low, close, volume, adj_close "
+                    "FROM historical_data "
+                    "WHERE symbol = ? AND interval = ? "
+                    "ORDER BY date, time"
+                )
+
+            df = pd.read_sql_query(query, conn, params=(symbol, interval))
+
+        if not df.empty:
+            if interval.endswith("d"):
+                df["timestamp"] = pd.to_datetime(df["date"], errors="coerce")
+            else:
+                times = df.get("time")
+                if times is None:
+                    times = "00:00:00"
+                else:
+                    times = times.fillna("00:00:00")
+                df["timestamp"] = pd.to_datetime(
+                    df["date"].astype(str) + " " + times.astype(str), errors="coerce"
+                )
+
+            df = df[df["timestamp"].notna()].copy()
+            df.set_index("timestamp", inplace=True)
+            df.drop(columns=[col for col in ("date", "time") if col in df.columns], inplace=True)
+
+        database_logger.debug(
+            f"Loaded historical data for {symbol}: {len(df)} records (interval={interval})"
+        )
+        return df
     
     # 策略设置相关方法
     # 旧的策略设置方法已删除，请使用 save_strategy_config 和 load_strategy_config
 
-    def save_sizing_history(self, symbol: str, action: str, suggested_quantity: int, 
+    def save_sizing_history(self, symbol: str, action: str, suggested_quantity: int,
                            current_price: float = None, account_value: float = None,
                            position_size: float = None, risk_percent: float = None,
                            sizing_method: str = "default", calculation_details: str = None,
                            g_rules_checked: str = None):
         """保存仓位计算历史"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            timestamp = datetime.now().isoformat()
-            
+        with self._cursor() as cursor:
+            timestamp = now_local().isoformat()
+
             cursor.execute(
                 """
-                INSERT INTO sizing_history 
-                (symbol, action, suggested_quantity, current_price, account_value, 
+                INSERT INTO sizing_history
+                (symbol, action, suggested_quantity, current_price, account_value,
                  position_size, risk_percent, sizing_method, calculation_details, g_rules_checked, timestamp)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (symbol, action, suggested_quantity, current_price, account_value,
                  position_size, risk_percent, sizing_method, calculation_details, g_rules_checked, timestamp)
             )
-            conn.commit()
             database_logger.debug(f"Sizing history saved for {symbol}: {suggested_quantity} shares")
 
     def load_sizing_history(self, symbol: str = None, since: str = None, limit: int = 100) -> List[Dict[str, Any]]:
         """加载仓位计算历史"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            
+        with self._cursor() as cursor:
+
             # 构建查询条件
             conditions = []
             params = []
@@ -721,15 +1109,15 @@ class DatabaseManager:
             query = f"""
                 SELECT symbol, action, suggested_quantity, current_price, account_value,
                        position_size, risk_percent, sizing_method, calculation_details, g_rules_checked, timestamp
-                FROM sizing_history 
+                FROM sizing_history
                 {where_clause}
                 ORDER BY timestamp DESC
                 LIMIT ?
             """
-            
+
             params.append(limit)
             cursor.execute(query, params)
-            
+
             rows = cursor.fetchall()
             history = []
             for row in rows:
@@ -764,26 +1152,23 @@ class DatabaseManager:
     def save_notification_history(self, channel: str, event_type: str, message: str, 
                                  status: str = 'pending', error_message: str = None):
         """保存通知历史"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            now = datetime.now().isoformat()
+        with self._cursor() as cursor:
+            now = now_local().isoformat()
             sent_at = now if status == 'sent' else None
-            
+
             cursor.execute("""
-                INSERT INTO notification_history 
+                INSERT INTO notification_history
                 (channel, event_type, message, status, error_message, sent_at, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             """, (channel, event_type, message, status, error_message, sent_at, now))
-            
-            conn.commit()
+
             database_logger.debug(f"Notification history saved: {channel} - {event_type}")
     
-    def load_notification_history(self, channel: str = None, status: str = None, 
+    def load_notification_history(self, channel: str = None, status: str = None,
                                  since: str = None, limit: int = 100) -> List[Dict[str, Any]]:
         """加载通知历史"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            
+        with self._cursor() as cursor:
+
             # 构建查询条件
             conditions = []
             params = []
@@ -813,7 +1198,7 @@ class DatabaseManager:
             
             params.append(limit)
             cursor.execute(query, params)
-            
+
             rows = cursor.fetchall()
             
             history = []
@@ -831,19 +1216,27 @@ class DatabaseManager:
             
             database_logger.debug(f"Loaded notification history: {len(history)} records")
             return history
-    
-    def update_notification_status(self, notification_id: int, status: str, 
+
+    def clear_notification_history(self) -> int:
+        """清空通知历史记录"""
+        with self._cursor() as cursor:
+            cursor.execute("DELETE FROM notification_history")
+            deleted = cursor.rowcount or 0
+
+        database_logger.info(f"Cleared {deleted} notification history records")
+        return deleted
+
+    def update_notification_status(self, notification_id: int, status: str,
                                   error_message: str = None, retry_count: int = None):
         """更新通知状态"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            
+        with self._cursor() as cursor:
+
             updates = ["status = ?"]
             params = [status]
             
             if status == 'sent':
                 updates.append("sent_at = ?")
-                params.append(datetime.now().isoformat())
+                params.append(now_local().isoformat())
             
             if error_message is not None:
                 updates.append("error_message = ?")
@@ -857,16 +1250,14 @@ class DatabaseManager:
             
             query = f"UPDATE notification_history SET {', '.join(updates)} WHERE id = ?"
             cursor.execute(query, params)
-            
-            conn.commit()
+
             database_logger.debug(f"Notification status updated: {notification_id} -> {status}")
     
     # Config表相关方法
     def save_config(self, config_key: str, config_value: Any, description: str = None):
         """保存配置"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            timestamp = datetime.now().isoformat()
+        with self._cursor() as cursor:
+            timestamp = now_local().isoformat()
             
             # 将配置值转换为JSON字符串
             if isinstance(config_value, (dict, list)):
@@ -876,15 +1267,14 @@ class DatabaseManager:
             
             cursor.execute(
                 """
-                INSERT OR REPLACE INTO config 
+                INSERT OR REPLACE INTO config
                 (config_key, config_value, description, created_at, updated_at)
-                VALUES (?, ?, ?, 
+                VALUES (?, ?, ?,
                     COALESCE((SELECT created_at FROM config WHERE config_key = ?), ?),
                     ?)
                 """,
                 (config_key, value_str, description, config_key, timestamp, timestamp)
             )
-            conn.commit()
             database_logger.debug(f"Config saved: {config_key}")
     
     def save_notification_config(self, settings: Dict[str, Any]):
@@ -897,7 +1287,21 @@ class DatabaseManager:
         config = self.get_config('notification_settings', {})
         database_logger.debug(f"Loaded notification config from config table: {list(config.keys()) if config else 'empty'}")
         return config
-    
+
+    def save_dom_config(self, settings: Dict[str, Any]):
+        """保存DOM设置到config表"""
+        self.save_config('dom_config', settings, 'DOM configuration settings')
+        database_logger.debug("DOM config saved to config table")
+
+    def load_dom_config(self) -> Dict[str, Any]:
+        """从config表加载DOM设置"""
+        config = self.get_config('dom_config', {})
+        database_logger.debug(
+            "Loaded DOM config from config table: {}",
+            list(config.keys()) if isinstance(config, dict) else 'empty'
+        )
+        return config if isinstance(config, dict) else {}
+
     def save_strategy_config(self, settings: Dict[str, Any]):
         """保存策略配置到config表"""
         self.save_config('strategy_settings', settings, 'Strategy configuration settings')
@@ -911,49 +1315,46 @@ class DatabaseManager:
     
     def get_config(self, config_key: str, default_value: Any = None) -> Any:
         """获取配置"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
+        with self._cursor() as cursor:
             cursor.execute(
                 "SELECT config_value FROM config WHERE config_key = ?",
-                (config_key,)
+                (config_key,),
             )
             row = cursor.fetchone()
-            
-            if row is None:
-                return default_value
-            
-            try:
-                # 尝试解析JSON
-                return json.loads(row[0])
-            except json.JSONDecodeError:
-                # 如果不是JSON，返回原始字符串
-                return row[0]
-    
+
+        if row is None:
+            return default_value
+
+        try:
+            # 尝试解析JSON
+            return json.loads(row[0])
+        except json.JSONDecodeError:
+            # 如果不是JSON，返回原始字符串
+            return row[0]
+
     def get_all_configs(self) -> Dict[str, Any]:
         """获取所有配置"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
+        with self._cursor() as cursor:
             cursor.execute(
                 "SELECT config_key, config_value FROM config ORDER BY config_key"
             )
             rows = cursor.fetchall()
-            
-            configs = {}
-            for config_key, config_value in rows:
-                try:
-                    configs[config_key] = json.loads(config_value)
-                except json.JSONDecodeError:
-                    configs[config_key] = config_value
-            
-            return configs
-    
+
+        configs = {}
+        for config_key, config_value in rows:
+            try:
+                configs[config_key] = json.loads(config_value)
+            except json.JSONDecodeError:
+                configs[config_key] = config_value
+
+        return configs
+
     def delete_config(self, config_key: str):
         """删除配置"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
+        with self._cursor() as cursor:
             cursor.execute("DELETE FROM config WHERE config_key = ?", (config_key,))
-            conn.commit()
             database_logger.debug(f"Config deleted: {config_key}")
+
 
 # 全局数据库实例
 db_manager = None

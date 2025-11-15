@@ -5,6 +5,9 @@
 class LoginManager {
     constructor(app) {
         this.app = app;
+        this._pendingReadOnlyUpdate = null;
+        this._readOnlyRetryTimer = null;
+        this._readOnlyRetryAttempts = 0;
         this.init();
     }
 
@@ -14,6 +17,111 @@ class LoginManager {
     init() {
         this.bindEventListeners();
         this.toggleAuthButtons(!!localStorage.getItem('access_token'));
+        const storedRole = localStorage.getItem('user_role') || 'admin';
+        const isReadOnly = localStorage.getItem('is_read_only') === '1';
+        this.applyReadOnlyMode(isReadOnly, storedRole, { persist: false });
+    }
+
+    /**
+     * 安全地更新应用的只读模式状态
+     * 如果 TradingApp 尚未暴露 updateReadOnlyMode，则执行降级处理并重试
+     */
+    applyReadOnlyMode(isReadOnly, role = 'admin', options = {}) {
+        if (this.app && typeof this.app.updateReadOnlyMode === 'function') {
+            this.clearReadOnlyRetry();
+            this._pendingReadOnlyUpdate = null;
+            this.app.updateReadOnlyMode(isReadOnly, role, options);
+            return;
+        }
+
+        const update = {
+            isReadOnly: !!isReadOnly,
+            role,
+            options
+        };
+        this._pendingReadOnlyUpdate = update;
+        this.syncReadOnlyFallback(update);
+        this.scheduleReadOnlyRetry();
+    }
+
+    /**
+     * 当 updateReadOnlyMode 暂不可用时同步本地状态和 UI
+     */
+    syncReadOnlyFallback(update) {
+        if (!update) return;
+
+        const { isReadOnly, role, options } = update;
+        const persist = options?.persist !== false;
+        const normalizedRole = role || (isReadOnly ? 'visitor' : 'admin');
+
+        if (this.app) {
+            this.app.isReadOnly = !!isReadOnly;
+            this.app.authRole = normalizedRole;
+        }
+
+        if (persist) {
+            if (isReadOnly) {
+                localStorage.setItem('is_read_only', '1');
+            } else {
+                localStorage.removeItem('is_read_only');
+            }
+            if (role) {
+                localStorage.setItem('user_role', role);
+            } else {
+                localStorage.removeItem('user_role');
+            }
+        }
+
+        if (typeof document !== 'undefined' && document.body) {
+            document.body.classList.toggle('read-only-mode', !!isReadOnly);
+            const badge = document.getElementById('authRoleBadge');
+            if (badge) {
+                if (isReadOnly) {
+                    badge.classList.remove('d-none');
+                    badge.innerHTML = '<i class="fas fa-user-shield me-1"></i>Visitor Read Only';
+                } else if (role && role.toLowerCase() !== 'admin') {
+                    badge.classList.remove('d-none');
+                    badge.innerHTML = `<i class="fas fa-user me-1"></i>${role}`;
+                } else {
+                    badge.classList.add('d-none');
+                    badge.textContent = '';
+                }
+            }
+            const banner = document.getElementById('readOnlyBanner');
+            if (banner) {
+                banner.classList.toggle('d-none', !isReadOnly);
+            }
+        }
+    }
+
+    /**
+     * 安排重试，等待 TradingApp 初始化完成
+     */
+    scheduleReadOnlyRetry() {
+        if (this._readOnlyRetryTimer) return;
+        if (this._readOnlyRetryAttempts >= 20) return;
+
+        const schedule = typeof window !== 'undefined'
+            ? window.setTimeout.bind(window)
+            : setTimeout;
+        this._readOnlyRetryTimer = schedule(() => {
+            this._readOnlyRetryTimer = null;
+            this._readOnlyRetryAttempts += 1;
+            const pending = this._pendingReadOnlyUpdate;
+            if (!pending) return;
+            this.applyReadOnlyMode(pending.isReadOnly, pending.role, pending.options);
+        }, 200);
+    }
+
+    /**
+     * 清理重试状态
+     */
+    clearReadOnlyRetry() {
+        if (this._readOnlyRetryTimer) {
+            clearTimeout(this._readOnlyRetryTimer);
+            this._readOnlyRetryTimer = null;
+        }
+        this._readOnlyRetryAttempts = 0;
     }
 
     /**
@@ -71,8 +179,19 @@ class LoginManager {
             
             if (res?.access_token) {
                 localStorage.setItem('access_token', res.access_token);
+                if (res.role) {
+                    localStorage.setItem('user_role', res.role);
+                } else {
+                    localStorage.removeItem('user_role');
+                }
+                if (res.is_read_only) {
+                    localStorage.setItem('is_read_only', '1');
+                } else {
+                    localStorage.removeItem('is_read_only');
+                }
                 this.toggleAuthButtons(true);
-                
+                this.applyReadOnlyMode(!!res.is_read_only, res.role || 'admin');
+
                 const modalEl = document.getElementById('loginModal');
                 const modal = bootstrap.Modal.getInstance(modalEl);
                 if (modal) modal.hide();
@@ -91,13 +210,17 @@ class LoginManager {
      * 登录成功后的处理
      */
     onLoginSuccess() {
+        if (this.app && typeof this.app.initializeAuthenticatedModules === 'function') {
+            try {
+                this.app.initializeAuthenticatedModules({ force: true });
+            } catch (error) {
+                console.error('Failed to initialize authenticated modules after login:', error);
+            }
+        }
+
         // 检查连接状态
         this.app.ibkrManager.checkConnectionStatus();
-        
-        // 加载基础数据
-        this.app.strategiesManager.loadStrategies();
-        this.app.loadLogs();
-        
+
         // 只在连接成功后加载需要IB连接的数据
         if (this.app.connected) {
             this.app.loadOrders();
@@ -128,12 +251,31 @@ class LoginManager {
             
             if (res?.access_token) {
                 localStorage.setItem('access_token', res.access_token);
+                if (res.role) {
+                    localStorage.setItem('user_role', res.role);
+                } else {
+                    localStorage.removeItem('user_role');
+                }
+                if (res.is_read_only) {
+                    localStorage.setItem('is_read_only', '1');
+                } else {
+                    localStorage.removeItem('is_read_only');
+                }
                 this.toggleAuthButtons(true);
-                
+                this.applyReadOnlyMode(!!res.is_read_only, res.role || localStorage.getItem('user_role') || 'admin');
+
                 await this.app.ensureDefaultConnectionConfig();
-                
+
                 // 自动连接使用保存的连接设置
                 await this.tryAutoConnect(connectTimeout, connectRetries);
+
+                if (this.app && typeof this.app.initializeAuthenticatedModules === 'function') {
+                    try {
+                        this.app.initializeAuthenticatedModules({ force: true });
+                    } catch (error) {
+                        console.error('Failed to initialize authenticated modules after auto login:', error);
+                    }
+                }
             }
         } catch (e) {
             console.warn('Auto login failed:', e);
@@ -194,7 +336,17 @@ class LoginManager {
      */
     logout() {
         localStorage.removeItem('access_token');
+        localStorage.removeItem('is_read_only');
+        localStorage.removeItem('user_role');
         this.toggleAuthButtons(false);
+        this.applyReadOnlyMode(false, 'admin');
+        if (this.app && typeof this.app.handleLogout === 'function') {
+            try {
+                this.app.handleLogout();
+            } catch (error) {
+                console.error('Failed to handle logout:', error);
+            }
+        }
         this.app.showAlert('info', '已退出登录');
     }
 
