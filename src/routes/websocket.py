@@ -1122,7 +1122,8 @@ class StrategyStatusStreamer:
             )
 
     async def _run(self) -> None:
-        backoff = 1.0
+        connection_backoff = 1.0
+        consume_backoff = 1.0
         while self._running:
             try:
                 redis = await get_redis_client()
@@ -1130,21 +1131,23 @@ class StrategyStatusStreamer:
                 logger.debug(
                     "Failed to initialise Redis client for strategy stream", error=str(exc)
                 )
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 30.0)
+                await asyncio.sleep(connection_backoff)
+                connection_backoff = min(connection_backoff * 2, 30.0)
                 continue
 
-            backoff = 1.0
+            connection_backoff = 1.0
 
             try:
                 await self._consume(redis)
+                consume_backoff = 1.0
             except asyncio.CancelledError:  # pragma: no cover - cooperative shutdown
                 raise
             except Exception as exc:  # pragma: no cover - defensive logging
                 logger.debug(
                     "Strategy status streamer encountered an error", error=str(exc)
                 )
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(consume_backoff)
+                consume_backoff = min(consume_backoff * 2, 30.0)
 
     async def _consume(self, redis) -> None:
         last_id = self._last_id or "$"
